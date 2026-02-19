@@ -21,21 +21,27 @@ cargo install --path .
 
 ### Shell setup
 
-Add to your shell configuration:
+Add to your shell configuration. This installs both the shell wrapper function
+(needed for `eval`-based credential export) and tab completions:
 
 **Bash** (`~/.bashrc`):
 ```bash
-eval "$(awswit --completion bash)"
+eval "$(command awswit --completion bash)"
 ```
 
 **Zsh** (`~/.zshrc`):
 ```bash
-eval "$(awswit --completion zsh)"
+eval "$(command awswit --completion zsh)"
 ```
 
 **Fish** (`~/.config/fish/config.fish`):
 ```fish
-awswit --completion fish | source
+command awswit --completion fish | source
+```
+
+**PowerShell** (`$PROFILE`):
+```powershell
+Invoke-Expression (& awswit --completion powershell)
 ```
 
 ## Usage

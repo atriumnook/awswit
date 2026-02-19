@@ -1,5 +1,23 @@
 use crate::aws::credentials::Credentials;
 
+/// Escape a value for use in Bash/Zsh export commands.
+/// Wraps in single quotes and handles embedded single quotes via: '\''
+fn shell_escape_posix(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Escape a value for use in Fish shell set commands.
+/// Wraps in single quotes and escapes backslashes and single quotes.
+fn shell_escape_fish(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// Escape a value for use in PowerShell single-quoted strings.
+/// Single quotes are doubled inside PowerShell single-quoted strings.
+fn shell_escape_powershell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 /// Supported shell types
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellType {
@@ -53,70 +71,118 @@ pub fn generate_export_commands(
         ShellType::Bash | ShellType::Zsh => {
             lines.push(format!(
                 "export AWS_ACCESS_KEY_ID={}",
-                creds.access_key_id
+                shell_escape_posix(&creds.access_key_id)
             ));
             lines.push(format!(
                 "export AWS_SECRET_ACCESS_KEY={}",
-                creds.secret_access_key
+                shell_escape_posix(&creds.secret_access_key)
             ));
             if let Some(ref token) = creds.session_token {
-                lines.push(format!("export AWS_SESSION_TOKEN={}", token));
+                lines.push(format!(
+                    "export AWS_SESSION_TOKEN={}",
+                    shell_escape_posix(token)
+                ));
             } else {
                 lines.push("unset AWS_SESSION_TOKEN".to_string());
             }
             if let Some(ref region) = creds.region {
-                lines.push(format!("export AWS_REGION={}", region));
-                lines.push(format!("export AWS_DEFAULT_REGION={}", region));
+                lines.push(format!(
+                    "export AWS_REGION={}",
+                    shell_escape_posix(region)
+                ));
+                lines.push(format!(
+                    "export AWS_DEFAULT_REGION={}",
+                    shell_escape_posix(region)
+                ));
             }
-            lines.push(format!("export AWSWIT_PROFILE={}", profile_name));
+            lines.push(format!(
+                "export AWSWIT_PROFILE={}",
+                shell_escape_posix(profile_name)
+            ));
             if let Some(ref exp) = creds.expiration {
-                lines.push(format!("export AWSWIT_EXPIRATION={}", exp.to_rfc3339()));
+                lines.push(format!(
+                    "export AWSWIT_EXPIRATION={}",
+                    shell_escape_posix(&exp.to_rfc3339())
+                ));
             }
         }
         ShellType::Fish => {
             lines.push(format!(
                 "set -gx AWS_ACCESS_KEY_ID {}",
-                creds.access_key_id
+                shell_escape_fish(&creds.access_key_id)
             ));
             lines.push(format!(
                 "set -gx AWS_SECRET_ACCESS_KEY {}",
-                creds.secret_access_key
+                shell_escape_fish(&creds.secret_access_key)
             ));
             if let Some(ref token) = creds.session_token {
-                lines.push(format!("set -gx AWS_SESSION_TOKEN {}", token));
+                lines.push(format!(
+                    "set -gx AWS_SESSION_TOKEN {}",
+                    shell_escape_fish(token)
+                ));
             } else {
                 lines.push("set -e AWS_SESSION_TOKEN".to_string());
             }
             if let Some(ref region) = creds.region {
-                lines.push(format!("set -gx AWS_REGION {}", region));
-                lines.push(format!("set -gx AWS_DEFAULT_REGION {}", region));
+                lines.push(format!(
+                    "set -gx AWS_REGION {}",
+                    shell_escape_fish(region)
+                ));
+                lines.push(format!(
+                    "set -gx AWS_DEFAULT_REGION {}",
+                    shell_escape_fish(region)
+                ));
             }
-            lines.push(format!("set -gx AWSWIT_PROFILE {}", profile_name));
+            lines.push(format!(
+                "set -gx AWSWIT_PROFILE {}",
+                shell_escape_fish(profile_name)
+            ));
             if let Some(ref exp) = creds.expiration {
-                lines.push(format!("set -gx AWSWIT_EXPIRATION {}", exp.to_rfc3339()));
+                lines.push(format!(
+                    "set -gx AWSWIT_EXPIRATION {}",
+                    shell_escape_fish(&exp.to_rfc3339())
+                ));
             }
         }
         ShellType::PowerShell => {
             lines.push(format!(
-                "$env:AWS_ACCESS_KEY_ID = '{}'",
-                creds.access_key_id
+                "$env:AWS_ACCESS_KEY_ID = {}",
+                shell_escape_powershell(&creds.access_key_id)
             ));
             lines.push(format!(
-                "$env:AWS_SECRET_ACCESS_KEY = '{}'",
-                creds.secret_access_key
+                "$env:AWS_SECRET_ACCESS_KEY = {}",
+                shell_escape_powershell(&creds.secret_access_key)
             ));
             if let Some(ref token) = creds.session_token {
-                lines.push(format!("$env:AWS_SESSION_TOKEN = '{}'", token));
+                lines.push(format!(
+                    "$env:AWS_SESSION_TOKEN = {}",
+                    shell_escape_powershell(token)
+                ));
             } else {
-                lines.push("Remove-Item Env:\\AWS_SESSION_TOKEN -ErrorAction SilentlyContinue".to_string());
+                lines.push(
+                    "Remove-Item Env:\\AWS_SESSION_TOKEN -ErrorAction SilentlyContinue"
+                        .to_string(),
+                );
             }
             if let Some(ref region) = creds.region {
-                lines.push(format!("$env:AWS_REGION = '{}'", region));
-                lines.push(format!("$env:AWS_DEFAULT_REGION = '{}'", region));
+                lines.push(format!(
+                    "$env:AWS_REGION = {}",
+                    shell_escape_powershell(region)
+                ));
+                lines.push(format!(
+                    "$env:AWS_DEFAULT_REGION = {}",
+                    shell_escape_powershell(region)
+                ));
             }
-            lines.push(format!("$env:AWSWIT_PROFILE = '{}'", profile_name));
+            lines.push(format!(
+                "$env:AWSWIT_PROFILE = {}",
+                shell_escape_powershell(profile_name)
+            ));
             if let Some(ref exp) = creds.expiration {
-                lines.push(format!("$env:AWSWIT_EXPIRATION = '{}'", exp.to_rfc3339()));
+                lines.push(format!(
+                    "$env:AWSWIT_EXPIRATION = {}",
+                    shell_escape_powershell(&exp.to_rfc3339())
+                ));
             }
         }
     }
@@ -217,22 +283,44 @@ mod tests {
     #[test]
     fn test_bash_export() {
         let output = generate_export_commands(&test_creds(), "dev", &ShellType::Bash);
-        assert!(output.contains("export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"));
-        assert!(output.contains("export AWS_REGION=us-east-1"));
-        assert!(output.contains("export AWSWIT_PROFILE=dev"));
+        assert!(output.contains("export AWS_ACCESS_KEY_ID='AKIAIOSFODNN7EXAMPLE'"));
+        assert!(output.contains("export AWS_REGION='us-east-1'"));
+        assert!(output.contains("export AWSWIT_PROFILE='dev'"));
     }
 
     #[test]
     fn test_fish_export() {
         let output = generate_export_commands(&test_creds(), "dev", &ShellType::Fish);
-        assert!(output.contains("set -gx AWS_ACCESS_KEY_ID AKIAIOSFODNN7EXAMPLE"));
-        assert!(output.contains("set -gx AWS_REGION us-east-1"));
+        assert!(output.contains("set -gx AWS_ACCESS_KEY_ID 'AKIAIOSFODNN7EXAMPLE'"));
+        assert!(output.contains("set -gx AWS_REGION 'us-east-1'"));
     }
 
     #[test]
     fn test_powershell_export() {
         let output = generate_export_commands(&test_creds(), "dev", &ShellType::PowerShell);
         assert!(output.contains("$env:AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'"));
+    }
+
+    #[test]
+    fn test_shell_escape_posix_special_chars() {
+        // Test that single quotes are escaped
+        assert_eq!(shell_escape_posix("it's a test"), "'it'\\''s a test'");
+        // Test normal values
+        assert_eq!(
+            shell_escape_posix("AKIAIOSFODNN7EXAMPLE"),
+            "'AKIAIOSFODNN7EXAMPLE'"
+        );
+    }
+
+    #[test]
+    fn test_shell_escape_fish_special_chars() {
+        assert_eq!(shell_escape_fish("it's a test"), "'it\\'s a test'");
+        assert_eq!(shell_escape_fish("back\\slash"), "'back\\\\slash'");
+    }
+
+    #[test]
+    fn test_shell_escape_powershell_special_chars() {
+        assert_eq!(shell_escape_powershell("it's a test"), "'it''s a test'");
     }
 
     #[test]

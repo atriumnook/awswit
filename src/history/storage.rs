@@ -37,7 +37,14 @@ impl HistoryStorage {
             let content = std::fs::read_to_string(&path).map_err(|e| {
                 AwswitError::config_file_error(format!("Failed to read history: {}", e))
             })?;
-            serde_json::from_str(&content).unwrap_or_default()
+            serde_json::from_str(&content).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse history file {}: {}. Starting with empty history.",
+                    path.display(),
+                    e
+                );
+                HistoryData::default()
+            })
         } else {
             HistoryData::default()
         };

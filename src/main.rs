@@ -69,16 +69,17 @@ async fn main() {
 async fn run(args: Args) -> error::Result<()> {
     let awswit_config = AwswitConfig::load()?;
 
-    // Handle version display (clap handles this, but just in case)
-    // Handle completion generation
+    // Handle completion/init generation
+    // Outputs the shell wrapper function followed by completion script
+    // Users call: eval "$(awswit --completion bash)"
     if let Some(ref shell_name) = args.completion {
         let shell_type = ShellType::from_name(shell_name);
+        // Output the eval wrapper first so `eval "$(awswit --completion bash)"` works
+        println!("{}", shell::export::generate_shell_wrapper(&shell_type));
+        println!();
         println!("{}", shell::generate_completion(&shell_type));
         return Ok(());
     }
-
-    // Handle shell wrapper generation
-    // (Users call: eval "$(awswit --completion bash)")
 
     // Handle unset
     if args.unset {
@@ -132,8 +133,8 @@ async fn run(args: Args) -> error::Result<()> {
         // Create an ad-hoc profile for direct role ARN
         resolve_role_arn_profile(&args, role_arn, &profiles, &awswit_config).await?;
         return Ok(());
-    } else if !args.no_interactive && atty::is(atty::Stream::Stdin) {
-        // Launch interactive picker
+    } else if !args.no_interactive && atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stderr) {
+        // Launch interactive picker (requires both stdin for input and stderr for TUI rendering)
         let history = HistoryStorage::load()?;
         let mut picker = tui::Picker::new(
             profiles.clone(),

@@ -64,7 +64,7 @@ impl ProfileResolver {
         mfa_token: Option<&str>,
         depth: usize,
     ) -> Result<Credentials> {
-        if depth > MAX_ROLE_CHAIN_DEPTH {
+        if depth >= MAX_ROLE_CHAIN_DEPTH {
             return Err(AwswitError::role_chain_too_deep(format!(
                 "Chain depth exceeded {} for profile: {}",
                 MAX_ROLE_CHAIN_DEPTH, profile.name
@@ -225,13 +225,22 @@ impl ProfileResolver {
         .await
     }
 
-    /// Resolve a credential_process profile
+    /// Resolve a credential_process profile.
+    /// Uses direct argv execution to avoid shell injection risks.
     async fn resolve_credential_process(&self, profile: &Profile) -> Result<Credentials> {
         let command = profile.credential_process.as_ref().unwrap();
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        // Parse command into program + arguments using shell-style word splitting
+        let parts = shell_words_split(command)?;
+        if parts.is_empty() {
+            return Err(AwswitError::config_file_error(format!(
+                "Empty credential_process command for profile '{}'",
+                profile.name
+            )));
+        }
+
+        let output = tokio::process::Command::new(&parts[0])
+            .args(&parts[1..])
             .output()
             .await
             .map_err(|e| {
@@ -383,4 +392,56 @@ impl ProfileResolver {
         names.sort();
         names
     }
+}
+
+/// Split a command string into argv components, respecting quotes.
+/// This avoids passing untrusted strings through `sh -c`.
+fn shell_words_split(command: &str) -> Result<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape_next = false;
+
+    for ch in command.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single_quote => {
+                escape_next = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    if in_single_quote || in_double_quote {
+        return Err(AwswitError::config_file_error(format!(
+            "Unterminated quote in credential_process command: {}",
+            command
+        )));
+    }
+
+    Ok(parts)
 }

@@ -61,18 +61,21 @@ impl Picker {
     /// Run the interactive picker and return the selected profile name
     pub fn run(&mut self) -> Result<String> {
         enable_raw_mode()?;
-        let mut stdout = io::stderr();
-        stdout.execute(EnterAlternateScreen)?;
+        // Use a guard to ensure terminal state is always restored,
+        // even on errors or panics
+        let _cleanup = TerminalCleanupGuard;
 
-        let backend = CrosstermBackend::new(stdout);
+        let mut stderr = io::stderr();
+        stderr.execute(EnterAlternateScreen)?;
+
+        let backend = CrosstermBackend::new(stderr);
         let mut terminal = Terminal::new(backend)?;
 
         let result = self.event_loop(&mut terminal);
 
-        disable_raw_mode()?;
-        terminal
-            .backend_mut()
-            .execute(LeaveAlternateScreen)?;
+        // Explicit cleanup (guard also handles it on drop)
+        let _ = terminal.backend_mut().execute(LeaveAlternateScreen);
+        let _ = disable_raw_mode();
 
         result
     }
@@ -108,11 +111,19 @@ impl Picker {
                 }
                 PickerAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Up => {
                 self.move_selection(-1);
                 PickerAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Down => {
+                self.move_selection(1);
+                PickerAction::Continue
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(-1);
+                PickerAction::Continue
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(1);
                 PickerAction::Continue
             }
@@ -296,4 +307,15 @@ enum PickerAction {
     Continue,
     Select(String),
     Quit,
+}
+
+/// RAII guard that ensures terminal state is restored on drop.
+/// This handles cleanup even if the picker panics or returns early on error.
+struct TerminalCleanupGuard;
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = io::stderr().execute(LeaveAlternateScreen);
+    }
 }
