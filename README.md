@@ -2,6 +2,8 @@
 
 Fast AWS profile switcher with interactive TUI, written in Rust.
 
+[日本語](README.ja.md)
+
 ## Features
 
 - **Fast**: < 50ms startup time, Rust-native performance
