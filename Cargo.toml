@@ -1,0 +1,110 @@
+[package]
+name = "awswit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Your Name <your.email@example.com>"]
+description = "A fast, modern AWS profile switcher with interactive TUI"
+license = "MIT"
+repository = "https://github.com/yourusername/awswit"
+keywords = ["aws", "iam", "assume-role", "credentials", "cli"]
+categories = ["command-line-utilities", "authentication"]
+
+[[bin]]
+name = "awswit"
+path = "src/main.rs"
+
+[[bin]]
+name = "autoawswit"
+path = "src/bin/autoawswit.rs"
+
+[[bin]]
+name = "awswit-complete"
+path = "src/bin/autocomplete.rs"
+
+[dependencies]
+# AWS SDK - pinned to compatible versions
+aws-config = { version = "=1.1.1", features = ["behavior-version-latest"] }
+aws-sdk-sts = "=1.9.0"
+aws-credential-types = "=1.1.1"
+aws-types = "=1.1.1"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env", "string"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# INI file parsing
+configparser = "3.0"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Colored output
+colored = "2.0"
+
+# Directory paths
+dirs = "5.0"
+
+# Environment variables
+dotenvy = "0.15"
+
+# Process management
+sysinfo = "0.29"
+
+# Fuzzy matching
+strsim = "0.10"
+
+# Interactive prompts
+dialoguer = "0.11"
+
+# Modern TUI
+ratatui = { version = "0.25", features = ["crossterm"] }
+crossterm = "0.27"
+
+# Spinner and progress
+indicatif = "0.17"
+
+# Better console output
+console = "0.15"
+
+# Time formatting
+humantime = "2.1"
+
+# Terminal detection (using std::io::IsTerminal, stable since Rust 1.70)
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File locking
+fs2 = "0.4"
+
+# Shell detection
+shellexpand = "3.1"
+
+# UUID for session names
+uuid = { version = "1.6", features = ["v4"] }
+
+# Unix-specific
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.9"
+tokio-test = "0.4"
+strsim = "0.10"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
