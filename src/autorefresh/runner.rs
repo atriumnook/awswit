@@ -31,34 +31,71 @@ const MAX_BACKOFF_SECS: u64 = 600;
 /// Run the daemon main loop with graceful SIGTERM shutdown.
 pub async fn run_daemon_loop() {
     #[cfg(unix)]
-    run_daemon_loop_unix().await;
+    {
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to install SIGTERM handler, daemon will exit: {}",
+                        e
+                    );
+                    return;
+                }
+            };
+        run_daemon_loop_inner(Some(&mut sigterm)).await;
+    }
 
     #[cfg(not(unix))]
-    run_daemon_loop_fallback().await;
+    run_daemon_loop_inner().await;
 }
 
-#[cfg(unix)]
-async fn run_daemon_loop_unix() {
+/// Interruptible sleep that returns `false` if a SIGTERM was received.
+async fn interruptible_sleep(
+    duration: Duration,
+    #[cfg(unix)] sigterm: Option<&mut tokio::signal::unix::Signal>,
+) -> bool {
+    #[cfg(unix)]
+    if let Some(sig) = sigterm {
+        tokio::select! {
+            _ = sleep(duration) => return true,
+            _ = sig.recv() => {
+                tracing::info!("Received SIGTERM during sleep, shutting down");
+                return false;
+            }
+        }
+    }
+
+    sleep(duration).await;
+    true
+}
+
+/// Core daemon loop shared between unix and non-unix platforms.
+/// On unix, `sigterm` enables graceful SIGTERM shutdown.
+/// On non-unix, the daemon exits when all profiles are removed or after MAX_CONSECUTIVE_FAILURES.
+async fn run_daemon_loop_inner(
+    #[cfg(unix)] mut sigterm: Option<&mut tokio::signal::unix::Signal>,
+) {
     let mut consecutive_failures: u32 = 0;
     let mut backoff_secs = INITIAL_BACKOFF_SECS;
 
-    let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to install SIGTERM handler, daemon will exit: {}", e);
-            return;
-        }
-    };
-
     loop {
-        let refresh_result = tokio::select! {
-            result = refresh_all_profiles() => Some(result),
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, shutting down gracefully");
-                None
+        // Refresh all profiles, with optional SIGTERM interruption
+        #[cfg(unix)]
+        let refresh_result = if let Some(ref mut sig) = sigterm {
+            tokio::select! {
+                result = refresh_all_profiles() => Some(result),
+                _ = sig.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down gracefully");
+                    None
+                }
             }
+        } else {
+            Some(refresh_all_profiles().await)
         };
+
+        #[cfg(not(unix))]
+        let refresh_result = Some(refresh_all_profiles().await);
 
         let refresh_result = match refresh_result {
             Some(r) => r,
@@ -91,12 +128,14 @@ async fn run_daemon_loop_unix() {
                     break;
                 }
 
-                tokio::select! {
-                    _ = sleep(Duration::from_secs(backoff_secs)) => {}
-                    _ = sigterm.recv() => {
-                        tracing::info!("Received SIGTERM during backoff, shutting down");
-                        break;
-                    }
+                let keep_running = interruptible_sleep(
+                    Duration::from_secs(backoff_secs),
+                    #[cfg(unix)]
+                    sigterm.as_deref_mut(),
+                )
+                .await;
+                if !keep_running {
+                    break;
                 }
 
                 backoff_secs = (backoff_secs.saturating_mul(2)).min(MAX_BACKOFF_SECS);
@@ -104,67 +143,23 @@ async fn run_daemon_loop_unix() {
             }
         }
 
-        tokio::select! {
-            _ = sleep(Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM during sleep, shutting down");
-                break;
-            }
+        let keep_running = interruptible_sleep(
+            Duration::from_secs(CHECK_INTERVAL_SECS),
+            #[cfg(unix)]
+            sigterm.as_deref_mut(),
+        )
+        .await;
+        if !keep_running {
+            break;
         }
     }
 
     if let Ok(pid_path) = get_pid_file_path() {
-        let _ = fs::remove_file(pid_path);
-    }
-    tracing::info!("Daemon shutdown complete");
-}
-
-// Note: non-unix fallback loop does not support graceful SIGTERM shutdown.
-// On Windows, the daemon will exit when all auto-refresh profiles are removed
-// or after MAX_CONSECUTIVE_FAILURES.
-#[cfg(not(unix))]
-async fn run_daemon_loop_fallback() {
-    let mut consecutive_failures: u32 = 0;
-    let mut backoff_secs = INITIAL_BACKOFF_SECS;
-
-    loop {
-        match refresh_all_profiles().await {
-            Ok(has_profiles) => {
-                if !has_profiles {
-                    tracing::info!("No auto-refresh profiles, exiting");
-                    break;
-                }
-                consecutive_failures = 0;
-                backoff_secs = INITIAL_BACKOFF_SECS;
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                tracing::error!(
-                    "Error refreshing profiles ({}/{}): {}",
-                    consecutive_failures,
-                    MAX_CONSECUTIVE_FAILURES,
-                    e
-                );
-
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    tracing::error!(
-                        "Exiting after {} consecutive failures",
-                        MAX_CONSECUTIVE_FAILURES
-                    );
-                    break;
-                }
-
-                sleep(Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs.saturating_mul(2)).min(MAX_BACKOFF_SECS);
-                continue;
+        if let Err(e) = fs::remove_file(&pid_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("Failed to remove PID file {}: {}", pid_path.display(), e);
             }
         }
-
-        sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
-    }
-
-    if let Ok(pid_path) = get_pid_file_path() {
-        let _ = fs::remove_file(pid_path);
     }
     tracing::info!("Daemon shutdown complete");
 }
@@ -238,11 +233,18 @@ async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
         let dir = get_auto_refresh_dir()?;
         for name in &expired_profiles {
             let json_path = dir.join(format!("{}.json", name));
-            let _ = fs::remove_file(&json_path);
+            if let Err(e) = fs::remove_file(&json_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove expired profile {}: {}", name, e);
+                }
+            }
         }
         // Remove expired credential sections in batch
         let creds_path = crate::utils::paths::aws_credentials_path()?;
-        let _ = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles);
+        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles)
+        {
+            tracing::warn!("Failed to remove expired credential sections: {}", e);
+        }
     }
 
     // Re-check remaining profiles (exclude expired ones)
@@ -497,15 +499,24 @@ fn update_credentials_file(
     let profile_path = get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
     if profile_path.exists() {
         let meta_content = fs::read_to_string(&profile_path)?;
-        if let Ok(mut profile) = serde_json::from_str::<AutoRefreshProfile>(&meta_content) {
-            profile.aws_access_key_id = access_key.clone();
-            profile.aws_secret_access_key = secret_key.clone();
-            profile.aws_session_token = session_token.cloned();
-            profile.awswit_role_expiration = expiration.cloned();
+        match serde_json::from_str::<AutoRefreshProfile>(&meta_content) {
+            Ok(mut profile) => {
+                profile.aws_access_key_id = access_key.clone();
+                profile.aws_secret_access_key = secret_key.clone();
+                profile.aws_session_token = session_token.cloned();
+                profile.awswit_role_expiration = expiration.cloned();
 
-            let updated = serde_json::to_string_pretty(&profile)?;
-            crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes())
-                .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
+                let updated = serde_json::to_string_pretty(&profile)?;
+                crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes())
+                    .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse profile metadata {}: {}, skipping metadata update",
+                    profile_path.display(),
+                    e
+                );
+            }
         }
     }
 

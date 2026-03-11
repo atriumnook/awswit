@@ -147,12 +147,22 @@ impl CacheManager {
             let path = entry.path();
 
             if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
-                        if entry.credentials.is_expired() {
+                match fs::read_to_string(&path) {
+                    Ok(content) => match serde_json::from_str::<CacheEntry>(&content) {
+                        Ok(entry) => {
+                            if entry.credentials.is_expired() {
+                                fs::remove_file(&path)?;
+                                removed += 1;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Corrupt cache entry {}: {}, removing", path.display(), e);
                             fs::remove_file(&path)?;
                             removed += 1;
                         }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to read cache entry {}: {}", path.display(), e);
                     }
                 }
             }
@@ -180,11 +190,12 @@ impl CacheManager {
         Ok(keys)
     }
 
-    /// Get the cache file path for a key
+    /// Get the cache file path for a key.
+    /// Uses hex encoding to avoid collisions from character sanitization
+    /// (e.g., "role/dev" and "role_dev" would collide with simple replacement).
     fn cache_file_path(&self, key: &str) -> PathBuf {
-        // Sanitize key for filesystem
-        let safe_key = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        self.cache_dir.join(format!("{}.json", safe_key))
+        let hex_key: String = key.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        self.cache_dir.join(format!("{}.json", hex_key))
     }
 }
 
@@ -267,5 +278,97 @@ mod tests {
 
         // Corrupt file should be cleaned up
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_no_key_collision_with_similar_names() {
+        let (manager, _temp) = create_test_manager();
+
+        // These keys would collide with simple character replacement
+        let creds1 = Credentials {
+            access_key_id: "KEY_ONE".to_string(),
+            secret_access_key: "secret1".to_string(),
+            session_token: None,
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            region: None,
+        };
+        let creds2 = Credentials {
+            access_key_id: "KEY_TWO".to_string(),
+            secret_access_key: "secret2".to_string(),
+            session_token: None,
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            region: None,
+        };
+
+        manager.set("role/dev", &creds1).unwrap();
+        manager.set("role_dev", &creds2).unwrap();
+
+        // Both should retrieve correctly without collision
+        let retrieved1 = manager.get("role/dev").unwrap().unwrap();
+        let retrieved2 = manager.get("role_dev").unwrap().unwrap();
+        assert_eq!(retrieved1.access_key_id, "KEY_ONE");
+        assert_eq!(retrieved2.access_key_id, "KEY_TWO");
+    }
+
+    #[test]
+    fn test_hex_encoding_produces_different_paths() {
+        let (manager, _temp) = create_test_manager();
+
+        let path1 = manager.cache_file_path("role/dev");
+        let path2 = manager.cache_file_path("role_dev");
+        assert_ne!(path1, path2);
+    }
+
+    #[test]
+    fn test_cache_key_mismatch_returns_miss() {
+        let (manager, _temp) = create_test_manager();
+
+        // Manually write a cache entry with a mismatched key
+        let path = manager.cache_file_path("test-key");
+        let entry = CacheEntry {
+            cache_key: "different-key".to_string(),
+            credentials: Credentials {
+                access_key_id: "AKIATEST".to_string(),
+                secret_access_key: "secret".to_string(),
+                session_token: None,
+                expiration: Some(Utc::now() + Duration::hours(1)),
+                region: None,
+            },
+        };
+        let content = serde_json::to_string(&entry).unwrap();
+        fs::write(&path, content).unwrap();
+
+        // Should return None due to key mismatch
+        let result = manager.get("test-key").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_clear_expired_only_removes_expired() {
+        let (manager, _temp) = create_test_manager();
+
+        let valid_creds = Credentials {
+            access_key_id: "VALID".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            region: None,
+        };
+        let expired_creds = Credentials {
+            access_key_id: "EXPIRED".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: Some(Utc::now() - Duration::hours(1)),
+            region: None,
+        };
+
+        manager.set("valid-key", &valid_creds).unwrap();
+        manager.set("expired-key", &expired_creds).unwrap();
+
+        let removed = manager.clear_expired().unwrap();
+        assert_eq!(removed, 1);
+
+        // Valid key should still be retrievable
+        assert!(manager.get("valid-key").unwrap().is_some());
     }
 }

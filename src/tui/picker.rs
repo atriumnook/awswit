@@ -527,7 +527,9 @@ impl PickerApp {
 
                 // Update history
                 self.history.set_favorite(&entry.name, entry.is_favorite);
-                let _ = self.history.save();
+                if let Err(e) = self.history.save() {
+                    tracing::warn!("Failed to save history: {}", e);
+                }
             }
         }
     }

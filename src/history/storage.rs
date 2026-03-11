@@ -65,7 +65,9 @@ impl ProfileHistory {
                     e,
                     backup_path
                 );
-                let _ = fs::copy(&path, &backup_path);
+                if let Err(backup_err) = fs::copy(&path, &backup_path) {
+                    tracing::warn!("Failed to backup corrupt history file: {}", backup_err);
+                }
                 Ok(Self::default())
             }
         }

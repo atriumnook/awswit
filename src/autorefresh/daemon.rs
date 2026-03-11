@@ -1,3 +1,9 @@
+// Lock ordering (to prevent deadlock):
+//   1. daemon lock   (autoawswit.lock)
+//   2. credentials lock (credentials.lock)
+// Always acquire daemon lock first if both are needed.
+// kill_autoawswit_daemon: releases daemon lock BEFORE credentials cleanup.
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -292,7 +298,7 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 
     match autoawswit_path {
         Some(path) => {
-            let _child = Command::new(path)
+            let mut child = Command::new(path)
                 .spawn()
                 .map_err(|e| AwswitError::AutoRefreshError {
                     message: format!("Failed to spawn daemon: {}", e),
@@ -315,12 +321,20 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
                 std::thread::sleep(poll_interval);
             }
 
-            // PID file didn't appear, but process was spawned — log a warning
-            tracing::warn!(
-                "Spawned autoawswit daemon but PID file not written within {:?}",
+            // PID file didn't appear — kill the spawned process and return error
+            // to prevent orphan processes and duplicate daemon spawns.
+            tracing::error!(
+                "Spawned autoawswit daemon but PID file not written within {:?}, killing process",
                 timeout
             );
-            Ok(())
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(AwswitError::AutoRefreshError {
+                message: format!(
+                    "Daemon process failed to initialize within {:?} (PID file not written)",
+                    timeout
+                ),
+            })
         }
         None => Err(AwswitError::AutoRefreshError {
             message: "autoawswit binary not found in the same directory as the current executable"
@@ -402,10 +416,10 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
                         std::thread::sleep(poll_interval);
                     }
 
-                    let _ = fs::remove_file(&pid_path);
+                    remove_stale_pid_file(&pid_path);
                 } else if process_gone {
                     // Process is confirmed gone, safe to clean up PID file
-                    let _ = fs::remove_file(&pid_path);
+                    remove_stale_pid_file(&pid_path);
                 }
                 // If not verified and not gone, leave PID file intact
             } else {
@@ -416,7 +430,7 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
         #[cfg(not(unix))]
         {
             let _ = pid;
-            let _ = fs::remove_file(&pid_path);
+            remove_stale_pid_file(&pid_path);
         }
     }
 
@@ -427,6 +441,15 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
 fn read_pid(pid_path: &std::path::Path) -> Option<u32> {
     let pid_str = fs::read_to_string(pid_path).ok()?;
     pid_str.trim().parse::<u32>().ok()
+}
+
+/// Remove a stale PID file, logging non-NotFound errors.
+fn remove_stale_pid_file(pid_path: &std::path::Path) {
+    if let Err(e) = fs::remove_file(pid_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to remove stale PID file {}: {}", pid_path.display(), e);
+        }
+    }
 }
 
 /// Check if the autoawswit daemon is running, verifying process identity
@@ -442,23 +465,16 @@ fn is_autoawswit_running() -> Result<bool, AwswitError> {
         Ok(p) => p,
         Err(_) => {
             tracing::warn!("PID {} exceeds i32::MAX, removing stale PID file", pid);
-            let _ = fs::remove_file(&pid_path);
+            remove_stale_pid_file(&pid_path);
             return Ok(false);
         }
     };
 
     #[cfg(unix)]
     {
-        // Check if process exists
-        if unsafe { libc::kill(pid_i32, 0) } != 0 {
-            // Process is gone, clean up stale PID file
-            let _ = fs::remove_file(&pid_path);
-            return Ok(false);
-        }
-
-        // On Linux, verify the process is actually autoawswit (not a recycled PID)
-        // via /proc/{pid}/comm. On other unix platforms, fall back to the kill(0)
-        // check above — no /proc filesystem is available.
+        // On Linux, verify process identity via /proc/{pid}/comm FIRST to avoid
+        // TOCTOU with PID recycling (a different process could claim the PID
+        // between kill(0) and /proc read).
         #[cfg(target_os = "linux")]
         {
             let comm_path = format!("/proc/{}/comm", pid);
@@ -470,16 +486,31 @@ fn is_autoawswit_running() -> Result<bool, AwswitError> {
                             pid,
                             comm.trim()
                         );
-                        let _ = fs::remove_file(&pid_path);
+                        remove_stale_pid_file(&pid_path);
                         return Ok(false);
                     }
                 }
                 Err(_) => {
-                    // /proc not available or process gone between kill(0) and read
-                    let _ = fs::remove_file(&pid_path);
+                    // /proc not available or process gone
+                    remove_stale_pid_file(&pid_path);
                     return Ok(false);
                 }
             }
+        }
+
+        // Confirm the (verified) process is still alive
+        if unsafe { libc::kill(pid_i32, 0) } != 0 {
+            remove_stale_pid_file(&pid_path);
+            return Ok(false);
+        }
+
+        // On non-Linux unix, we only have kill(0) — no /proc verification available
+        #[cfg(not(target_os = "linux"))]
+        {
+            tracing::debug!(
+                "Non-Linux platform: no /proc verification available for PID {}",
+                pid
+            );
         }
 
         Ok(true)
