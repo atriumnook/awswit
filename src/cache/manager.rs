@@ -126,70 +126,6 @@ impl CacheManager {
         Ok(())
     }
 
-    /// Clear all cached credentials
-    pub fn clear_all(&self) -> Result<(), AwswitError> {
-        for entry in fs::read_dir(&self.cache_dir)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                fs::remove_file(entry.path())?;
-            }
-        }
-        tracing::info!("Cleared all cached credentials");
-        Ok(())
-    }
-
-    /// Clear expired cache entries
-    pub fn clear_expired(&self) -> Result<usize, AwswitError> {
-        let mut removed = 0;
-
-        for entry in fs::read_dir(&self.cache_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_file() {
-                match fs::read_to_string(&path) {
-                    Ok(content) => match serde_json::from_str::<CacheEntry>(&content) {
-                        Ok(entry) => {
-                            if entry.credentials.is_expired() {
-                                fs::remove_file(&path)?;
-                                removed += 1;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Corrupt cache entry {}: {}, removing", path.display(), e);
-                            fs::remove_file(&path)?;
-                            removed += 1;
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("Failed to read cache entry {}: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-
-        tracing::info!("Cleared {} expired cache entries", removed);
-        Ok(removed)
-    }
-
-    /// List all cache keys
-    pub fn list_keys(&self) -> Result<Vec<String>, AwswitError> {
-        let mut keys = Vec::new();
-
-        for entry in fs::read_dir(&self.cache_dir)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".json") {
-                        keys.push(name.trim_end_matches(".json").to_string());
-                    }
-                }
-            }
-        }
-
-        Ok(keys)
-    }
-
     /// Get the cache file path for a key.
     /// Uses hex encoding to avoid collisions from character sanitization
     /// (e.g., "role/dev" and "role_dev" would collide with simple replacement).
@@ -343,32 +279,4 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_clear_expired_only_removes_expired() {
-        let (manager, _temp) = create_test_manager();
-
-        let valid_creds = Credentials {
-            access_key_id: "VALID".to_string(),
-            secret_access_key: "secret".to_string(),
-            session_token: None,
-            expiration: Some(Utc::now() + Duration::hours(1)),
-            region: None,
-        };
-        let expired_creds = Credentials {
-            access_key_id: "EXPIRED".to_string(),
-            secret_access_key: "secret".to_string(),
-            session_token: None,
-            expiration: Some(Utc::now() - Duration::hours(1)),
-            region: None,
-        };
-
-        manager.set("valid-key", &valid_creds).unwrap();
-        manager.set("expired-key", &expired_creds).unwrap();
-
-        let removed = manager.clear_expired().unwrap();
-        assert_eq!(removed, 1);
-
-        // Valid key should still be retrievable
-        assert!(manager.get("valid-key").unwrap().is_some());
-    }
 }

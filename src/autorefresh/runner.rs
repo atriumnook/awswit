@@ -13,6 +13,7 @@ use tokio::time::sleep;
 
 use super::credentials_file;
 use super::daemon::AutoRefreshProfile;
+use crate::error::AwswitError;
 
 /// Maximum age of expired credentials before we skip refresh entirely.
 const MAX_EXPIRED_HOURS: i64 = 1;
@@ -154,7 +155,7 @@ async fn run_daemon_loop_inner(
         }
     }
 
-    if let Ok(pid_path) = get_pid_file_path() {
+    if let Ok(pid_path) = super::get_pid_file_path() {
         if let Err(e) = fs::remove_file(&pid_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!("Failed to remove PID file {}: {}", pid_path.display(), e);
@@ -165,8 +166,8 @@ async fn run_daemon_loop_inner(
 }
 
 /// Write our PID file after successful init (called from child process only)
-pub fn write_own_pid_file() -> Result<(), Box<dyn std::error::Error>> {
-    let pid_path = get_pid_file_path()?;
+pub fn write_own_pid_file() -> Result<(), AwswitError> {
+    let pid_path = super::get_pid_file_path()?;
 
     if let Some(parent) = pid_path.parent() {
         fs::create_dir_all(parent)?;
@@ -193,15 +194,7 @@ pub fn write_own_pid_file() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_pid_file_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    Ok(crate::utils::paths::awswit_home_dir()?.join("autoawswit.pid"))
-}
-
-fn get_auto_refresh_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    Ok(crate::utils::paths::awswit_home_dir()?.join("autorefresh"))
-}
-
-async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
+async fn refresh_all_profiles() -> Result<bool, AwswitError> {
     let profiles = load_auto_refresh_profiles()?;
 
     if profiles.is_empty() {
@@ -230,7 +223,7 @@ async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
 
     if !expired_profiles.is_empty() {
         // Remove expired profile JSON files
-        let dir = get_auto_refresh_dir()?;
+        let dir = super::get_auto_refresh_dir()?;
         for name in &expired_profiles {
             let json_path = dir.join(format!("{}.json", name));
             if let Err(e) = fs::remove_file(&json_path) {
@@ -275,20 +268,20 @@ async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
 
     // If we attempted refreshes and ALL of them failed, return an error
     if attempted > 0 && failures == attempted {
-        return Err(format!(
-            "All {} refresh attempts failed. Last error: {}",
-            failures,
-            last_error.unwrap_or_default()
-        )
-        .into());
+        return Err(AwswitError::AutoRefreshError {
+            message: format!(
+                "All {} refresh attempts failed. Last error: {}",
+                failures,
+                last_error.unwrap_or_default()
+            ),
+        });
     }
 
     Ok(true)
 }
 
-fn load_auto_refresh_profiles(
-) -> Result<HashMap<String, AutoRefreshProfile>, Box<dyn std::error::Error>> {
-    let dir = get_auto_refresh_dir()?;
+fn load_auto_refresh_profiles() -> Result<HashMap<String, AutoRefreshProfile>, AwswitError> {
+    let dir = super::get_auto_refresh_dir()?;
     if !dir.exists() {
         return Ok(HashMap::new());
     }
@@ -356,9 +349,11 @@ fn should_refresh(profile: &AutoRefreshProfile) -> bool {
     time_until_exp < chrono::Duration::minutes(REFRESH_WINDOW_MINS)
 }
 
-async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std::error::Error>> {
+async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
     if profile.awswit_command.is_empty() {
-        return Err("Empty command".into());
+        return Err(AwswitError::AutoRefreshError {
+            message: "Empty command".to_string(),
+        });
     }
 
     // Validate that the command is a known sibling binary to prevent arbitrary execution.
@@ -376,34 +371,44 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
             .and_then(|n| n.to_str())
             .unwrap_or("");
         if !ALLOWED_NAMES.contains(&cmd_name) {
-            return Err(format!(
-                "Refusing to execute '{}': not an allowed command name ({:?})",
-                profile.awswit_command[0], ALLOWED_NAMES
-            )
-            .into());
+            return Err(AwswitError::AutoRefreshError {
+                message: format!(
+                    "Refusing to execute '{}': not an allowed command name ({:?})",
+                    profile.awswit_command[0], ALLOWED_NAMES
+                ),
+            });
         }
         // Resolve to sibling of current executable to prevent PATH hijacking
-        let current_exe = std::env::current_exe()?;
+        let current_exe = std::env::current_exe().map_err(|e| AwswitError::AutoRefreshError {
+            message: e.to_string(),
+        })?;
         resolved_command = current_exe
             .parent()
             .map(|p| p.join(cmd_name))
-            .ok_or_else(|| "Cannot determine parent directory of current exe".to_string())?;
+            .ok_or_else(|| AwswitError::AutoRefreshError {
+                message: "Cannot determine parent directory of current exe".to_string(),
+            })?;
         if !resolved_command.exists() {
-            return Err(format!(
-                "Resolved command '{}' not found",
-                resolved_command.display()
-            )
-            .into());
+            return Err(AwswitError::AutoRefreshError {
+                message: format!(
+                    "Resolved command '{}' not found",
+                    resolved_command.display()
+                ),
+            });
         }
     } else {
         // For paths with directory components, canonicalize and verify
-        let current_exe = std::env::current_exe()?;
+        let current_exe = std::env::current_exe().map_err(|e| AwswitError::AutoRefreshError {
+            message: e.to_string(),
+        })?;
         let canonical_exe = current_exe.canonicalize()?;
         let canonical_cmd = command_path.canonicalize().map_err(|e| {
-            format!(
-                "Cannot resolve command path '{}': {}",
-                profile.awswit_command[0], e
-            )
+            AwswitError::AutoRefreshError {
+                message: format!(
+                    "Cannot resolve command path '{}': {}",
+                    profile.awswit_command[0], e
+                ),
+            }
         })?;
         let cmd_name = canonical_cmd
             .file_name()
@@ -411,12 +416,13 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
             .unwrap_or("");
         let same_dir = canonical_cmd.parent() == canonical_exe.parent();
         if !same_dir || !ALLOWED_NAMES.contains(&cmd_name) {
-            return Err(format!(
-                "Refusing to execute '{}': must be a sibling of '{}'",
-                profile.awswit_command[0],
-                canonical_exe.display()
-            )
-            .into());
+            return Err(AwswitError::AutoRefreshError {
+                message: format!(
+                    "Refusing to execute '{}': must be a sibling of '{}'",
+                    profile.awswit_command[0],
+                    canonical_exe.display()
+                ),
+            });
         }
         resolved_command = canonical_cmd;
     }
@@ -425,16 +431,17 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let dir = get_auto_refresh_dir()?;
+        let dir = super::get_auto_refresh_dir()?;
         if dir.exists() {
             let mode = fs::metadata(&dir)?.mode() & 0o777;
             if mode & 0o077 != 0 {
-                return Err(format!(
-                    "Autorefresh directory {} has insecure permissions {:o}, expected 0700",
-                    dir.display(),
-                    mode
-                )
-                .into());
+                return Err(AwswitError::AutoRefreshError {
+                    message: format!(
+                        "Autorefresh directory {} has insecure permissions {:o}, expected 0700",
+                        dir.display(),
+                        mode
+                    ),
+                });
             }
         }
     }
@@ -446,11 +453,18 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
             .output(),
     )
     .await
-    .map_err(|_| "refresh_profile timed out after 60 seconds".to_string())??;
+    .map_err(|_| AwswitError::AutoRefreshError {
+        message: "refresh_profile timed out after 60 seconds".to_string(),
+    })?
+    .map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Failed to execute command: {}", e),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Command failed: {}", stderr).into());
+        return Err(AwswitError::AutoRefreshError {
+            message: format!("Command failed: {}", stderr),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -461,10 +475,7 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn update_credentials_file(
-    profile_name: &str,
-    output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), AwswitError> {
     let mut creds: HashMap<String, String> = HashMap::new();
 
     for line in output.lines() {
@@ -473,10 +484,16 @@ fn update_credentials_file(
         }
     }
 
-    let access_key = creds.get("AWS_ACCESS_KEY_ID").ok_or("Missing access key")?;
+    let access_key = creds
+        .get("AWS_ACCESS_KEY_ID")
+        .ok_or_else(|| AwswitError::AutoRefreshError {
+            message: "Missing access key".to_string(),
+        })?;
     let secret_key = creds
         .get("AWS_SECRET_ACCESS_KEY")
-        .ok_or("Missing secret key")?;
+        .ok_or_else(|| AwswitError::AutoRefreshError {
+            message: "Missing secret key".to_string(),
+        })?;
     let session_token = creds.get("AWS_SESSION_TOKEN");
     let expiration = creds.get("AWSWIT_EXPIRATION");
 
@@ -492,23 +509,21 @@ fn update_credentials_file(
         secret_key,
         session_token.map(|s| s.as_str()),
         expiration.map(|s| s.as_str()),
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { format!("{}", e).into() })?;
+    )?;
 
     // Update profile metadata after credentials are written
-    let profile_path = get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
+    let profile_path = super::get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
     if profile_path.exists() {
         let meta_content = fs::read_to_string(&profile_path)?;
         match serde_json::from_str::<AutoRefreshProfile>(&meta_content) {
             Ok(mut profile) => {
-                profile.aws_access_key_id = access_key.clone();
-                profile.aws_secret_access_key = secret_key.clone();
-                profile.aws_session_token = session_token.cloned();
                 profile.awswit_role_expiration = expiration.cloned();
 
                 let updated = serde_json::to_string_pretty(&profile)?;
                 crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes())
-                    .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
+                    .map_err(|e| AwswitError::AutoRefreshError {
+                        message: format!("Failed to write profile metadata: {}", e),
+                    })?;
             }
             Err(e) => {
                 tracing::warn!(

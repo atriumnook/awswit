@@ -377,16 +377,6 @@ impl<'a> ProfileResolver<'a> {
         None
     }
 
-    /// Extract MFA args from profile and args, returning (serial, token) if MFA is needed
-    fn extract_mfa_args(
-        &self,
-        mfa_serial: &str,
-        args: &Args,
-    ) -> Result<(String, String), AwswitError> {
-        let token = self.get_mfa_token(args)?;
-        Ok((mfa_serial.to_string(), token))
-    }
-
     /// Get session token with MFA
     async fn get_session_token_with_mfa(
         &self,
@@ -408,7 +398,7 @@ impl<'a> ProfileResolver<'a> {
         }
 
         // Need to get new session token
-        let (_serial, token) = self.extract_mfa_args(mfa_serial, args)?;
+        let token = self.get_mfa_token(args)?;
 
         let session = sts_client
             .get_session_token(
@@ -484,8 +474,8 @@ impl<'a> ProfileResolver<'a> {
 
         let mfa_serial = mfa_serial.clone();
         let (mfa_serial_val, mfa_token_val) = if let Some(ref serial) = mfa_serial {
-            let (s, t) = self.extract_mfa_args(serial, args)?;
-            (Some(s), Some(t))
+            let t = self.get_mfa_token(args)?;
+            (Some(serial.clone()), Some(t))
         } else {
             (None, None)
         };

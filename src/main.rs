@@ -122,7 +122,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle list profiles
     if args.list_profiles.is_some() {
-        return handle_list_profiles(&profiles, &args, &awswit_config);
+        return handle_list_profiles(&profiles, &awswit_config);
     }
 
     // Handle refresh autocomplete
@@ -278,16 +278,10 @@ async fn handle_kill_refresher(args: &Args) -> Result<(), AwswitError> {
 
 fn handle_list_profiles(
     profiles: &std::collections::HashMap<String, profile::Profile>,
-    args: &Args,
     config: &AwswitConfig,
 ) -> Result<(), AwswitError> {
     use colored::Colorize;
 
-    let show_more = args
-        .list_profiles
-        .as_ref()
-        .map(|s| s == "more")
-        .unwrap_or(false);
     let use_colors = config.colors && !cfg!(windows);
 
     // Print to stdout so `| less` and `> file` work
@@ -331,15 +325,9 @@ fn handle_list_profiles(
         };
         let region = profile.region.as_deref().unwrap_or("-");
 
-        let account = if show_more {
-            "Fetching...".to_string()
-        } else {
-            profile
-                .role_arn
-                .as_ref()
-                .and_then(|arn| extract_account_from_arn(arn))
-                .unwrap_or_else(|| "Unavailable".to_string())
-        };
+        let account = profile
+            .get_account_id()
+            .unwrap_or_else(|| "-".to_string());
 
         let line = format!(
             "{:<20} {:<8} {:<15} {:<6} {:<12} {}",
@@ -354,15 +342,6 @@ fn handle_list_profiles(
     }
 
     Ok(())
-}
-
-fn extract_account_from_arn(arn: &str) -> Option<String> {
-    let parts: Vec<&str> = arn.split(':').collect();
-    if parts.len() >= 5 {
-        Some(parts[4].to_string())
-    } else {
-        None
-    }
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

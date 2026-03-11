@@ -135,13 +135,6 @@ impl ProfileHistory {
         }
     }
 
-    /// Get recently used profiles
-    pub fn recent_profiles(&self, limit: usize) -> Vec<&HistoryEntry> {
-        let mut entries: Vec<_> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.last_used.cmp(&a.last_used));
-        entries.into_iter().take(limit).collect()
-    }
-
     /// Get favorite profiles
     pub fn favorite_profiles(&self) -> Vec<&str> {
         self.entries
@@ -151,29 +144,6 @@ impl ProfileHistory {
             .collect()
     }
 
-    /// Get most used profiles
-    pub fn most_used(&self, limit: usize) -> Vec<&HistoryEntry> {
-        let mut entries: Vec<_> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.use_count.cmp(&a.use_count));
-        entries.into_iter().take(limit).collect()
-    }
-
-    /// Clean up old entries (older than 90 days)
-    pub fn cleanup_old(&mut self, days: i64) {
-        let cutoff = Utc::now() - chrono::Duration::days(days);
-        self.entries
-            .retain(|_, entry| entry.last_used > cutoff || entry.is_favorite);
-    }
-
-    /// Get total number of entries
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Check if history is empty
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -204,19 +174,4 @@ mod tests {
         assert!(!history.is_favorite("test-profile"));
     }
 
-    #[test]
-    fn test_recent_profiles() {
-        let mut history = ProfileHistory::default();
-
-        history.record_use("profile-a");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        history.record_use("profile-b");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        history.record_use("profile-c");
-
-        let recent = history.recent_profiles(2);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].name, "profile-c");
-        assert_eq!(recent[1].name, "profile-b");
-    }
 }

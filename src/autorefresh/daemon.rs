@@ -16,36 +16,14 @@ use crate::cli::Args;
 use crate::error::AwswitError;
 
 /// Auto-refresh profile metadata
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutoRefreshProfile {
     pub profile_name: String,
     pub awswit_command: Vec<String>,
-    pub aws_access_key_id: String,
-    pub aws_secret_access_key: String,
-    pub aws_session_token: Option<String>,
     pub awswit_role_expiration: Option<String>,
     pub awswit_cache_name: Option<String>,
     pub aws_role_arn: Option<String>,
     pub region: Option<String>,
-}
-
-impl std::fmt::Debug for AutoRefreshProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AutoRefreshProfile")
-            .field("profile_name", &self.profile_name)
-            .field("awswit_command", &self.awswit_command)
-            .field("aws_access_key_id", &"[REDACTED]")
-            .field("aws_secret_access_key", &"[REDACTED]")
-            .field(
-                "aws_session_token",
-                &self.aws_session_token.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("awswit_role_expiration", &self.awswit_role_expiration)
-            .field("awswit_cache_name", &self.awswit_cache_name)
-            .field("aws_role_arn", &self.aws_role_arn)
-            .field("region", &self.region)
-            .finish()
-    }
 }
 
 /// Start auto-refresh for a profile
@@ -108,11 +86,8 @@ pub async fn start_auto_refresh(
     let auto_profile = AutoRefreshProfile {
         profile_name: auto_profile_name.clone(),
         awswit_command: command_parts,
-        aws_access_key_id: credentials.access_key_id.clone(),
-        aws_secret_access_key: credentials.secret_access_key.clone(),
-        aws_session_token: credentials.session_token.clone(),
         awswit_role_expiration: credentials.expiration.map(|e| e.to_rfc3339()),
-        awswit_cache_name: Some(format!("session-{}", credentials.access_key_id)),
+        awswit_cache_name: Some(format!("session-{}", profile_name)),
         aws_role_arn: args.role_arn.clone(),
         region: credentials.region.clone(),
     };
@@ -141,6 +116,10 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
 
     let auto_profile_name = format!("autoawswit-{}", profile_name);
 
+    // Hold daemon lock for the entire stop operation to prevent TOCTOU
+    let lock_path = get_daemon_lock_path()?;
+    let _lock_file = lock_daemon(&lock_path)?;
+
     // Remove the auto-refresh profile metadata
     remove_auto_refresh_profile(&auto_profile_name)?;
 
@@ -151,7 +130,7 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
     // Check if any auto-refresh profiles remain
     let remaining = list_auto_refresh_profiles()?;
     if remaining.is_empty() {
-        kill_autoawswit_daemon()?;
+        kill_autoawswit_daemon_inner()?;
     }
 
     Ok(())
@@ -177,16 +156,8 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     Ok(())
 }
 
-fn get_auto_refresh_dir() -> Result<PathBuf, AwswitError> {
-    crate::utils::paths::awswit_home_dir()
-        .map(|p| p.join("autorefresh"))
-        .map_err(|e| AwswitError::AutoRefreshError {
-            message: e.to_string(),
-        })
-}
-
 fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
-    let dir = get_auto_refresh_dir()?;
+    let dir = super::get_auto_refresh_dir()?;
     fs::create_dir_all(&dir)?;
 
     // Ensure restrictive permissions on the autorefresh directory (C3)
@@ -205,7 +176,7 @@ fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitE
 }
 
 fn remove_auto_refresh_profile(profile_name: &str) -> Result<(), AwswitError> {
-    let path = get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
+    let path = super::get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -213,7 +184,7 @@ fn remove_auto_refresh_profile(profile_name: &str) -> Result<(), AwswitError> {
 }
 
 fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
-    let dir = get_auto_refresh_dir()?;
+    let dir = super::get_auto_refresh_dir()?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -236,16 +207,8 @@ fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
     Ok(profiles)
 }
 
-fn get_pid_file_path() -> Result<PathBuf, AwswitError> {
-    let dir = get_auto_refresh_dir()?;
-    let parent = dir.parent().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Autorefresh directory has no parent".to_string(),
-    })?;
-    Ok(parent.join("autoawswit.pid"))
-}
-
 fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
-    let dir = get_auto_refresh_dir()?;
+    let dir = super::get_auto_refresh_dir()?;
     let parent = dir.parent().ok_or_else(|| AwswitError::AutoRefreshError {
         message: "Autorefresh directory has no parent".to_string(),
     })?;
@@ -254,14 +217,16 @@ fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
 
 /// Acquire the daemon advisory lock with timeout.
 fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
-    let lock_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(|e| AwswitError::AutoRefreshError {
-            message: format!("Failed to open lock: {}", e),
-        })?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let lock_file = opts.open(lock_path).map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Failed to open lock: {}", e),
+    })?;
 
     crate::utils::fs::lock_exclusive_with_timeout(
         &lock_file,
@@ -307,7 +272,7 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
             // Wait for daemon to write its PID file before releasing lock.
             // This prevents a race where another caller checks is_running()
             // before the daemon has finished init.
-            let pid_path = get_pid_file_path()?;
+            let pid_path = super::get_pid_file_path()?;
             let start = std::time::Instant::now();
             let timeout = std::time::Duration::from_secs(5);
             let poll_interval = std::time::Duration::from_millis(100);
@@ -346,8 +311,12 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
     let lock_path = get_daemon_lock_path()?;
     let _lock_file = lock_daemon(&lock_path)?;
+    kill_autoawswit_daemon_inner()
+}
 
-    let pid_path = get_pid_file_path()?;
+/// Inner implementation of kill_autoawswit_daemon, callable when caller already holds the daemon lock.
+fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
+    let pid_path = super::get_pid_file_path()?;
 
     if let Some(pid) = read_pid(&pid_path) {
         #[cfg(unix)]
@@ -407,10 +376,12 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
                         }
                         if start.elapsed() >= wait_timeout {
                             tracing::warn!(
-                                "Daemon (pid={}) did not exit within {:?} after SIGTERM",
+                                "Daemon (pid={}) did not exit within {:?} after SIGTERM, sending SIGKILL",
                                 pid,
                                 wait_timeout
                             );
+                            unsafe { libc::kill(pid_i32, libc::SIGKILL) };
+                            std::thread::sleep(std::time::Duration::from_millis(200));
                             break;
                         }
                         std::thread::sleep(poll_interval);
@@ -454,7 +425,7 @@ fn remove_stale_pid_file(pid_path: &std::path::Path) {
 
 /// Check if the autoawswit daemon is running, verifying process identity
 fn is_autoawswit_running() -> Result<bool, AwswitError> {
-    let pid_path = get_pid_file_path()?;
+    let pid_path = super::get_pid_file_path()?;
 
     let pid = match read_pid(&pid_path) {
         Some(p) => p,
@@ -544,6 +515,22 @@ mod tests {
             expiration: Some(Utc::now() + Duration::hours(1)),
             region: Some("us-east-1".to_string()),
         }
+    }
+
+    #[test]
+    fn auto_refresh_profile_does_not_serialize_secrets() {
+        let profile = AutoRefreshProfile {
+            profile_name: "test".to_string(),
+            awswit_command: vec!["awswit".to_string(), "test".to_string()],
+            awswit_role_expiration: None,
+            awswit_cache_name: None,
+            aws_role_arn: None,
+            region: None,
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(!json.contains("secret_access_key"));
+        assert!(!json.contains("session_token"));
+        assert!(!json.contains("access_key_id"));
     }
 
     #[test]

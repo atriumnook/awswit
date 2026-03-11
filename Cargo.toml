@@ -60,9 +60,6 @@ colored = "2.0"
 # Directory paths
 dirs = "5.0"
 
-# Environment variables
-dotenvy = "0.15"
-
 # Fuzzy matching
 strsim = "0.10"
 

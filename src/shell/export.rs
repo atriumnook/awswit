@@ -19,62 +19,26 @@ const MANAGED_VARS: &[&str] = &[
     "AWSWIT_EXPIRATION",
 ];
 
-/// Credential variables that always get set, plus their value extractors
-struct VarBinding {
-    name: &'static str,
-    value: Option<String>,
-}
-
-fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<VarBinding> {
+fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<(&'static str, Option<String>)> {
     let expiration_str = creds.expiration.map(|exp| exp.to_rfc3339());
 
     vec![
-        VarBinding {
-            name: "AWS_ACCESS_KEY_ID",
-            value: Some(creds.access_key_id.clone()),
-        },
-        VarBinding {
-            name: "AWS_SECRET_ACCESS_KEY",
-            value: Some(creds.secret_access_key.clone()),
-        },
-        VarBinding {
-            name: "AWS_SESSION_TOKEN",
-            value: creds.session_token.clone(),
-        },
+        ("AWS_ACCESS_KEY_ID", Some(creds.access_key_id.clone())),
+        ("AWS_SECRET_ACCESS_KEY", Some(creds.secret_access_key.clone())),
+        ("AWS_SESSION_TOKEN", creds.session_token.clone()),
         // AWS_SECURITY_TOKEN is the legacy name for AWS_SESSION_TOKEN.
         // Some older AWS SDKs and tools (e.g., boto2) only read this variable.
-        VarBinding {
-            name: "AWS_SECURITY_TOKEN",
-            value: creds.session_token.clone(),
-        },
-        VarBinding {
-            name: "AWS_REGION",
-            value: creds.region.clone(),
-        },
-        VarBinding {
-            name: "AWS_DEFAULT_REGION",
-            value: creds.region.clone(),
-        },
+        ("AWS_SECURITY_TOKEN", creds.session_token.clone()),
+        ("AWS_REGION", creds.region.clone()),
+        ("AWS_DEFAULT_REGION", creds.region.clone()),
         // Unset AWS_PROFILE and AWS_DEFAULT_PROFILE to prevent conflict with the
         // directly-exported credential environment variables above. If AWS_PROFILE
         // remained set, the AWS SDK would resolve credentials from the named profile
         // in ~/.aws/credentials instead of using the exported env vars.
-        VarBinding {
-            name: "AWS_PROFILE",
-            value: None,
-        },
-        VarBinding {
-            name: "AWS_DEFAULT_PROFILE",
-            value: None,
-        },
-        VarBinding {
-            name: "AWSWIT_PROFILE",
-            value: Some(profile_name.to_string()),
-        },
-        VarBinding {
-            name: "AWSWIT_EXPIRATION",
-            value: expiration_str,
-        },
+        ("AWS_PROFILE", None),
+        ("AWS_DEFAULT_PROFILE", None),
+        ("AWSWIT_PROFILE", Some(profile_name.to_string())),
+        ("AWSWIT_EXPIRATION", expiration_str),
     ]
 }
 
@@ -158,21 +122,21 @@ impl ShellExporter {
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
-        for binding in &bindings {
-            match &binding.value {
+        for (name, value) in &bindings {
+            match value {
                 Some(val) => {
                     if val.contains('\n') || val.contains('\r') {
                         tracing::warn!(
                             "Skipping export of {} — value contains newline characters",
-                            binding.name
+                            name
                         );
                         continue;
                     }
-                    output.push_str(&self.format_set(binding.name, val));
+                    output.push_str(&self.format_set(name, val));
                 }
                 None => {
                     // Unset variables with no value (e.g., region when new profile has none)
-                    output.push_str(&self.format_unset(binding.name));
+                    output.push_str(&self.format_unset(name));
                 }
             }
         }
@@ -201,22 +165,22 @@ impl ShellExporter {
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
-        for binding in &bindings {
-            match &binding.value {
+        for (name, value) in &bindings {
+            match value {
                 Some(val) => {
                     if val.contains('\n') || val.contains('\r') {
                         return Err(crate::error::AwswitError::ShellError {
                             message: format!(
                                 "Value for {} contains newline characters, which is not allowed in shell output",
-                                binding.name
+                                name
                             ),
                         });
                     }
-                    output.push_str(&format!("{}={}\n", binding.name, val));
+                    output.push_str(&format!("{}={}\n", name, val));
                 }
                 None => {
                     // Empty value signals unset to shell wrapper
-                    output.push_str(&format!("{}=\n", binding.name));
+                    output.push_str(&format!("{}=\n", name));
                 }
             }
         }

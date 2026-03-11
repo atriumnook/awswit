@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -102,8 +102,6 @@ struct PickerApp {
     theme: Theme,
     history: ProfileHistory,
     cursor_pos: usize,
-    #[allow(dead_code)]
-    last_tick: Instant,
     show_preview: bool,
 }
 
@@ -152,7 +150,6 @@ impl PickerApp {
             theme,
             history,
             cursor_pos: 0,
-            last_tick: Instant::now(),
             show_preview: true,
         }
     }
