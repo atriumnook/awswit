@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// AWS credentials with optional expiration
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
     /// AWS Access Key ID
     pub access_key_id: String,
@@ -25,14 +25,21 @@ pub struct Credentials {
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let masked_key = if self.access_key_id.len() > 4 {
-            format!("{}...{}", &self.access_key_id[..4], &self.access_key_id[self.access_key_id.len()-4..])
+            format!(
+                "{}...{}",
+                &self.access_key_id[..4],
+                &self.access_key_id[self.access_key_id.len() - 4..]
+            )
         } else {
             "[REDACTED]".to_string()
         };
         f.debug_struct("Credentials")
             .field("access_key_id", &masked_key)
             .field("secret_access_key", &"[REDACTED]")
-            .field("session_token", &self.session_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("expiration", &self.expiration)
             .field("region", &self.region)
             .finish()
@@ -95,18 +102,6 @@ impl Credentials {
     }
 }
 
-impl Default for Credentials {
-    fn default() -> Self {
-        Self {
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            session_token: None,
-            expiration: None,
-            region: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +109,7 @@ mod tests {
     #[test]
     fn test_is_expired() {
         let mut creds = Credentials::default();
-        
+
         // No expiration - not expired
         assert!(!creds.is_expired());
 
@@ -129,8 +124,10 @@ mod tests {
 
     #[test]
     fn test_expires_within() {
-        let mut creds = Credentials::default();
-        creds.expiration = Some(Utc::now() + chrono::Duration::minutes(30));
+        let creds = Credentials {
+            expiration: Some(Utc::now() + chrono::Duration::minutes(30)),
+            ..Default::default()
+        };
 
         assert!(creds.expires_within(chrono::Duration::hours(1)));
         assert!(!creds.expires_within(chrono::Duration::minutes(15)));

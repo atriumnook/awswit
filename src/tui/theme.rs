@@ -13,7 +13,7 @@ pub struct Theme {
     pub muted: Color,
     pub background: Color,
     pub surface: Color,
-    
+
     // Icons (Nerd Font compatible)
     pub icons: Icons,
 }
@@ -43,16 +43,16 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             // Tokyo Night inspired colors
-            primary: Color::Rgb(122, 162, 247),    // Blue
-            secondary: Color::Rgb(187, 154, 247),  // Purple
-            accent: Color::Rgb(125, 207, 255),     // Cyan
-            success: Color::Rgb(158, 206, 106),    // Green
-            warning: Color::Rgb(224, 175, 104),    // Yellow/Orange
-            error: Color::Rgb(247, 118, 142),      // Red
-            muted: Color::Rgb(86, 95, 137),        // Gray
-            background: Color::Rgb(26, 27, 38),    // Dark
-            surface: Color::Rgb(36, 40, 59),       // Slightly lighter
-            
+            primary: Color::Rgb(122, 162, 247),   // Blue
+            secondary: Color::Rgb(187, 154, 247), // Purple
+            accent: Color::Rgb(125, 207, 255),    // Cyan
+            success: Color::Rgb(158, 206, 106),   // Green
+            warning: Color::Rgb(224, 175, 104),   // Yellow/Orange
+            error: Color::Rgb(247, 118, 142),     // Red
+            muted: Color::Rgb(86, 95, 137),       // Gray
+            background: Color::Rgb(26, 27, 38),   // Dark
+            surface: Color::Rgb(36, 40, 59),      // Slightly lighter
+
             icons: Icons::default(),
         }
     }
@@ -61,22 +61,22 @@ impl Default for Theme {
 impl Default for Icons {
     fn default() -> Self {
         Self {
-            role: "󰁥 ",        // Role icon
-            user: "󰀄 ",        // User icon
-            favorite: "★",     // Filled star
+            role: "󰁥 ",          // Role icon
+            user: "󰀄 ",          // User icon
+            favorite: "★",       // Filled star
             favorite_empty: "☆", // Empty star
-            mfa: "󰌋 ",         // Shield/lock
-            region: "󰍎 ",      // Globe
-            account: "󰋊 ",     // Building
+            mfa: "󰌋 ",           // Shield/lock
+            region: "󰍎 ",        // Globe
+            account: "󰋊 ",       // Building
             arrow_right: "→",
             arrow_down: "↓",
             check: "✓",
             cross: "✗",
-            clock: "󰥔 ",       // Clock
-            lock: "󰌾 ",        // Lock
-            key: "󰌆 ",         // Key
-            chain: "󰌷 ",       // Chain link
-            search: " ",       // Magnifying glass
+            clock: "󰥔 ", // Clock
+            lock: "󰌾 ",  // Lock
+            key: "󰌆 ",   // Key
+            chain: "󰌷 ", // Chain link
+            search: " ", // Magnifying glass
             spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
         }
     }
@@ -120,28 +120,23 @@ impl Theme {
     }
 
     pub fn muted_style(&self) -> Style {
-        Style::default()
-            .fg(self.muted)
+        Style::default().fg(self.muted)
     }
 
     pub fn success_style(&self) -> Style {
-        Style::default()
-            .fg(self.success)
+        Style::default().fg(self.success)
     }
 
     pub fn warning_style(&self) -> Style {
-        Style::default()
-            .fg(self.warning)
+        Style::default().fg(self.warning)
     }
 
     pub fn error_style(&self) -> Style {
-        Style::default()
-            .fg(self.error)
+        Style::default().fg(self.error)
     }
 
     pub fn favorite_style(&self) -> Style {
-        Style::default()
-            .fg(self.warning)
+        Style::default().fg(self.warning)
     }
 }
 

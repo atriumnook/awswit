@@ -1,5 +1,5 @@
-mod types;
 mod resolver;
+mod types;
 
-pub use types::Profile;
 pub use resolver::ProfileResolver;
+pub use types::Profile;

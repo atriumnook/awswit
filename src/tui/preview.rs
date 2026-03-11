@@ -6,9 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::profile::Profile;
-use crate::history::ProfileHistory;
 use super::theme::{ProfileType, Theme};
+use crate::history::ProfileHistory;
+use crate::profile::Profile;
 
 /// Profile preview panel
 pub struct ProfilePreview<'a> {
@@ -47,11 +47,11 @@ impl<'a> ProfilePreview<'a> {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Type & Region
-                Constraint::Length(3),  // Role ARN
-                Constraint::Length(2),  // Source profile chain
-                Constraint::Length(2),  // MFA info
-                Constraint::Min(0),     // Last used / extra info
+                Constraint::Length(3), // Type & Region
+                Constraint::Length(3), // Role ARN
+                Constraint::Length(2), // Source profile chain
+                Constraint::Length(2), // MFA info
+                Constraint::Min(0),    // Last used / extra info
             ])
             .split(inner);
 
@@ -72,7 +72,11 @@ impl<'a> ProfilePreview<'a> {
         };
 
         let type_span = Span::styled(
-            format!("{}{}", profile_type.icon(&self.theme.icons), profile_type.label()),
+            format!(
+                "{}{}",
+                profile_type.icon(&self.theme.icons),
+                profile_type.label()
+            ),
             profile_type.style(self.theme).add_modifier(Modifier::BOLD),
         );
 
@@ -82,7 +86,9 @@ impl<'a> ProfilePreview<'a> {
             self.theme.muted_style(),
         );
 
-        let account = self.profile.get_account_id()
+        let account = self
+            .profile
+            .get_account_id()
             .unwrap_or_else(|| "Unknown".to_string());
         let account_span = Span::styled(
             format!("  {}Account: {}", self.theme.icons.account, account),
@@ -104,10 +110,7 @@ impl<'a> ProfilePreview<'a> {
                 format!("{}Role: ", self.theme.icons.role),
                 self.theme.muted_style(),
             );
-            let value = Span::styled(
-                role_arn.clone(),
-                Style::default().fg(self.theme.secondary),
-            );
+            let value = Span::styled(role_arn.clone(), Style::default().fg(self.theme.secondary));
 
             let line = Line::from(vec![label, value]);
             let paragraph = Paragraph::new(vec![line]).wrap(Wrap { trim: true });
@@ -182,18 +185,13 @@ impl<'a> ProfilePreview<'a> {
                         format!("{}Last used: ", self.theme.icons.clock),
                         self.theme.muted_style(),
                     ),
-                    Span::styled(
-                        time_ago,
-                        Style::default().fg(self.theme.muted),
-                    ),
+                    Span::styled(time_ago, Style::default().fg(self.theme.muted)),
                 ]);
 
-                let use_count = Line::from(vec![
-                    Span::styled(
-                        format!("  Used {} times", entry.use_count),
-                        self.theme.muted_style(),
-                    ),
-                ]);
+                let use_count = Line::from(vec![Span::styled(
+                    format!("  Used {} times", entry.use_count),
+                    self.theme.muted_style(),
+                )]);
 
                 let paragraph = Paragraph::new(vec![line, use_count]);
                 frame.render_widget(paragraph, area);
@@ -234,22 +232,13 @@ pub fn compact_preview_line(profile: &Profile, theme: &Theme) -> Line<'static> {
     );
 
     let region = profile.region.as_deref().unwrap_or("-");
-    let region_span = Span::styled(
-        format!("{:<12}", region),
-        theme.muted_style(),
-    );
+    let region_span = Span::styled(format!("{:<12}", region), theme.muted_style());
 
     let account = profile.get_account_id().unwrap_or_else(|| "-".to_string());
-    let account_span = Span::styled(
-        account,
-        theme.muted_style(),
-    );
+    let account_span = Span::styled(account, theme.muted_style());
 
     let mfa_span = if profile.mfa_serial.is_some() {
-        Span::styled(
-            theme.icons.mfa.to_string(),
-            theme.warning_style(),
-        )
+        Span::styled(theme.icons.mfa.to_string(), theme.warning_style())
     } else {
         Span::raw("  ")
     };

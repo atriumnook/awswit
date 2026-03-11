@@ -29,7 +29,9 @@ impl StsClient {
         }
 
         let client = Client::new(&config);
-        Self { default_client: client }
+        Self {
+            default_client: client,
+        }
     }
 
     /// Create an STS client with specific credentials
@@ -47,8 +49,8 @@ impl StsClient {
             "awswit",
         );
 
-        let mut config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .credentials_provider(creds);
+        let mut config_builder =
+            aws_config::defaults(aws_config::BehaviorVersion::latest()).credentials_provider(creds);
 
         if let Some(r) = region {
             config_builder = config_builder.region(aws_config::Region::new(r.to_string()));
@@ -59,6 +61,7 @@ impl StsClient {
     }
 
     /// Assume a role
+    #[allow(clippy::too_many_arguments)]
     pub async fn assume_role(
         &self,
         source_credentials: Option<&Credentials>,
@@ -102,14 +105,21 @@ impl StsClient {
 
         let response = timeout(Duration::from_secs(STS_TIMEOUT_SECS), request.send())
             .await
-            .map_err(|_| AwswitError::StsTimeout { seconds: STS_TIMEOUT_SECS })?
+            .map_err(|_| AwswitError::StsTimeout {
+                seconds: STS_TIMEOUT_SECS,
+            })?
             .map_err(|e| {
                 tracing::debug!("AssumeRole SDK error: {}", e);
-                AwswitError::AssumeRoleFailed { message: sanitize_sdk_error(&e) }
+                AwswitError::AssumeRoleFailed {
+                    message: sanitize_sdk_error(&e),
+                }
             })?;
 
-        let aws_creds = response.credentials()
-            .ok_or_else(|| AwswitError::AssumeRoleFailed { message: "No credentials in response".to_string() })?;
+        let aws_creds = response
+            .credentials()
+            .ok_or_else(|| AwswitError::AssumeRoleFailed {
+                message: "No credentials in response".to_string(),
+            })?;
 
         let expiration = parse_sts_expiration(aws_creds.expiration())?;
 
@@ -132,10 +142,9 @@ impl StsClient {
     ) -> Result<Credentials, AwswitError> {
         tracing::debug!("Getting session token");
 
-        let client = Self::client_with_credentials(
-            source_credentials,
-            source_credentials.region.as_deref(),
-        ).await?;
+        let client =
+            Self::client_with_credentials(source_credentials, source_credentials.region.as_deref())
+                .await?;
 
         let mut request = client.get_session_token();
 
@@ -153,14 +162,22 @@ impl StsClient {
 
         let response = timeout(Duration::from_secs(STS_TIMEOUT_SECS), request.send())
             .await
-            .map_err(|_| AwswitError::StsTimeout { seconds: STS_TIMEOUT_SECS })?
+            .map_err(|_| AwswitError::StsTimeout {
+                seconds: STS_TIMEOUT_SECS,
+            })?
             .map_err(|e| {
                 tracing::debug!("GetSessionToken SDK error: {}", e);
-                AwswitError::GetSessionTokenFailed { message: sanitize_sdk_error(&e) }
+                AwswitError::GetSessionTokenFailed {
+                    message: sanitize_sdk_error(&e),
+                }
             })?;
 
-        let aws_creds = response.credentials()
-            .ok_or_else(|| AwswitError::GetSessionTokenFailed { message: "No credentials in response".to_string() })?;
+        let aws_creds =
+            response
+                .credentials()
+                .ok_or_else(|| AwswitError::GetSessionTokenFailed {
+                    message: "No credentials in response".to_string(),
+                })?;
 
         let expiration = parse_sts_expiration(aws_creds.expiration())?;
 
@@ -178,15 +195,14 @@ impl StsClient {
 fn parse_sts_expiration(
     e: &aws_sdk_sts::primitives::DateTime,
 ) -> Result<DateTime<Utc>, AwswitError> {
-    DateTime::<Utc>::from_timestamp(e.secs(), e.subsec_nanos())
-        .ok_or_else(|| {
-            tracing::warn!(
-                "Failed to parse STS expiration: secs={}, nanos={}",
-                e.secs(),
-                e.subsec_nanos()
-            );
-            AwswitError::InvalidStsTimestamp
-        })
+    DateTime::<Utc>::from_timestamp(e.secs(), e.subsec_nanos()).ok_or_else(|| {
+        tracing::warn!(
+            "Failed to parse STS expiration: secs={}, nanos={}",
+            e.secs(),
+            e.subsec_nanos()
+        );
+        AwswitError::InvalidStsTimestamp
+    })
 }
 
 /// Extract only error code/message from SDK error, hiding request IDs and internal details
@@ -195,12 +211,8 @@ fn sanitize_sdk_error<E: std::error::Error>(err: &aws_sdk_sts::error::SdkError<E
         aws_sdk_sts::error::SdkError::ServiceError(service_err) => {
             format!("{}", service_err.err())
         }
-        aws_sdk_sts::error::SdkError::TimeoutError(_) => {
-            "Request timed out".to_string()
-        }
-        aws_sdk_sts::error::SdkError::DispatchFailure(_) => {
-            "Failed to connect to AWS".to_string()
-        }
+        aws_sdk_sts::error::SdkError::TimeoutError(_) => "Request timed out".to_string(),
+        aws_sdk_sts::error::SdkError::DispatchFailure(_) => "Failed to connect to AWS".to_string(),
         _ => "AWS request failed".to_string(),
     }
 }

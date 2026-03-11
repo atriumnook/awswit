@@ -101,7 +101,8 @@ _awswit_rs() {
 }
 
 _awswit_rs "$@"
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn generate_fish_autocomplete() -> String {
@@ -137,7 +138,8 @@ complete -c awswit -l with-web-identity -d "Use web identity"
 complete -c awswit -l config -d "Manage config" -xa "set get reset list"
 complete -c awswit -l info -d "Show INFO logs"
 complete -c awswit -l debug -d "Show DEBUG logs"
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn generate_powershell_autocomplete() -> String {
@@ -184,5 +186,6 @@ Register-ArgumentCompleter -Native -CommandName awswit,awswit -ScriptBlock {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
-"#.to_string()
+"#
+    .to_string()
 }

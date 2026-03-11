@@ -23,7 +23,9 @@ impl CacheManager {
     /// Create a new cache manager
     pub fn new() -> Result<Self, AwswitError> {
         let cache_dir = dirs::home_dir()
-            .ok_or_else(|| AwswitError::CacheError { message: "Cannot determine home directory".to_string() })?
+            .ok_or_else(|| AwswitError::CacheError {
+                message: "Cannot determine home directory".to_string(),
+            })?
             .join(".awswit")
             .join("cache");
 
@@ -36,7 +38,9 @@ impl CacheManager {
                 .recursive(true)
                 .mode(0o700)
                 .create(&cache_dir)
-                .map_err(|e| AwswitError::CacheError { message: format!("Failed to create cache dir: {}", e) })?;
+                .map_err(|e| AwswitError::CacheError {
+                    message: format!("Failed to create cache dir: {}", e),
+                })?;
         }
 
         #[cfg(not(unix))]
@@ -55,7 +59,11 @@ impl CacheManager {
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(AwswitError::CacheError { message: format!("Failed to read cache: {}", e) }),
+            Err(e) => {
+                return Err(AwswitError::CacheError {
+                    message: format!("Failed to read cache: {}", e),
+                })
+            }
         };
 
         // Corrupt JSON → cache miss, not hard error
@@ -72,7 +80,8 @@ impl CacheManager {
         if entry.cache_key != key {
             tracing::warn!(
                 "Cache key mismatch: requested '{}' but file contains '{}', treating as miss",
-                key, entry.cache_key
+                key,
+                entry.cache_key
             );
             return Ok(None);
         }

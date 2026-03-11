@@ -47,8 +47,9 @@ impl ProfileHistory {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::CacheError { message: format!("Failed to read history: {}", e) })?;
+        let content = fs::read_to_string(&path).map_err(|e| AwswitError::CacheError {
+            message: format!("Failed to read history: {}", e),
+        })?;
 
         match serde_json::from_str::<Self>(&content) {
             Ok(history) => Ok(history),
@@ -57,7 +58,8 @@ impl ProfileHistory {
                 let backup_path = path.with_extension("json.corrupt");
                 tracing::warn!(
                     "History file is corrupt ({}), backing up to {:?} and resetting",
-                    e, backup_path
+                    e,
+                    backup_path
                 );
                 let _ = fs::copy(&path, &backup_path);
                 Ok(Self::default())
@@ -105,7 +107,10 @@ impl ProfileHistory {
 
     /// Check if a profile is favorite
     pub fn is_favorite(&self, profile_name: &str) -> bool {
-        self.entries.get(profile_name).map(|e| e.is_favorite).unwrap_or(false)
+        self.entries
+            .get(profile_name)
+            .map(|e| e.is_favorite)
+            .unwrap_or(false)
     }
 
     /// Set favorite status
@@ -140,7 +145,8 @@ impl ProfileHistory {
 
     /// Get favorite profiles
     pub fn favorite_profiles(&self) -> Vec<&str> {
-        self.entries.values()
+        self.entries
+            .values()
             .filter(|e| e.is_favorite)
             .map(|e| e.name.as_str())
             .collect()
@@ -156,9 +162,8 @@ impl ProfileHistory {
     /// Clean up old entries (older than 90 days)
     pub fn cleanup_old(&mut self, days: i64) {
         let cutoff = Utc::now() - chrono::Duration::days(days);
-        self.entries.retain(|_, entry| {
-            entry.last_used > cutoff || entry.is_favorite
-        });
+        self.entries
+            .retain(|_, entry| entry.last_used > cutoff || entry.is_favorite);
     }
 
     /// Get total number of entries

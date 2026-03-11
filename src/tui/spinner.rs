@@ -1,6 +1,6 @@
-use std::time::Duration;
 use console::{style, Emoji};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Duration;
 
 static LOCK: Emoji<'_, '_> = Emoji("🔐 ", "");
 static KEY: Emoji<'_, '_> = Emoji("🔑 ", "");
@@ -11,7 +11,7 @@ static CROSS: Emoji<'_, '_> = Emoji("❌ ", "[ERR] ");
 /// Spinner for AWS operations
 pub struct AwswitSpinner {
     progress: ProgressBar,
-    start_message: String,
+    _start_message: String,
 }
 
 impl AwswitSpinner {
@@ -22,14 +22,14 @@ impl AwswitSpinner {
             ProgressStyle::default_spinner()
                 .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ")
                 .template("{spinner:.cyan} {msg}")
-                .expect("Invalid spinner template")
+                .expect("Invalid spinner template"),
         );
         progress.set_message(message.to_string());
         progress.enable_steady_tick(Duration::from_millis(80));
-        
+
         Self {
             progress,
-            start_message: message.to_string(),
+            _start_message: message.to_string(),
         }
     }
 
@@ -60,20 +60,14 @@ impl AwswitSpinner {
 
     /// Finish with success
     pub fn finish_success(&self, message: &str) {
-        self.progress.finish_with_message(format!(
-            "{}{}", 
-            CHECK, 
-            style(message).green()
-        ));
+        self.progress
+            .finish_with_message(format!("{}{}", CHECK, style(message).green()));
     }
 
     /// Finish with error
     pub fn finish_error(&self, message: &str) {
-        self.progress.finish_with_message(format!(
-            "{}{}", 
-            CROSS, 
-            style(message).red()
-        ));
+        self.progress
+            .finish_with_message(format!("{}{}", CROSS, style(message).red()));
     }
 
     /// Finish and clear
@@ -91,12 +85,14 @@ impl Drop for AwswitSpinner {
 }
 
 /// Multi-step progress indicator
+#[allow(dead_code)]
 pub struct MultiStepProgress {
     steps: Vec<String>,
     current: usize,
     progress: ProgressBar,
 }
 
+#[allow(dead_code)]
 impl MultiStepProgress {
     pub fn new(steps: Vec<&str>) -> Self {
         let total = steps.len() as u64;
@@ -105,7 +101,7 @@ impl MultiStepProgress {
             ProgressStyle::default_bar()
                 .template("{spinner:.cyan} [{bar:30.cyan/dim}] {pos}/{len} {msg}")
                 .expect("Invalid progress template")
-                .progress_chars("━━╸")
+                .progress_chars("━━╸"),
         );
         progress.enable_steady_tick(Duration::from_millis(100));
 
@@ -125,10 +121,7 @@ impl MultiStepProgress {
     }
 
     pub fn finish(&self) {
-        self.progress.finish_with_message(format!(
-            "{}Done!", 
-            CHECK
-        ));
+        self.progress.finish_with_message(format!("{}Done!", CHECK));
     }
 }
 
@@ -154,17 +147,9 @@ impl StatusLine {
 
     pub fn profile_assumed(profile: &str, expiration: Option<&str>) {
         eprintln!();
-        eprintln!(
-            "{} Profile: {}", 
-            CHECK,
-            style(profile).cyan().bold()
-        );
+        eprintln!("{} Profile: {}", CHECK, style(profile).cyan().bold());
         if let Some(exp) = expiration {
-            eprintln!(
-                "   {} Expires: {}", 
-                style("⏱").dim(),
-                style(exp).dim()
-            );
+            eprintln!("   {} Expires: {}", style("⏱").dim(), style(exp).dim());
         }
         eprintln!();
     }

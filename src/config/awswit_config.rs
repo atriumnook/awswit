@@ -67,8 +67,9 @@ impl AwswitConfig {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read config: {}", e) })?;
+        let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
+            message: format!("Failed to read config: {}", e),
+        })?;
 
         let config: Self = serde_yaml::from_str(&content)?;
         Ok(config)
@@ -94,16 +95,19 @@ impl AwswitConfig {
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<(), AwswitError> {
         match key {
             "colors" => {
-                self.colors = value.parse()
-                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid boolean: {}", value) })?;
+                self.colors = value.parse().map_err(|_| AwswitError::ValidationError {
+                    message: format!("Invalid boolean: {}", value),
+                })?;
             }
             "fuzzy-match" => {
-                self.fuzzy_match = value.parse()
-                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid boolean: {}", value) })?;
+                self.fuzzy_match = value.parse().map_err(|_| AwswitError::ValidationError {
+                    message: format!("Invalid boolean: {}", value),
+                })?;
             }
             "role-duration" => {
-                self.role_duration = value.parse()
-                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid number: {}", value) })?;
+                self.role_duration = value.parse().map_err(|_| AwswitError::ValidationError {
+                    message: format!("Invalid number: {}", value),
+                })?;
             }
             "region" => {
                 self.region = Some(value.to_string());
@@ -112,18 +116,25 @@ impl AwswitConfig {
                 self.role_session_name = Some(value.to_string());
             }
             "session-token-duration" => {
-                let duration: i32 = value.parse()
-                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid number: {}", value) })?;
-                if duration < 900 || duration > 129600 {
+                let duration: i32 = value.parse().map_err(|_| AwswitError::ValidationError {
+                    message: format!("Invalid number: {}", value),
+                })?;
+                if !(900..=129600).contains(&duration) {
                     return Err(AwswitError::ValidationError {
-                        message: format!("session-token-duration must be between 900 and 129600 seconds, got {}", duration),
+                        message: format!(
+                            "session-token-duration must be between 900 and 129600 seconds, got {}",
+                            duration
+                        ),
                     });
                 }
                 self.session_token_duration = Some(duration);
             }
             _ => {
                 // Store in extra for plugins
-                self.extra.insert(key.to_string(), serde_yaml::Value::String(value.to_string()));
+                self.extra.insert(
+                    key.to_string(),
+                    serde_yaml::Value::String(value.to_string()),
+                );
             }
         }
         Ok(())
@@ -183,7 +194,10 @@ mod tests {
         assert_eq!(config.get_value("fuzzy-match"), Some("false".to_string()));
 
         config.set_value("session-token-duration", "43200").unwrap();
-        assert_eq!(config.get_value("session-token-duration"), Some("43200".to_string()));
+        assert_eq!(
+            config.get_value("session-token-duration"),
+            Some("43200".to_string())
+        );
     }
 
     #[test]

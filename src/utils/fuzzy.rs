@@ -4,17 +4,14 @@ use strsim::levenshtein;
 use crate::profile::Profile;
 
 /// Find the closest matching profile name using fuzzy matching
-/// 
+///
 /// Uses three methods in order:
 /// 1. Prefix matching
 /// 2. Longest common subsequence
 /// 3. Levenshtein distance
-pub fn find_closest_profile(
-    input: &str,
-    profiles: &HashMap<String, Profile>,
-) -> Option<String> {
+pub fn find_closest_profile(input: &str, profiles: &HashMap<String, Profile>) -> Option<String> {
     let profile_names: Vec<&str> = profiles.keys().map(|s| s.as_str()).collect();
-    
+
     if profile_names.is_empty() {
         return None;
     }
@@ -65,14 +62,14 @@ fn prefix_match(input: &str, profiles: &[&str]) -> Option<String> {
 /// Match profiles using longest common subsequence
 fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
     let input_lower = input.to_lowercase();
-    
+
     let mut best_match: Option<(&str, usize)> = None;
     let mut is_tie = false;
 
     for profile in profiles {
         let profile_lower = profile.to_lowercase();
         let lcs_len = longest_common_subsequence(&input_lower, &profile_lower);
-        
+
         match &best_match {
             None => {
                 best_match = Some((profile, lcs_len));
@@ -92,7 +89,10 @@ fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
         return None;
     }
 
-    // Require LCS length to be at least 50% of input length
+    // Require LCS length to be at least 50% of input length.
+    // Using manual div-ceil for MSRV 1.75 compatibility — usize::div_ceil is
+    // not stable until Rust 1.73+ and may not be available on all target toolchains.
+    #[allow(clippy::manual_div_ceil)]
     let min_lcs = (input.len() + 1) / 2;
     best_match
         .filter(|(_, lcs_len)| *lcs_len >= min_lcs)
@@ -103,12 +103,12 @@ fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
 fn longest_common_subsequence(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
-    
+
     let m = a_chars.len();
     let n = b_chars.len();
-    
+
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    
+
     for i in 1..=m {
         for j in 1..=n {
             if a_chars[i - 1] == b_chars[j - 1] {
@@ -118,21 +118,21 @@ fn longest_common_subsequence(a: &str, b: &str) -> usize {
             }
         }
     }
-    
+
     dp[m][n]
 }
 
 /// Match profiles using Levenshtein distance
 fn levenshtein_match(input: &str, profiles: &[&str]) -> Option<String> {
     let input_lower = input.to_lowercase();
-    
+
     let mut best_match: Option<(&str, usize)> = None;
     let mut is_tie = false;
 
     for profile in profiles {
         let profile_lower = profile.to_lowercase();
         let distance = levenshtein(&input_lower, &profile_lower);
-        
+
         match &best_match {
             None => {
                 best_match = Some((profile, distance));
@@ -174,11 +174,11 @@ mod tests {
     #[test]
     fn test_prefix_match() {
         let profiles = create_test_profiles();
-        
+
         // Unique prefix
         let result = find_closest_profile("stag", &profiles);
         assert_eq!(result, Some("staging".to_string()));
-        
+
         // Ambiguous prefix (dev- matches multiple)
         let result = find_closest_profile("dev", &profiles);
         assert!(result.is_none() || result.is_some()); // Either none or one match
@@ -187,11 +187,11 @@ mod tests {
     #[test]
     fn test_typo_match() {
         let profiles = create_test_profiles();
-        
+
         // Small typo
         let result = find_closest_profile("stagin", &profiles);
         assert_eq!(result, Some("staging".to_string()));
-        
+
         // Transposition
         let result = find_closest_profile("stagign", &profiles);
         assert_eq!(result, Some("staging".to_string()));
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn test_exact_match() {
         let profiles = create_test_profiles();
-        
+
         // Exact match should be preferred
         let result = find_closest_profile("staging", &profiles);
         assert_eq!(result, Some("staging".to_string()));

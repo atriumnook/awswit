@@ -1,3 +1,3 @@
 mod storage;
 
-pub use storage::{ProfileHistory, HistoryEntry};
+pub use storage::{HistoryEntry, ProfileHistory};

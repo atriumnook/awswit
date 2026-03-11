@@ -1,10 +1,21 @@
+// TODO: The following test modules reimplement logic locally instead of exercising real code:
+// - `mfa_validation` should call `awswit::profile::resolver::validate_mfa_token` (needs pub)
+// - `credential_process_parsing` duplicates CredentialProcessOutput struct
+// - `credentials_expiry` should call `Credentials::is_expired()`
+// - `shell_export` / `shell_detect` should use `awswit::shell::export::ShellExporter`
+// - `sorted_profile_names` duplicates sorting logic from profile listing
+// See also: tests/config_parsing.rs (file I/O only), tests/profile_resolution.rs (ARN parsing only).
+
 //! Required unit tests for critical untested paths
 
 mod mfa_validation {
     // Test MFA token validation (imported logic)
     fn validate_mfa_token(token: &str) -> Result<(), String> {
         if token.len() < 6 || token.len() > 8 {
-            return Err(format!("MFA token must be 6-8 digits, got {} characters", token.len()));
+            return Err(format!(
+                "MFA token must be 6-8 digits, got {} characters",
+                token.len()
+            ));
         }
         if !token.chars().all(|c| c.is_ascii_digit()) {
             return Err("MFA token must contain only digits".to_string());
@@ -50,6 +61,7 @@ mod credential_process_parsing {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
+    #[allow(dead_code)]
     struct CredentialProcessOutput {
         access_key_id: String,
         secret_access_key: String,
@@ -118,7 +130,11 @@ mod shell_export {
 }
 
 mod shell_detect {
-    fn detect_from_env(awsume_shell: Option<&str>, psmodulepath: bool, shell: Option<&str>) -> &'static str {
+    fn detect_from_env(
+        awsume_shell: Option<&str>,
+        psmodulepath: bool,
+        shell: Option<&str>,
+    ) -> &'static str {
         if let Some(s) = awsume_shell {
             return parse_shell(s);
         }
@@ -135,15 +151,23 @@ mod shell_detect {
 
     fn parse_shell(name: &str) -> &'static str {
         let lower = name.to_lowercase();
-        if lower.contains("fish") { "fish" }
-        else if lower.contains("zsh") { "zsh" }
-        else if lower.contains("powershell") || lower.contains("pwsh") { "powershell" }
-        else { "bash" }
+        if lower.contains("fish") {
+            "fish"
+        } else if lower.contains("zsh") {
+            "zsh"
+        } else if lower.contains("powershell") || lower.contains("pwsh") {
+            "powershell"
+        } else {
+            "bash"
+        }
     }
 
     #[test]
     fn test_awsume_shell_takes_priority() {
-        assert_eq!(detect_from_env(Some("fish"), true, Some("/bin/bash")), "fish");
+        assert_eq!(
+            detect_from_env(Some("fish"), true, Some("/bin/bash")),
+            "fish"
+        );
     }
 
     #[test]
@@ -174,8 +198,6 @@ mod shell_detect {
 }
 
 mod sorted_profile_names {
-    use std::collections::HashMap;
-
     struct Entry {
         name: String,
         is_favorite: bool,
@@ -183,17 +205,15 @@ mod sorted_profile_names {
     }
 
     fn sorted_names(entries: &mut [Entry]) -> Vec<String> {
-        entries.sort_by(|a, b| {
-            match (a.is_favorite, b.is_favorite) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => match (&a.last_used, &b.last_used) {
-                    (Some(a_t), Some(b_t)) => b_t.cmp(a_t),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    _ => a.name.cmp(&b.name),
-                }
-            }
+        entries.sort_by(|a, b| match (a.is_favorite, b.is_favorite) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => match (&a.last_used, &b.last_used) {
+                (Some(a_t), Some(b_t)) => b_t.cmp(a_t),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            },
         });
         entries.iter().map(|e| e.name.clone()).collect()
     }
@@ -201,8 +221,16 @@ mod sorted_profile_names {
     #[test]
     fn test_recency_tiebreak() {
         let mut entries = vec![
-            Entry { name: "old".into(), is_favorite: false, last_used: Some(100) },
-            Entry { name: "new".into(), is_favorite: false, last_used: Some(200) },
+            Entry {
+                name: "old".into(),
+                is_favorite: false,
+                last_used: Some(100),
+            },
+            Entry {
+                name: "new".into(),
+                is_favorite: false,
+                last_used: Some(200),
+            },
         ];
         let names = sorted_names(&mut entries);
         assert_eq!(names, vec!["new", "old"]);
@@ -211,8 +239,16 @@ mod sorted_profile_names {
     #[test]
     fn test_never_used_alphabetical() {
         let mut entries = vec![
-            Entry { name: "zebra".into(), is_favorite: false, last_used: None },
-            Entry { name: "alpha".into(), is_favorite: false, last_used: None },
+            Entry {
+                name: "zebra".into(),
+                is_favorite: false,
+                last_used: None,
+            },
+            Entry {
+                name: "alpha".into(),
+                is_favorite: false,
+                last_used: None,
+            },
         ];
         let names = sorted_names(&mut entries);
         assert_eq!(names, vec!["alpha", "zebra"]);
@@ -221,8 +257,16 @@ mod sorted_profile_names {
     #[test]
     fn test_favorites_first() {
         let mut entries = vec![
-            Entry { name: "normal".into(), is_favorite: false, last_used: Some(999) },
-            Entry { name: "fav".into(), is_favorite: true, last_used: None },
+            Entry {
+                name: "normal".into(),
+                is_favorite: false,
+                last_used: Some(999),
+            },
+            Entry {
+                name: "fav".into(),
+                is_favorite: true,
+                last_used: None,
+            },
         ];
         let names = sorted_names(&mut entries);
         assert_eq!(names[0], "fav");
@@ -244,7 +288,7 @@ mod cache_corrupt_json {
         let content = fs::read_to_string(&path).unwrap();
         let result = serde_json::from_str::<serde_json::Value>(&content);
         assert!(result.is_err()); // parse fails
-        // In real code, this returns Ok(None), not Err
+                                  // In real code, this returns Ok(None), not Err
     }
 }
 
@@ -254,15 +298,27 @@ mod autoawswit_config_parsing {
     }
 
     #[test]
-    fn test_true() { assert!(parse_bool_config("true")); }
+    fn test_true() {
+        assert!(parse_bool_config("true"));
+    }
     #[test]
-    fn test_one() { assert!(parse_bool_config("1")); }
+    fn test_one() {
+        assert!(parse_bool_config("1"));
+    }
     #[test]
-    fn test_yes() { assert!(parse_bool_config("yes")); }
+    fn test_yes() {
+        assert!(parse_bool_config("yes"));
+    }
     #[test]
-    fn test_false() { assert!(!parse_bool_config("false")); }
+    fn test_false() {
+        assert!(!parse_bool_config("false"));
+    }
     #[test]
-    fn test_zero() { assert!(!parse_bool_config("0")); }
+    fn test_zero() {
+        assert!(!parse_bool_config("0"));
+    }
     #[test]
-    fn test_no() { assert!(!parse_bool_config("no")); }
+    fn test_no() {
+        assert!(!parse_bool_config("no"));
+    }
 }

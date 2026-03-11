@@ -17,10 +17,10 @@ use ratatui::{
 };
 use strsim::jaro_winkler;
 
-use crate::profile::Profile;
-use crate::history::ProfileHistory;
-use super::theme::Theme;
 use super::preview::compact_preview_line;
+use super::theme::Theme;
+use crate::history::ProfileHistory;
+use crate::profile::Profile;
 
 /// Result of profile picker
 pub enum PickerResult {
@@ -36,7 +36,7 @@ struct ProfileEntry {
     profile: Profile,
     is_favorite: bool,
     last_used: Option<chrono::DateTime<chrono::Utc>>,
-    use_count: u32,
+    _use_count: u32,
     score: Option<u32>,
 }
 
@@ -77,11 +77,7 @@ impl<'a> ProfilePicker<'a> {
         let mut terminal = Terminal::new(backend)?;
 
         // Create app state
-        let mut app = PickerApp::new(
-            self.profiles,
-            self.history,
-            self.theme,
-        );
+        let mut app = PickerApp::new(self.profiles, self.history, self.theme);
 
         // Run event loop
         let result = app.run(&mut terminal);
@@ -113,11 +109,7 @@ struct PickerApp {
 }
 
 impl PickerApp {
-    fn new(
-        profiles: &HashMap<String, Profile>,
-        history: ProfileHistory,
-        theme: Theme,
-    ) -> Self {
+    fn new(profiles: &HashMap<String, Profile>, history: ProfileHistory, theme: Theme) -> Self {
         // Create entries with history data, pre-compute lowercase names
         let mut entries: Vec<ProfileEntry> = profiles
             .iter()
@@ -129,26 +121,22 @@ impl PickerApp {
                     profile: profile.clone(),
                     is_favorite: history.is_favorite(name),
                     last_used: history_entry.map(|h| h.last_used),
-                    use_count: history_entry.map(|h| h.use_count).unwrap_or(0),
+                    _use_count: history_entry.map(|h| h.use_count).unwrap_or(0),
                     score: None,
                 }
             })
             .collect();
 
         // Sort: favorites first, then by recent use, then alphabetically
-        entries.sort_by(|a, b| {
-            match (a.is_favorite, b.is_favorite) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => {
-                    match (&a.last_used, &b.last_used) {
-                        (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        _ => a.name.cmp(&b.name),
-                    }
-                }
-            }
+        entries.sort_by(|a, b| match (a.is_favorite, b.is_favorite) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => match (&a.last_used, &b.last_used) {
+                (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            },
         });
 
         let filtered: Vec<usize> = (0..entries.len()).collect();
@@ -171,7 +159,10 @@ impl PickerApp {
         }
     }
 
-    fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<PickerResult> {
+    fn run(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> io::Result<PickerResult> {
         loop {
             terminal.draw(|f| self.render(f))?;
 
@@ -285,9 +276,9 @@ impl PickerApp {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Search bar
-                Constraint::Min(5),     // List + Preview
-                Constraint::Length(2),  // Help bar
+                Constraint::Length(3), // Search bar
+                Constraint::Min(5),    // List + Preview
+                Constraint::Length(2), // Help bar
             ])
             .split(size);
 
@@ -300,10 +291,7 @@ impl PickerApp {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.primary))
-            .title(Span::styled(
-                " 🔐 awswit ",
-                self.theme.title_style(),
-            ));
+            .title(Span::styled(" 🔐 awswit ", self.theme.title_style()));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -326,10 +314,7 @@ impl PickerApp {
         let count_x = area.right().saturating_sub(count_text.len() as u16 + 2);
         let count_area = Rect::new(count_x, area.y, count_text.len() as u16 + 2, 1);
 
-        let count_widget = Paragraph::new(Span::styled(
-            count_text,
-            self.theme.muted_style(),
-        ));
+        let count_widget = Paragraph::new(Span::styled(count_text, self.theme.muted_style()));
         frame.render_widget(count_widget, count_area);
     }
 
@@ -337,10 +322,7 @@ impl PickerApp {
         if self.show_preview && area.width > 80 {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(50),
-                ])
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
 
             self.render_list(frame, chunks[0]);
@@ -356,7 +338,8 @@ impl PickerApp {
             .border_style(Style::default().fg(self.theme.muted))
             .title(Span::styled(" Profiles ", self.theme.muted_style()));
 
-        let items: Vec<ListItem> = self.filtered
+        let items: Vec<ListItem> = self
+            .filtered
             .iter()
             .map(|&idx| {
                 let entry = &self.entries[idx];
@@ -390,9 +373,12 @@ impl PickerApp {
         let details = compact_preview_line(&entry.profile, &self.theme);
 
         let mut spans = vec![favorite, name];
-        spans.extend(details.spans.into_iter().map(|s| {
-            Span::styled(s.content.to_string(), s.style)
-        }));
+        spans.extend(
+            details
+                .spans
+                .into_iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style)),
+        );
 
         ListItem::new(Line::from(spans))
     }
@@ -432,12 +418,9 @@ impl PickerApp {
                         format!(" {} ", key),
                         Style::default()
                             .fg(self.theme.background)
-                            .bg(self.theme.muted)
+                            .bg(self.theme.muted),
                     ),
-                    Span::styled(
-                        format!(" {} ", desc),
-                        self.theme.muted_style(),
-                    ),
+                    Span::styled(format!(" {} ", desc), self.theme.muted_style()),
                     Span::raw(" "),
                 ]
             })
@@ -458,7 +441,8 @@ impl PickerApp {
             let query_lower = self.query.to_lowercase();
 
             // Use pre-computed name_lower for matching
-            let mut scored: Vec<(usize, u32)> = self.entries
+            let mut scored: Vec<(usize, u32)> = self
+                .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, entry)| {

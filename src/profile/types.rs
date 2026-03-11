@@ -1,11 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Valid credential sources
-pub const VALID_CREDENTIAL_SOURCES: &[&str] = &[
-    "Environment",
-    "Ec2InstanceMetadata",
-    "EcsContainer",
-];
+pub const VALID_CREDENTIAL_SOURCES: &[&str] =
+    &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
 
 /// Represents an AWS profile from config/credentials files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,7 +100,8 @@ impl Profile {
 
     /// Check if credential_source is valid
     pub fn has_valid_credential_source(&self) -> bool {
-        self.credential_source.as_ref()
+        self.credential_source
+            .as_ref()
             .map(|cs| VALID_CREDENTIAL_SOURCES.contains(&cs.as_str()))
             .unwrap_or(false)
     }
@@ -128,18 +126,19 @@ impl Profile {
             // Validate credential_source value
             if has_cred_source && !self.has_valid_credential_source() {
                 return Err(ProfileValidationError::InvalidCredentialSource(
-                    self.credential_source.clone().unwrap_or_default()
+                    self.credential_source.clone().unwrap_or_default(),
                 ));
             }
         }
 
         // User profiles need access keys (unless using credential_process)
-        if !self.is_role_profile() && !self.uses_credential_process() {
-            if self.aws_access_key_id.is_none() || self.aws_secret_access_key.is_none() {
-                // Allow if using credential_source
-                if !self.has_valid_credential_source() {
-                    return Err(ProfileValidationError::MissingAccessKeys);
-                }
+        if !self.is_role_profile()
+            && !self.uses_credential_process()
+            && (self.aws_access_key_id.is_none() || self.aws_secret_access_key.is_none())
+        {
+            // Allow if using credential_source
+            if !self.has_valid_credential_source() {
+                return Err(ProfileValidationError::MissingAccessKeys);
             }
         }
 
@@ -161,31 +160,35 @@ impl Profile {
 
     /// Get the effective region
     pub fn get_region(&self, default_region: Option<&str>) -> Option<String> {
-        self.region.clone()
+        self.region
+            .clone()
             .or_else(|| default_region.map(String::from))
     }
 
     /// Extract account ID from role ARN
     pub fn get_account_id(&self) -> Option<String> {
-        self.role_arn.as_ref().and_then(|arn| {
-            // arn:aws:iam::123456789012:role/RoleName
-            let parts: Vec<&str> = arn.split(':').collect();
-            if parts.len() >= 5 {
-                Some(parts[4].to_string())
-            } else {
-                None
-            }
-        }).or_else(|| {
-            // Try from mfa_serial
-            self.mfa_serial.as_ref().and_then(|serial| {
-                let parts: Vec<&str> = serial.split(':').collect();
+        self.role_arn
+            .as_ref()
+            .and_then(|arn| {
+                // arn:aws:iam::123456789012:role/RoleName
+                let parts: Vec<&str> = arn.split(':').collect();
                 if parts.len() >= 5 {
                     Some(parts[4].to_string())
                 } else {
                     None
                 }
             })
-        })
+            .or_else(|| {
+                // Try from mfa_serial
+                self.mfa_serial.as_ref().and_then(|serial| {
+                    let parts: Vec<&str> = serial.split(':').collect();
+                    if parts.len() >= 5 {
+                        Some(parts[4].to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
     }
 }
 
@@ -205,7 +208,10 @@ impl std::fmt::Display for ProfileValidationError {
                 write!(f, "role profiles must contain one of credential_source, source_profile, or credential_process")
             }
             Self::ConflictingCredentialSource => {
-                write!(f, "credential_source and source_profile are mutually exclusive")
+                write!(
+                    f,
+                    "credential_source and source_profile are mutually exclusive"
+                )
             }
             Self::InvalidCredentialSource(cs) => {
                 write!(f, "unsupported credential_source: {}", cs)
@@ -241,16 +247,20 @@ mod tests {
 
     #[test]
     fn test_get_account_id() {
-        let mut profile = Profile::default();
-        profile.role_arn = Some("arn:aws:iam::123456789012:role/TestRole".to_string());
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/TestRole".to_string()),
+            ..Default::default()
+        };
         assert_eq!(profile.get_account_id(), Some("123456789012".to_string()));
     }
 
     #[test]
     fn test_validate_role_profile() {
-        let mut profile = Profile::default();
-        profile.role_arn = Some("arn:aws:iam::123456789012:role/Test".to_string());
-        
+        let mut profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            ..Default::default()
+        };
+
         // Should fail without source
         assert!(profile.validate().is_err());
 

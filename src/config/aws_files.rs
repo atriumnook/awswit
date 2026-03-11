@@ -1,7 +1,7 @@
+use configparser::ini::Ini;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use configparser::ini::Ini;
 
 use crate::error::AwswitError;
 use crate::profile::Profile;
@@ -30,18 +30,21 @@ impl AwsFiles {
     /// Load the AWS config file (~/.aws/config)
     fn load_config_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
         let path = shellexpand::tilde(path).to_string();
-        
+
         if !Path::new(&path).exists() {
             tracing::debug!("Config file not found: {}", path);
             return Ok(HashMap::new());
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read {}: {}", path, e) })?;
+        let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
+            message: format!("Failed to read {}: {}", path, e),
+        })?;
 
         let mut ini = Ini::new_cs(); // Case sensitive
         ini.read(content)
-            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to parse {}: {}", path, e) })?;
+            .map_err(|e| AwswitError::ConfigFileError {
+                message: format!("Failed to parse {}: {}", path, e),
+            })?;
 
         let mut profiles = HashMap::new();
 
@@ -67,18 +70,21 @@ impl AwsFiles {
     /// Load the AWS credentials file (~/.aws/credentials)
     fn load_credentials_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
         let path = shellexpand::tilde(path).to_string();
-        
+
         if !Path::new(&path).exists() {
             tracing::debug!("Credentials file not found: {}", path);
             return Ok(HashMap::new());
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read {}: {}", path, e) })?;
+        let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
+            message: format!("Failed to read {}: {}", path, e),
+        })?;
 
         let mut ini = Ini::new_cs();
         ini.read(content)
-            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to parse {}: {}", path, e) })?;
+            .map_err(|e| AwswitError::ConfigFileError {
+                message: format!("Failed to parse {}: {}", path, e),
+            })?;
 
         let mut profiles = HashMap::new();
 
@@ -94,12 +100,13 @@ impl AwsFiles {
 
     /// Convert an INI section to a Profile
     fn section_to_profile(ini: &Ini, section: &str) -> Profile {
-        let get = |key: &str| -> Option<String> {
-            ini.get(section, key)
-        };
+        let get = |key: &str| -> Option<String> { ini.get(section, key) };
 
         Profile {
-            name: section.strip_prefix("profile ").unwrap_or(section).to_string(),
+            name: section
+                .strip_prefix("profile ")
+                .unwrap_or(section)
+                .to_string(),
             aws_access_key_id: get("aws_access_key_id"),
             aws_secret_access_key: get("aws_secret_access_key"),
             aws_session_token: get("aws_session_token"),
@@ -160,7 +167,9 @@ mod tests {
 
     fn create_temp_config() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        write!(file, r#"
+        write!(
+            file,
+            r#"
 [default]
 region = us-east-1
 
@@ -174,17 +183,23 @@ region = us-west-2
 role_arn = arn:aws:iam::987654321098:role/ProdRole
 source_profile = dev
 external_id = abc123
-"#).unwrap();
+"#
+        )
+        .unwrap();
         file
     }
 
     fn create_temp_credentials() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        write!(file, r#"
+        write!(
+            file,
+            r#"
 [default]
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
 aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-"#).unwrap();
+"#
+        )
+        .unwrap();
         file
     }
 
@@ -195,14 +210,18 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
         let aws_files = AwsFiles::load(
             config_file.path().to_str().unwrap(),
-            creds_file.path().to_str().unwrap()
-        ).unwrap();
+            creds_file.path().to_str().unwrap(),
+        )
+        .unwrap();
 
         assert!(aws_files.config_profiles.contains_key("dev"));
         assert!(aws_files.config_profiles.contains_key("prod"));
-        
+
         let dev = &aws_files.config_profiles["dev"];
-        assert_eq!(dev.role_arn, Some("arn:aws:iam::123456789012:role/DevRole".to_string()));
+        assert_eq!(
+            dev.role_arn,
+            Some("arn:aws:iam::123456789012:role/DevRole".to_string())
+        );
         assert_eq!(dev.source_profile, Some("default".to_string()));
     }
 
@@ -213,13 +232,17 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
         let aws_files = AwsFiles::load(
             config_file.path().to_str().unwrap(),
-            creds_file.path().to_str().unwrap()
-        ).unwrap();
+            creds_file.path().to_str().unwrap(),
+        )
+        .unwrap();
 
         let merged = aws_files.merge_profiles();
-        
+
         let default = &merged["default"];
-        assert_eq!(default.aws_access_key_id, Some("AKIAIOSFODNN7EXAMPLE".to_string()));
+        assert_eq!(
+            default.aws_access_key_id,
+            Some("AKIAIOSFODNN7EXAMPLE".to_string())
+        );
         assert_eq!(default.region, Some("us-east-1".to_string()));
     }
 }
