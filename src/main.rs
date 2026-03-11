@@ -166,6 +166,8 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     let spinner = tui::AwswitSpinner::assuming_role(&target_profile_name);
 
     // Resolve the profile chain and get credentials
+    // StsClient is initialized lazily here, just before it's needed, to avoid
+    // unnecessary AWS SDK initialization when operations don't require STS.
     let resolver = ProfileResolver::new(&profiles, &awswit_config);
     let cache_manager = CacheManager::new()?;
     let sts_client = StsClient::new().await;
@@ -194,7 +196,24 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle auto-refresh
     if args.auto_refresh {
-        autorefresh::start_auto_refresh(&target_profile_name, &args, &credentials).await?;
+        // Determine if the profile chain requires MFA
+        let requires_mfa = profiles
+            .get(&target_profile_name)
+            .map(|p| {
+                if p.requires_mfa() {
+                    return true;
+                }
+                // Check source profile chain for MFA
+                if let Some(ref src) = p.source_profile {
+                    if let Some(src_p) = profiles.get(src) {
+                        return src_p.requires_mfa();
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
+        autorefresh::start_auto_refresh(&target_profile_name, &args, &credentials, requires_mfa)
+            .await?;
     }
 
     // Emit credentials
@@ -402,7 +421,8 @@ fn determine_target_profile(
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {
     let script = match shell.to_lowercase().as_str() {
-        "bash" | "zsh" => include_str!("init/bash.sh"),
+        "bash" => include_str!("init/bash.sh"),
+        "zsh" => include_str!("init/zsh.sh"),
         "fish" => include_str!("init/fish.fish"),
         "powershell" | "pwsh" => include_str!("init/powershell.ps1"),
         _ => {

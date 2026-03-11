@@ -1,74 +1,38 @@
 use serde::{Deserialize, Serialize};
 
 /// Valid credential sources
-pub const VALID_CREDENTIAL_SOURCES: &[&str] =
-    &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
+pub const VALID_CREDENTIAL_SOURCES: &[&str] = &["Environment"];
 
 /// Represents an AWS profile from config/credentials files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
-    /// Profile name
     pub name: String,
-
-    /// Access key ID
     pub aws_access_key_id: Option<String>,
-
-    /// Secret access key
     pub aws_secret_access_key: Option<String>,
-
-    /// Session token (for temporary credentials)
     pub aws_session_token: Option<String>,
-
-    /// Role ARN to assume
     pub role_arn: Option<String>,
-
-    /// Source profile for assume role
     pub source_profile: Option<String>,
-
-    /// Credential source (Environment, Ec2InstanceMetadata, EcsContainer)
     pub credential_source: Option<String>,
-
-    /// External command to get credentials
     pub credential_process: Option<String>,
-
-    /// MFA device serial number
     pub mfa_serial: Option<String>,
-
-    /// External ID for assume role
     pub external_id: Option<String>,
-
-    /// Custom role session name
     pub role_session_name: Option<String>,
-
-    /// Duration for assumed role credentials
     pub duration_seconds: Option<i32>,
-
-    /// AWS region
     pub region: Option<String>,
-
-    /// Output format
     pub output: Option<String>,
 
     // SSO fields
-    /// SSO start URL
     pub sso_start_url: Option<String>,
-    /// SSO region
     pub sso_region: Option<String>,
-    /// SSO account ID
     pub sso_account_id: Option<String>,
-    /// SSO role name
     pub sso_role_name: Option<String>,
 
     // Web identity
-    /// Web identity token file path
     pub web_identity_token_file: Option<String>,
 
     // awswit-specific
-    /// Manager (should be "awswit" for managed profiles)
     pub manager: Option<String>,
-    /// Cache name for awswit
     pub awswit_cache_name: Option<String>,
-    /// Whether this is an autoawswit profile
     pub autoawswit: Option<bool>,
 }
 
@@ -76,11 +40,6 @@ impl Profile {
     /// Check if this is a role profile (has role_arn)
     pub fn is_role_profile(&self) -> bool {
         self.role_arn.is_some()
-    }
-
-    /// Check if this is a user profile (has access keys, no role_arn)
-    pub fn is_user_profile(&self) -> bool {
-        self.aws_access_key_id.is_some() && self.role_arn.is_none()
     }
 
     /// Check if this profile requires MFA
@@ -124,10 +83,18 @@ impl Profile {
             }
 
             // Validate credential_source value
-            if has_cred_source && !self.has_valid_credential_source() {
-                return Err(ProfileValidationError::InvalidCredentialSource(
-                    self.credential_source.clone().unwrap_or_default(),
-                ));
+            if has_cred_source {
+                let cs = self.credential_source.as_deref().unwrap_or_default();
+                if cs == "Ec2InstanceMetadata" || cs == "EcsContainer" {
+                    return Err(ProfileValidationError::UnsupportedCredentialSource(
+                        cs.to_string(),
+                    ));
+                }
+                if !self.has_valid_credential_source() {
+                    return Err(ProfileValidationError::InvalidCredentialSource(
+                        cs.to_string(),
+                    ));
+                }
             }
         }
 
@@ -156,13 +123,6 @@ impl Profile {
         if other.aws_session_token.is_some() {
             self.aws_session_token = other.aws_session_token.clone();
         }
-    }
-
-    /// Get the effective region
-    pub fn get_region(&self, default_region: Option<&str>) -> Option<String> {
-        self.region
-            .clone()
-            .or_else(|| default_region.map(String::from))
     }
 
     /// Extract account ID from role ARN
@@ -198,6 +158,7 @@ pub enum ProfileValidationError {
     MissingSourceForRole,
     ConflictingCredentialSource,
     InvalidCredentialSource(String),
+    UnsupportedCredentialSource(String),
     MissingAccessKeys,
 }
 
@@ -215,6 +176,13 @@ impl std::fmt::Display for ProfileValidationError {
             }
             Self::InvalidCredentialSource(cs) => {
                 write!(f, "unsupported credential_source: {}", cs)
+            }
+            Self::UnsupportedCredentialSource(cs) => {
+                write!(
+                    f,
+                    "credential_source '{}' is not supported by awswit. Use the AWS CLI default credential chain instead.",
+                    cs
+                )
             }
             Self::MissingAccessKeys => {
                 write!(f, "missing aws_access_key_id or aws_secret_access_key")

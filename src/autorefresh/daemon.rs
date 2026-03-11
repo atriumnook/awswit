@@ -47,6 +47,7 @@ pub async fn start_auto_refresh(
     profile_name: &str,
     args: &Args,
     credentials: &Credentials,
+    requires_mfa: bool,
 ) -> Result<(), AwswitError> {
     tracing::info!("Starting auto-refresh for profile: {}", profile_name);
 
@@ -58,13 +59,7 @@ pub async fn start_auto_refresh(
     }
 
     // Refuse auto-refresh for MFA-protected profiles (daemon has no terminal for MFA prompt).
-    // Limitation: this only checks if an MFA token was explicitly provided on the CLI.
-    // We cannot check `mfa_serial` in the profile config here because this function only
-    // receives Args and Credentials, not the full parsed profile map. Adding a `profiles`
-    // parameter would require threading the profile map through `start_auto_refresh` and
-    // all its callers. The caller (main.rs) should guard against auto-refresh for
-    // MFA-protected profiles before reaching this point.
-    if args.mfa_token.is_some() {
+    if requires_mfa || args.mfa_token.is_some() {
         return Err(AwswitError::AutoRefreshError {
             message: "Auto-refresh is not supported for MFA-protected profiles. \
                      The daemon cannot prompt for MFA tokens."
@@ -163,10 +158,13 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     let profiles = list_auto_refresh_profiles()?;
     let creds_path = credentials_file::get_aws_credentials_path()?;
 
-    for profile in profiles {
-        remove_auto_refresh_profile(&profile)?;
-        credentials_file::remove_credentials(&creds_path, &profile)?;
+    // Remove all profile metadata files
+    for profile in &profiles {
+        remove_auto_refresh_profile(profile)?;
     }
+
+    // Remove all credential sections in a single lock-read-write cycle
+    credentials_file::remove_credentials_batch(&creds_path, &profiles)?;
 
     kill_autoawswit_daemon()?;
 
@@ -174,10 +172,11 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
 }
 
 fn get_auto_refresh_dir() -> Result<PathBuf, AwswitError> {
-    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Could not determine home directory".to_string(),
-    })?;
-    Ok(home.join(".awswit").join("autorefresh"))
+    crate::utils::paths::awswit_home_dir()
+        .map(|p| p.join("autorefresh"))
+        .map_err(|e| AwswitError::AutoRefreshError {
+            message: e.to_string(),
+        })
 }
 
 fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
@@ -249,8 +248,6 @@ fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
 
 /// Acquire the daemon advisory lock with timeout.
 fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
-    use fs2::FileExt;
-
     let lock_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -260,32 +257,15 @@ fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
             message: format!("Failed to open lock: {}", e),
         })?;
 
-    // Try non-blocking first
-    if lock_file.try_lock_exclusive().is_ok() {
-        return Ok(lock_file);
-    }
+    crate::utils::fs::lock_exclusive_with_timeout(
+        &lock_file,
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Failed to acquire daemon lock: {}", e),
+    })?;
 
-    // Exponential backoff with timeout
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(30);
-    let mut backoff = std::time::Duration::from_millis(10);
-    let max_backoff = std::time::Duration::from_secs(1);
-
-    loop {
-        std::thread::sleep(backoff);
-
-        if lock_file.try_lock_exclusive().is_ok() {
-            return Ok(lock_file);
-        }
-
-        if start.elapsed() >= timeout {
-            return Err(AwswitError::AutoRefreshError {
-                message: "Failed to acquire daemon lock: timed out after 30s".to_string(),
-            });
-        }
-
-        backoff = (backoff * 2).min(max_backoff);
-    }
+    Ok(lock_file)
 }
 
 fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
@@ -401,7 +381,27 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
 
                 if verified {
                     unsafe { libc::kill(pid_i32, libc::SIGTERM) };
-                    tracing::info!("Killed autoawswit daemon (pid={})", pid);
+                    tracing::info!("Sent SIGTERM to autoawswit daemon (pid={})", pid);
+
+                    // Wait for the process to actually exit before removing PID file
+                    let start = std::time::Instant::now();
+                    let wait_timeout = std::time::Duration::from_secs(5);
+                    let poll_interval = std::time::Duration::from_millis(100);
+                    loop {
+                        if unsafe { libc::kill(pid_i32, 0) } != 0 {
+                            break;
+                        }
+                        if start.elapsed() >= wait_timeout {
+                            tracing::warn!(
+                                "Daemon (pid={}) did not exit within {:?} after SIGTERM",
+                                pid,
+                                wait_timeout
+                            );
+                            break;
+                        }
+                        std::thread::sleep(poll_interval);
+                    }
+
                     let _ = fs::remove_file(&pid_path);
                 } else if process_gone {
                     // Process is confirmed gone, safe to clean up PID file
