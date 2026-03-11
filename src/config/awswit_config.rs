@@ -52,10 +52,11 @@ impl Default for AwswitConfig {
 impl AwswitConfig {
     /// Get the config file path
     pub fn config_path() -> Result<PathBuf, AwswitError> {
-        let home = dirs::home_dir().ok_or_else(|| AwswitError::ConfigFileError {
-            message: "Could not determine home directory".to_string(),
-        })?;
-        Ok(home.join(".awswit").join("config.yaml"))
+        crate::utils::paths::awswit_home_dir()
+            .map(|p| p.join("config.yaml"))
+            .map_err(|e| AwswitError::ConfigFileError {
+                message: e.to_string(),
+            })
     }
 
     /// Load config from file, or return default if not found
@@ -149,7 +150,10 @@ impl AwswitConfig {
             "region" => self.region.clone(),
             "role-session-name" => self.role_session_name.clone(),
             "session-token-duration" => self.session_token_duration.map(|d| d.to_string()),
-            _ => self.extra.get(key).map(|v| format!("{:?}", v)),
+            _ => self.extra.get(key).map(|v| match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                other => format!("{:?}", other),
+            }),
         }
     }
 
