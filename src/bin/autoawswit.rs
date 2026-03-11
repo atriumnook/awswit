@@ -31,11 +31,35 @@ fn main() {
         .with_target(false)
         .init();
 
+    // Acquire daemon lock before writing PID file to prevent race conditions.
+    // The lock is held for the duration of PID file write; the spawning parent
+    // waits for the PID file to appear before releasing its own lock.
+    let lock_path = dirs::home_dir()
+        .expect("Could not determine home directory")
+        .join(".awswit")
+        .join("autoawswit.lock");
+    let _daemon_lock = {
+        use fs2::FileExt;
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("Failed to open daemon lock file");
+        lock_file
+            .lock_exclusive()
+            .expect("Failed to acquire daemon lock");
+        lock_file
+    };
+
     // Write PID file after successful init (not from parent)
     if let Err(e) = awswit::autorefresh::runner::write_own_pid_file() {
         tracing::error!("Failed to write PID file: {}", e);
         std::process::exit(1);
     }
+
+    // Release lock explicitly by dropping
+    drop(_daemon_lock);
 
     tracing::info!("Autoawswit daemon started (pid={})", std::process::id());
 

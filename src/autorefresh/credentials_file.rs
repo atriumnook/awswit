@@ -7,7 +7,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::aws::Credentials;
 use crate::error::AwswitError;
@@ -50,10 +50,9 @@ pub fn validate_credential_value(key: &str, value: &str) -> Result<(), AwswitErr
 
 /// Get the default `~/.aws/credentials` path.
 pub fn get_aws_credentials_path() -> Result<PathBuf, AwswitError> {
-    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Could not determine home directory".to_string(),
-    })?;
-    Ok(home.join(".aws").join("credentials"))
+    crate::utils::paths::aws_credentials_path().map_err(|e| AwswitError::AutoRefreshError {
+        message: e.to_string(),
+    })
 }
 
 /// Lock timeout for credential file operations.
@@ -66,11 +65,14 @@ pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitEr
     lock_path.push(".lock");
     let lock_path = PathBuf::from(lock_path);
 
-    let lock_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let lock_file = opts.open(&lock_path)?;
 
     lock_with_timeout(&lock_file, LOCK_TIMEOUT).map_err(|e| AwswitError::AutoRefreshError {
         message: format!("Failed to acquire credentials lock: {}", e),
@@ -81,33 +83,7 @@ pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitEr
 
 /// Try to acquire an exclusive lock with exponential backoff and timeout.
 fn lock_with_timeout(file: &fs::File, timeout: Duration) -> io::Result<()> {
-    use fs2::FileExt;
-
-    // Try non-blocking lock first
-    if file.try_lock_exclusive().is_ok() {
-        return Ok(());
-    }
-
-    let start = Instant::now();
-    let mut backoff = Duration::from_millis(10);
-    let max_backoff = Duration::from_secs(1);
-
-    loop {
-        std::thread::sleep(backoff);
-
-        if file.try_lock_exclusive().is_ok() {
-            return Ok(());
-        }
-
-        if start.elapsed() >= timeout {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("Lock acquisition timed out after {:?}", timeout),
-            ));
-        }
-
-        backoff = (backoff * 2).min(max_backoff);
-    }
+    crate::utils::fs::lock_exclusive_with_timeout(file, timeout)
 }
 
 /// Remove an INI section from credential file content.
@@ -134,47 +110,21 @@ fn remove_credentials_section(content: &str, profile_name: &str) -> String {
 }
 
 /// Write credentials for a profile to the credentials file.
-/// Validates profile name and credential values, acquires lock, and writes atomically.
+/// Converts Credentials to key/value and delegates to write_credentials_from_output.
 pub fn write_credentials(
     creds_path: &Path,
     profile_name: &str,
     creds: &Credentials,
 ) -> Result<(), AwswitError> {
-    validate_profile_name(profile_name)?;
-    validate_credential_value("aws_access_key_id", &creds.access_key_id)?;
-    validate_credential_value("aws_secret_access_key", &creds.secret_access_key)?;
-    if let Some(ref token) = creds.session_token {
-        validate_credential_value("aws_session_token", token)?;
-    }
-
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
-
-    let content = match fs::read_to_string(creds_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
-    let mut new_content = remove_credentials_section(&content, profile_name);
-
-    let new_section = format!(
-        "[{}]\n\
-        aws_access_key_id = {}\n\
-        aws_secret_access_key = {}\n\
-        aws_session_token = {}\n\
-        autoawswit = true\n\
-        awswit_expiration = {}\n",
+    let expiration_str = creds.expiration.map(|e| e.to_rfc3339());
+    write_credentials_from_output(
+        creds_path,
         profile_name,
-        creds.access_key_id,
-        creds.secret_access_key,
-        creds.session_token.as_deref().unwrap_or(""),
-        creds.expiration.map(|e| e.to_rfc3339()).unwrap_or_default()
-    );
-
-    new_content.push_str(&new_section);
-
-    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
-
-    Ok(())
+        &creds.access_key_id,
+        &creds.secret_access_key,
+        creds.session_token.as_deref(),
+        expiration_str.as_deref(),
+    )
 }
 
 /// Write credentials from parsed key=value output (used by runner's refresh_profile).
@@ -220,6 +170,29 @@ pub fn write_credentials_from_output(
 
     crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
 
+    Ok(())
+}
+
+/// Remove multiple profile sections from the credentials file in a single lock-read-write cycle.
+pub fn remove_credentials_batch(
+    creds_path: &Path,
+    profile_names: &[String],
+) -> Result<(), AwswitError> {
+    if profile_names.is_empty() {
+        return Ok(());
+    }
+
+    let _lock_file = lock_aws_credentials_file(creds_path)?;
+    if !creds_path.exists() {
+        return Ok(());
+    }
+
+    let mut content = fs::read_to_string(creds_path)?;
+    for name in profile_names {
+        content = remove_credentials_section(&content, name);
+    }
+
+    crate::utils::fs::atomic_write_restricted(creds_path, content.as_bytes())?;
     Ok(())
 }
 

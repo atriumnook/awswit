@@ -119,6 +119,9 @@ async fn run_daemon_loop_unix() {
     tracing::info!("Daemon shutdown complete");
 }
 
+// Note: non-unix fallback loop does not support graceful SIGTERM shutdown.
+// On Windows, the daemon will exit when all auto-refresh profiles are removed
+// or after MAX_CONSECUTIVE_FAILURES.
 #[cfg(not(unix))]
 async fn run_daemon_loop_fallback() {
     let mut consecutive_failures: u32 = 0;
@@ -195,17 +198,12 @@ pub fn write_own_pid_file() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Return the user's home directory, or an error if it cannot be determined.
-fn home_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    dirs::home_dir().ok_or_else(|| "Could not determine home directory".into())
-}
-
 fn get_pid_file_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    Ok(home_dir()?.join(".awswit").join("autoawswit.pid"))
+    Ok(crate::utils::paths::awswit_home_dir()?.join("autoawswit.pid"))
 }
 
 fn get_auto_refresh_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    Ok(home_dir()?.join(".awswit").join("autorefresh"))
+    Ok(crate::utils::paths::awswit_home_dir()?.join("autorefresh"))
 }
 
 async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
@@ -216,6 +214,46 @@ async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     tracing::info!("Checking {} auto-refresh profiles", profiles.len());
+
+    // Clean up profiles that have been expired for too long
+    let mut expired_profiles = Vec::new();
+    for (name, profile) in &profiles {
+        if let Some(ref exp_str) = profile.awswit_role_expiration {
+            if let Ok(exp_time) = DateTime::parse_from_rfc3339(exp_str) {
+                let exp_utc = exp_time.with_timezone(&Utc);
+                if exp_utc + chrono::Duration::hours(MAX_EXPIRED_HOURS) < Utc::now() {
+                    tracing::info!(
+                        "Cleaning up long-expired profile '{}' (expired at {})",
+                        name,
+                        exp_str
+                    );
+                    expired_profiles.push(name.clone());
+                }
+            }
+        }
+    }
+
+    if !expired_profiles.is_empty() {
+        // Remove expired profile JSON files
+        let dir = get_auto_refresh_dir()?;
+        for name in &expired_profiles {
+            let json_path = dir.join(format!("{}.json", name));
+            let _ = fs::remove_file(&json_path);
+        }
+        // Remove expired credential sections in batch
+        let creds_path = crate::utils::paths::aws_credentials_path()?;
+        let _ = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles);
+    }
+
+    // Re-check remaining profiles (exclude expired ones)
+    let profiles: HashMap<_, _> = profiles
+        .into_iter()
+        .filter(|(name, _)| !expired_profiles.contains(name))
+        .collect();
+
+    if profiles.is_empty() {
+        return Ok(false);
+    }
 
     let mut attempted = 0u32;
     let mut failures = 0u32;
@@ -267,8 +305,13 @@ fn load_auto_refresh_profiles(
                     continue;
                 }
             };
-            if let Ok(profile) = serde_json::from_str::<AutoRefreshProfile>(&content) {
-                profiles.insert(profile.profile_name.clone(), profile);
+            match serde_json::from_str::<AutoRefreshProfile>(&content) {
+                Ok(profile) => {
+                    profiles.insert(profile.profile_name.clone(), profile);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse {}: {}", path.display(), e);
+                }
             }
         }
     }
@@ -394,10 +437,14 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
         }
     }
 
-    let output = tokio::process::Command::new(&resolved_command)
-        .args(&profile.awswit_command[1..])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(&resolved_command)
+            .args(&profile.awswit_command[1..])
+            .output(),
+    )
+    .await
+    .map_err(|_| "refresh_profile timed out after 60 seconds".to_string())??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -431,8 +478,22 @@ fn update_credentials_file(
     let session_token = creds.get("AWS_SESSION_TOKEN");
     let expiration = creds.get("AWSWIT_EXPIRATION");
 
-    // Update profile metadata first — if we crash after this but before writing
-    // credentials, the metadata is self-correcting (next refresh cycle will fix it).
+    // Write credentials first — this is the critical path. If we crash after
+    // writing credentials but before updating metadata, the metadata will be
+    // stale but self-correcting (next refresh cycle will fix it). The reverse
+    // (metadata updated but credentials stale) would leave users with expired creds.
+    let creds_path = crate::utils::paths::aws_credentials_path()?;
+    credentials_file::write_credentials_from_output(
+        &creds_path,
+        profile_name,
+        access_key,
+        secret_key,
+        session_token.map(|s| s.as_str()),
+        expiration.map(|s| s.as_str()),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("{}", e).into() })?;
+
+    // Update profile metadata after credentials are written
     let profile_path = get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
     if profile_path.exists() {
         let meta_content = fs::read_to_string(&profile_path)?;
@@ -447,18 +508,6 @@ fn update_credentials_file(
                 .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
         }
     }
-
-    // Write credentials using the shared, validated module
-    let creds_path = home_dir()?.join(".aws").join("credentials");
-    credentials_file::write_credentials_from_output(
-        &creds_path,
-        profile_name,
-        access_key,
-        secret_key,
-        session_token.map(|s| s.as_str()),
-        expiration.map(|s| s.as_str()),
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { format!("{}", e).into() })?;
 
     Ok(())
 }
