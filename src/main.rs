@@ -4,25 +4,14 @@ use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-mod cli;
-mod config;
-mod profile;
-mod aws;
-mod cache;
-mod shell;
-mod autorefresh;
-mod utils;
-mod error;
-mod tui;
-mod history;
-
-use cli::{Args, Command};
-use config::{AwswitConfig, AwsFiles};
-use profile::ProfileResolver;
-use aws::StsClient;
-use cache::CacheManager;
-use shell::ShellExporter;
-use error::AwswitError;
+use awswit::aws::StsClient;
+use awswit::cache::CacheManager;
+use awswit::cli::{Args, Command};
+use awswit::config::{AwsFiles, AwswitConfig};
+use awswit::error::AwswitError;
+use awswit::profile::ProfileResolver;
+use awswit::shell::ShellExporter;
+use awswit::{autorefresh, aws, history, profile, tui, utils};
 
 #[tokio::main]
 async fn main() {
@@ -45,8 +34,7 @@ async fn main() {
         .with_line_number(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Run the main application
     if let Err(e) = run(args).await {
@@ -70,20 +58,15 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         }
     }
 
-    // Load awswit configuration
-    let awswit_config = AwswitConfig::load()?;
-    tracing::debug!("Loaded awswit config: {:?}", awswit_config);
-
-    // Handle version flag
+    // Handle version flag early (before loading config)
     if args.version {
         println!("awswit {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    // Handle config management
-    if let Some(ref config_options) = args.config {
-        return handle_config_command(&awswit_config, config_options);
-    }
+    // Load awswit configuration
+    let awswit_config = AwswitConfig::load()?;
+    tracing::debug!("Loaded awswit config: {:?}", awswit_config);
 
     // Handle unset flag
     if args.unset {
@@ -99,25 +82,37 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     // (moved below profile loading since we may still need profiles for --source-profile)
 
     // Load AWS config and credentials files
-    let credentials_file = match args.credentials_file.clone()
+    let credentials_file = match args
+        .credentials_file
+        .clone()
         .or_else(|| std::env::var("AWS_SHARED_CREDENTIALS_FILE").ok())
     {
         Some(path) => path,
         None => {
-            let home = dirs::home_dir()
-                .ok_or_else(|| AwswitError::ShellError { message: "Could not determine home directory".to_string() })?;
-            home.join(".aws").join("credentials").to_string_lossy().to_string()
+            let home = dirs::home_dir().ok_or_else(|| AwswitError::ShellError {
+                message: "Could not determine home directory".to_string(),
+            })?;
+            home.join(".aws")
+                .join("credentials")
+                .to_string_lossy()
+                .to_string()
         }
     };
 
-    let config_file = match args.config_file.clone()
+    let config_file = match args
+        .config_file
+        .clone()
         .or_else(|| std::env::var("AWS_CONFIG_FILE").ok())
     {
         Some(path) => path,
         None => {
-            let home = dirs::home_dir()
-                .ok_or_else(|| AwswitError::ShellError { message: "Could not determine home directory".to_string() })?;
-            home.join(".aws").join("config").to_string_lossy().to_string()
+            let home = dirs::home_dir().ok_or_else(|| AwswitError::ShellError {
+                message: "Could not determine home directory".to_string(),
+            })?;
+            home.join(".aws")
+                .join("config")
+                .to_string_lossy()
+                .to_string()
         }
     };
 
@@ -145,8 +140,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         && std::io::stdout().is_terminal()
     {
         // Launch interactive picker - pass reference, not clone
-        let picker = tui::ProfilePicker::new(&profiles)
-            .with_history(profile_history.clone());
+        let picker = tui::ProfilePicker::new(&profiles).with_history(profile_history.clone());
 
         match picker.run() {
             Ok(tui::picker::PickerResult::Selected(name)) => name,
@@ -154,7 +148,9 @@ async fn run(args: Args) -> Result<(), AwswitError> {
                 return Err(AwswitError::UserCancelled);
             }
             Err(e) => {
-                return Err(AwswitError::ShellError { message: format!("Picker error: {}", e) });
+                return Err(AwswitError::ShellError {
+                    message: format!("Picker error: {}", e),
+                });
             }
         }
     } else {
@@ -171,12 +167,10 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     let cache_manager = CacheManager::new()?;
     let sts_client = StsClient::new().await;
 
-    let credentials = match resolver.resolve_credentials(
-        &target_profile_name,
-        &args,
-        &sts_client,
-        &cache_manager,
-    ).await {
+    let credentials = match resolver
+        .resolve_credentials(&target_profile_name, &args, &sts_client, &cache_manager)
+        .await
+    {
         Ok(creds) => {
             spinner.finish_success(&format!("Assumed {}", target_profile_name));
             creds
@@ -198,11 +192,6 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         autorefresh::start_auto_refresh(&target_profile_name, &args, &credentials).await?;
     }
 
-    // Handle output profile
-    if let Some(ref output_profile) = args.output_profile {
-        handle_output_profile(output_profile, &credentials, &credentials_file)?;
-    }
-
     // Emit credentials
     emit_credentials(&credentials, &target_profile_name, &args)?;
 
@@ -218,57 +207,25 @@ fn emit_credentials(
     let exporter = ShellExporter::new();
     if args.show_commands {
         // Print export commands to stdout (not stderr) so `> file` works
-        print!("{}", exporter.generate_export_commands(credentials, profile_name));
+        print!(
+            "{}",
+            exporter.generate_export_commands(credentials, profile_name)
+        );
     } else {
         // Show nice status message on stderr
         tui::StatusLine::profile_assumed(
             profile_name,
-            credentials.expiration.map(|e| e.format("%Y-%m-%d %H:%M:%S").to_string()).as_deref(),
+            credentials
+                .expiration
+                .map(|e| e.format("%Y-%m-%d %H:%M:%S").to_string())
+                .as_deref(),
         );
 
         // Output in a format the shell wrapper can eval
-        print!("{}", exporter.generate_shell_output(credentials, profile_name)?);
-    }
-
-    Ok(())
-}
-
-fn handle_config_command(config: &AwswitConfig, options: &[String]) -> Result<(), AwswitError> {
-    if options.is_empty() {
-        println!("{}", serde_yaml::to_string(config)?);
-        return Ok(());
-    }
-
-    match options.first().map(|s| s.as_str()) {
-        Some("set") if options.len() >= 3 => {
-            let key = &options[1];
-            let value = &options[2];
-            let mut new_config = config.clone();
-            new_config.set_value(key, value)?;
-            new_config.save()?;
-            println!("Set {} = {}", key, value);
-        }
-        Some("get") if options.len() >= 2 => {
-            let key = &options[1];
-            if let Some(value) = config.get_value(key) {
-                println!("{}", value);
-            } else {
-                return Err(AwswitError::ConfigKeyNotFound { key: key.clone() });
-            }
-        }
-        Some("reset") | Some("clear") if options.len() >= 2 => {
-            let key = &options[1];
-            let mut new_config = config.clone();
-            new_config.reset_value(key)?;
-            new_config.save()?;
-            println!("Reset {} to default", key);
-        }
-        Some("list") | None => {
-            println!("{}", serde_yaml::to_string(config)?);
-        }
-        _ => {
-            return Err(AwswitError::InvalidConfigCommand { command: options.join(" ") });
-        }
+        print!(
+            "{}",
+            exporter.generate_shell_output(credentials, profile_name)?
+        );
     }
 
     Ok(())
@@ -302,7 +259,11 @@ fn handle_list_profiles(
 ) -> Result<(), AwswitError> {
     use colored::Colorize;
 
-    let show_more = args.list_profiles.as_ref().map(|s| s == "more").unwrap_or(false);
+    let show_more = args
+        .list_profiles
+        .as_ref()
+        .map(|s| s == "more")
+        .unwrap_or(false);
     let use_colors = config.colors && !cfg!(windows);
 
     // Print to stdout so `| less` and `> file` work
@@ -329,17 +290,29 @@ fn handle_list_profiles(
 
     for name in profile_names {
         let profile = &profiles[name];
-        let profile_type = if profile.role_arn.is_some() { "Role" } else { "User" };
-        let source = profile.source_profile.as_deref()
+        let profile_type = if profile.role_arn.is_some() {
+            "Role"
+        } else {
+            "User"
+        };
+        let source = profile
+            .source_profile
+            .as_deref()
             .or(profile.credential_source.as_deref())
             .unwrap_or("None");
-        let mfa = if profile.mfa_serial.is_some() { "Yes" } else { "No" };
+        let mfa = if profile.mfa_serial.is_some() {
+            "Yes"
+        } else {
+            "No"
+        };
         let region = profile.region.as_deref().unwrap_or("-");
 
         let account = if show_more {
             "Fetching...".to_string()
         } else {
-            profile.role_arn.as_ref()
+            profile
+                .role_arn
+                .as_ref()
                 .and_then(|arn| extract_account_from_arn(arn))
                 .unwrap_or_else(|| "Unavailable".to_string())
         };
@@ -399,7 +372,9 @@ fn determine_target_profile(
     }
 
     // Get profile name from args or default
-    let profile_name = args.profile_name.clone()
+    let profile_name = args
+        .profile_name
+        .clone()
         .or_else(|| std::env::var("AWS_PROFILE").ok())
         .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
@@ -435,68 +410,5 @@ fn handle_init(shell: &str) -> Result<(), AwswitError> {
         }
     };
     print!("{}", script);
-    Ok(())
-}
-
-fn handle_output_profile(
-    output_profile: &str,
-    credentials: &aws::Credentials,
-    credentials_file: &str,
-) -> Result<(), AwswitError> {
-    use std::fs;
-    use fs2::FileExt;
-
-    // Acquire exclusive lock before reading/writing credentials file
-    let lock_path = format!("{}.lock", credentials_file);
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
-
-    let content = fs::read_to_string(credentials_file).unwrap_or_default();
-
-    // Remove existing section if present to avoid duplicates
-    let section_header = format!("[{}]", output_profile);
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines = Vec::new();
-    let mut skip = false;
-
-    for line in &lines {
-        if line.starts_with('[') {
-            skip = line.trim() == section_header;
-        }
-        if !skip {
-            new_lines.push(*line);
-        }
-    }
-
-    let mut new_content = new_lines.join("\n");
-    if !new_content.ends_with('\n') && !new_content.is_empty() {
-        new_content.push('\n');
-    }
-
-    let expiration_str = credentials.expiration.map(|e| e.to_rfc3339()).unwrap_or_default();
-
-    let profile_content = format!(
-        "[{}]\n\
-        aws_access_key_id = {}\n\
-        aws_secret_access_key = {}\n\
-        aws_session_token = {}\n\
-        manager = awswit\n\
-        awswit_expiration = {}\n",
-        output_profile,
-        credentials.access_key_id,
-        credentials.secret_access_key,
-        credentials.session_token.as_deref().unwrap_or(""),
-        expiration_str
-    );
-
-    new_content.push_str(&profile_content);
-    fs::write(credentials_file, new_content)?;
-
-    lock_file.unlock()?;
-
-    tracing::info!("Wrote credentials to profile: {}", output_profile);
     Ok(())
 }

@@ -1,6 +1,5 @@
 //! Autocomplete helper - outputs profile names for shell completion
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -9,11 +8,11 @@ use configparser::ini::Ini;
 fn main() {
     // Load profiles quickly without full validation
     let profiles = load_profile_names();
-    
+
     // Output sorted profile names
     let mut names: Vec<_> = profiles.into_iter().collect();
     names.sort();
-    
+
     for name in names {
         println!("{}", name);
     }
@@ -26,7 +25,7 @@ fn load_profile_names() -> Vec<String> {
     let config_path = dirs::home_dir()
         .map(|h| h.join(".aws").join("config"))
         .unwrap_or_default();
-    
+
     if let Some(names) = load_profiles_from_file(&config_path, true) {
         profiles.extend(names);
     }
@@ -35,7 +34,7 @@ fn load_profile_names() -> Vec<String> {
     let creds_path = dirs::home_dir()
         .map(|h| h.join(".aws").join("credentials"))
         .unwrap_or_default();
-    
+
     if let Some(names) = load_profiles_from_file(&creds_path, false) {
         profiles.extend(names);
     }
@@ -73,7 +72,7 @@ fn load_profiles_from_file(path: &Path, is_config: bool) -> Option<Vec<String>> 
     ini.read(content).ok()?;
 
     let mut names = Vec::new();
-    
+
     for section in ini.sections() {
         let profile_name = if is_config && section.starts_with("profile ") {
             section.strip_prefix("profile ").unwrap().to_string()
@@ -82,7 +81,7 @@ fn load_profiles_from_file(path: &Path, is_config: bool) -> Option<Vec<String>> 
         } else {
             continue;
         };
-        
+
         names.push(profile_name);
     }
 

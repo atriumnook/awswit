@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 /// AWSume-rs: A Rust implementation of AWSume - AWS Assume Made Awesome
 ///
 /// A convenient way to manage session tokens and assume role credentials.
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(name = "awswit")]
 #[command(author, version, about, long_about = None)]
 #[command(after_help = "Thank you for using AWSume-rs! https://github.com/yourusername/awswit")]
@@ -39,10 +39,6 @@ pub struct Args {
     /// Kill the auto-refresher for a profile (or all if no profile specified)
     #[arg(short = 'k', long = "kill")]
     pub kill_refresher: bool,
-
-    /// A profile to output credentials to
-    #[arg(short = 'o', long = "output-profile", value_name = "output_profile")]
-    pub output_profile: Option<String>,
 
     /// List available profiles. Pass 'more' for additional details
     #[arg(short = 'l', long = "list-profiles", value_name = "detail_level", num_args = 0..=1, default_missing_value = "")]
@@ -103,10 +99,6 @@ pub struct Args {
     /// Path to config file
     #[arg(long = "config-file", value_name = "config_file")]
     pub config_file: Option<String>,
-
-    /// Manage awswit configuration (set/get/reset/list)
-    #[arg(long = "config", value_name = "option", num_args = 0..)]
-    pub config: Option<Vec<String>>,
 
     /// Display INFO level logs
     #[arg(long = "info")]
@@ -219,42 +211,5 @@ mod tests {
     fn test_get_session_name_short_profile() {
         let args = Args::default();
         assert_eq!(args.get_session_name("x"), "_x_");
-    }
-}
-
-impl Default for Args {
-    fn default() -> Self {
-        Self {
-            command: None,
-            profile_name: None,
-            version: false,
-            force_refresh: false,
-            show_commands: false,
-            unset: false,
-            auto_refresh: false,
-            kill_refresher: false,
-            output_profile: None,
-            list_profiles: None,
-            refresh_autocomplete: false,
-            role_arn: None,
-            source_profile: None,
-            external_id: None,
-            mfa_token: None,
-            region: None,
-            session_name: None,
-            session_policy: None,
-            session_policy_arns: None,
-            role_duration: None,
-            with_saml: false,
-            with_web_identity: false,
-            credentials_file: None,
-            config_file: None,
-            config: None,
-            info: false,
-            debug: false,
-            clean: false,
-            principal_arn: None,
-            no_interactive: false,
-        }
     }
 }

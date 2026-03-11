@@ -20,10 +20,7 @@ pub enum AwswitError {
     RoleChainCycle { chain: String },
 
     #[error("[E005] Missing required profile key: {key} in profile {profile_name}")]
-    MissingProfileKey {
-        profile_name: String,
-        key: String,
-    },
+    MissingProfileKey { profile_name: String, key: String },
 
     #[error("[E006] Invalid credential source: {name}")]
     InvalidCredentialSource { name: String },
@@ -103,9 +100,7 @@ impl<E: std::error::Error> From<aws_sdk_sts::error::SdkError<E>> for AwswitError
             aws_sdk_sts::error::SdkError::ServiceError(service_err) => {
                 format!("{}", service_err.err())
             }
-            aws_sdk_sts::error::SdkError::TimeoutError(_) => {
-                "Request timed out".to_string()
-            }
+            aws_sdk_sts::error::SdkError::TimeoutError(_) => "Request timed out".to_string(),
             aws_sdk_sts::error::SdkError::DispatchFailure(_) => {
                 "Failed to connect to AWS".to_string()
             }
