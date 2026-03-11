@@ -41,6 +41,8 @@ fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<VarBindin
             name: "AWS_SESSION_TOKEN",
             value: creds.session_token.clone(),
         },
+        // AWS_SECURITY_TOKEN is the legacy name for AWS_SESSION_TOKEN.
+        // Some older AWS SDKs and tools (e.g., boto2) only read this variable.
         VarBinding {
             name: "AWS_SECURITY_TOKEN",
             value: creds.session_token.clone(),
@@ -104,8 +106,10 @@ impl ShellExporter {
 
     /// Detect the current shell type
     fn detect_shell() -> ShellType {
-        // Check AWSUME_SHELL first (set by shell wrapper)
-        if let Ok(shell) = std::env::var("AWSUME_SHELL") {
+        // Check AWSWIT_SHELL first (set by shell wrapper), with AWSUME_SHELL as legacy fallback
+        if let Ok(shell) = std::env::var("AWSWIT_SHELL")
+            .or_else(|_| std::env::var("AWSUME_SHELL"))
+        {
             return Self::parse_shell_name(&shell);
         }
 

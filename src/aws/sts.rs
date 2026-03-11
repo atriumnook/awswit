@@ -9,6 +9,20 @@ use crate::error::AwswitError;
 
 const STS_TIMEOUT_SECS: u64 = 30;
 
+/// Parameters for AssumeRole calls, replacing the 8-argument method signature
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct AssumeRoleParams<'a> {
+    pub source_credentials: Option<&'a Credentials>,
+    pub role_arn: &'a str,
+    pub session_name: &'a str,
+    pub external_id: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub duration_seconds: Option<i32>,
+    pub mfa_serial: Option<&'a str>,
+    pub mfa_token: Option<&'a str>,
+}
+
 /// AWS STS client wrapper
 pub struct StsClient {
     default_client: Client,
