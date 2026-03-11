@@ -16,7 +16,7 @@ function awswit
         set -l value $parts[2]
 
         switch $key
-            case AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWSWIT_PROFILE AWSWIT_EXPIRATION
+            case AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_DEFAULT_PROFILE AWSWIT_PROFILE AWSWIT_EXPIRATION
                 if test -n "$value"
                     set -gx $key $value
                 else
@@ -26,12 +26,13 @@ function awswit
                 set -e AWS_ACCESS_KEY_ID
                 set -e AWS_SECRET_ACCESS_KEY
                 set -e AWS_SESSION_TOKEN
+                set -e AWS_SECURITY_TOKEN
                 set -e AWS_REGION
                 set -e AWS_DEFAULT_REGION
-                set -e AWSWIT_PROFILE
-                set -e AWSWIT_EXPIRATION
                 set -e AWS_PROFILE
                 set -e AWS_DEFAULT_PROFILE
+                set -e AWSWIT_PROFILE
+                set -e AWSWIT_EXPIRATION
             case '*'
                 if test -n "$key"
                     echo $line
