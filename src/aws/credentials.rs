@@ -24,7 +24,7 @@ pub struct Credentials {
 
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let masked_key = if self.access_key_id.len() > 4 {
+        let masked_key = if self.access_key_id.is_ascii() && self.access_key_id.len() > 4 {
             format!(
                 "{}...{}",
                 &self.access_key_id[..4],
@@ -56,15 +56,6 @@ impl Credentials {
         }
     }
 
-    /// Check if credentials will expire within the given duration
-    pub fn expires_within(&self, duration: chrono::Duration) -> bool {
-        if let Some(expiration) = self.expiration {
-            expiration < Utc::now() + duration
-        } else {
-            false
-        }
-    }
-
     /// Get time until expiration
     pub fn time_until_expiration(&self) -> Option<chrono::Duration> {
         self.expiration.map(|exp| exp - Utc::now())
@@ -76,22 +67,6 @@ impl Credentials {
             exp.format("%Y-%m-%d %H:%M:%S").to_string()
         } else {
             "Never".to_string()
-        }
-    }
-
-    /// Create credentials from AWS SDK credentials
-    pub fn from_sdk_credentials(
-        access_key_id: String,
-        secret_access_key: String,
-        session_token: Option<String>,
-        expiration: Option<DateTime<Utc>>,
-    ) -> Self {
-        Self {
-            access_key_id,
-            secret_access_key,
-            session_token,
-            expiration,
-            region: None,
         }
     }
 
@@ -122,14 +97,4 @@ mod tests {
         assert!(creds.is_expired());
     }
 
-    #[test]
-    fn test_expires_within() {
-        let creds = Credentials {
-            expiration: Some(Utc::now() + chrono::Duration::minutes(30)),
-            ..Default::default()
-        };
-
-        assert!(creds.expires_within(chrono::Duration::hours(1)));
-        assert!(!creds.expires_within(chrono::Duration::minutes(15)));
-    }
 }

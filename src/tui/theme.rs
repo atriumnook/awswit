@@ -83,22 +83,6 @@ impl Default for Icons {
 }
 
 impl Theme {
-    /// Create a minimal theme for terminals without full color support
-    pub fn minimal() -> Self {
-        Self {
-            primary: Color::Cyan,
-            secondary: Color::Magenta,
-            accent: Color::Blue,
-            success: Color::Green,
-            warning: Color::Yellow,
-            error: Color::Red,
-            muted: Color::DarkGray,
-            background: Color::Reset,
-            surface: Color::Reset,
-            icons: Icons::ascii(),
-        }
-    }
-
     // Style helpers
     pub fn title_style(&self) -> Style {
         Style::default()

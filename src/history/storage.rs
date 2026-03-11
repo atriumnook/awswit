@@ -32,24 +32,28 @@ pub struct ProfileHistory {
 
 impl ProfileHistory {
     /// Get the history file path
-    fn history_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".awswit")
-            .join("history.json")
+    fn history_path() -> Result<PathBuf, AwswitError> {
+        crate::utils::paths::awswit_home_dir()
+            .map(|p| p.join("history.json"))
+            .map_err(|e| AwswitError::CacheError {
+                message: e.to_string(),
+            })
     }
 
     /// Load history from file
     pub fn load() -> Result<Self, AwswitError> {
-        let path = Self::history_path();
+        let path = Self::history_path()?;
 
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = fs::read_to_string(&path).map_err(|e| AwswitError::CacheError {
-            message: format!("Failed to read history: {}", e),
-        })?;
+        // Read directly instead of exists() check to avoid TOCTOU race
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(AwswitError::CacheError {
+                    message: format!("Failed to read history: {}", e),
+                })
+            }
+        };
 
         match serde_json::from_str::<Self>(&content) {
             Ok(history) => Ok(history),
@@ -69,7 +73,7 @@ impl ProfileHistory {
 
     /// Save history to file
     pub fn save(&self) -> Result<(), AwswitError> {
-        let path = Self::history_path();
+        let path = Self::history_path()?;
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -127,13 +131,6 @@ impl ProfileHistory {
             };
             self.entries.insert(profile_name.to_string(), entry);
         }
-    }
-
-    /// Toggle favorite status
-    pub fn toggle_favorite(&mut self, profile_name: &str) -> bool {
-        let new_status = !self.is_favorite(profile_name);
-        self.set_favorite(profile_name, new_status);
-        new_status
     }
 
     /// Get recently used profiles
@@ -203,21 +200,6 @@ mod tests {
 
         history.set_favorite("test-profile", false);
         assert!(!history.is_favorite("test-profile"));
-    }
-
-    #[test]
-    fn test_toggle_favorite() {
-        let mut history = ProfileHistory::default();
-
-        assert!(!history.is_favorite("test"));
-
-        let status = history.toggle_favorite("test");
-        assert!(status);
-        assert!(history.is_favorite("test"));
-
-        let status = history.toggle_favorite("test");
-        assert!(!status);
-        assert!(!history.is_favorite("test"));
     }
 
     #[test]

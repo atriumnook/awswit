@@ -21,7 +21,7 @@ _awswit_rs() {
     opts=$(awswit-autocomplete 2>/dev/null)
     
     # Add common flags
-    flags="-h --help -v --version -r --refresh -s --show-commands -u --unset -a --auto-refresh -k --kill -l --list-profiles --role-arn --source-profile --external-id --mfa-token --region --session-name --role-duration --with-saml --with-web-identity --credentials-file --config-file --info --debug"
+    flags="-h --help -v --version -r --refresh -s --show-commands -u --unset -a --auto-refresh -k --kill -l --list-profiles --role-arn --source-profile --external-id --mfa-token --region --session-name --role-duration --credentials-file --config-file --info --debug"
     
     case "${prev}" in
         --role-arn|--source-profile|--external-id|--mfa-token|--region|--session-name|--role-duration|--credentials-file|--config-file)
@@ -78,8 +78,6 @@ _awswit_rs() {
         '--region[AWS region]:region:'
         '--session-name[Session name]:name:'
         '--role-duration[Role duration in seconds]:seconds:'
-        '--with-saml[Use SAML]'
-        '--with-web-identity[Use web identity]'
         '--credentials-file[Credentials file path]:file:_files'
         '--config-file[Config file path]:file:_files'
         '--info[Show INFO logs]'
@@ -122,8 +120,6 @@ complete -c awswit -l mfa-token -d "MFA token"
 complete -c awswit -l region -d "AWS region"
 complete -c awswit -l session-name -d "Session name"
 complete -c awswit -l role-duration -d "Role duration in seconds"
-complete -c awswit -l with-saml -d "Use SAML"
-complete -c awswit -l with-web-identity -d "Use web identity"
 complete -c awswit -l info -d "Show INFO logs"
 complete -c awswit -l debug -d "Show DEBUG logs"
 "#
@@ -152,8 +148,6 @@ Register-ArgumentCompleter -Native -CommandName awswit,awswit -ScriptBlock {
         '--region',
         '--session-name',
         '--role-duration',
-        '--with-saml',
-        '--with-web-identity',
         '--credentials-file',
         '--config-file',
         '--info',
