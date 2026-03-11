@@ -1,3 +1,4 @@
+pub mod credentials_file;
 mod daemon;
 pub mod runner;
 

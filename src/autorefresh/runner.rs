@@ -11,6 +11,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::time::sleep;
 
+use super::credentials_file;
 use super::daemon::AutoRefreshProfile;
 
 /// Maximum age of expired credentials before we skip refresh entirely.
@@ -411,40 +412,14 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// Validate that a profile name is safe for use in INI section headers.
-fn validate_profile_name(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if name.is_empty() {
-        return Err("Profile name cannot be empty".into());
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
-    {
-        return Err(format!(
-            "Profile name '{}' contains invalid characters (allowed: alphanumeric, _, -, .)",
-            name
-        )
-        .into());
-    }
-    Ok(())
-}
-
 fn update_credentials_file(
     profile_name: &str,
     output: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_profile_name(profile_name)?;
-
     let mut creds: HashMap<String, String> = HashMap::new();
 
     for line in output.lines() {
         if let Some((key, value)) = line.split_once('=') {
-            // Reject values that could inject INI section headers
-            if value.starts_with('[') || value.chars().any(|c| c.is_control()) {
-                return Err(
-                    format!("Credential value for '{}' contains invalid characters", key).into(),
-                );
-            }
             creds.insert(key.to_string(), value.to_string());
         }
     }
@@ -456,79 +431,8 @@ fn update_credentials_file(
     let session_token = creds.get("AWS_SESSION_TOKEN");
     let expiration = creds.get("AWSWIT_EXPIRATION");
 
-    let creds_path = home_dir()?.join(".aws").join("credentials");
-
-    let lock_path = creds_path.with_extension("lock");
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    use fs2::FileExt;
-    lock_file.lock_exclusive()?;
-
-    let content = fs::read_to_string(&creds_path).unwrap_or_default();
-
-    let mut new_section = format!(
-        "[{}]\n\
-        aws_access_key_id = {}\n\
-        aws_secret_access_key = {}\n",
-        profile_name, access_key, secret_key,
-    );
-    if let Some(token) = session_token {
-        new_section.push_str(&format!("aws_session_token = {}\n", token));
-    }
-    new_section.push_str("autoawswit = true\n");
-    if let Some(exp) = expiration {
-        new_section.push_str(&format!("awswit_expiration = {}\n", exp));
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines = Vec::new();
-    let mut skip = false;
-
-    for line in &lines {
-        if line.starts_with('[') {
-            skip = line.trim() == format!("[{}]", profile_name);
-        }
-        if !skip {
-            new_lines.push(*line);
-        }
-    }
-
-    let mut new_content = new_lines.join("\n");
-    if !new_content.ends_with('\n') && !new_content.is_empty() {
-        new_content.push('\n');
-    }
-    new_content.push_str(&new_section);
-
-    // Atomic write: write to temp file then rename to prevent corruption on crash
-    let tmp_path = creds_path.with_extension("tmp");
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
-        file.write_all(new_content.as_bytes())?;
-        file.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&tmp_path, &new_content)?;
-    }
-    if let Err(e) = fs::rename(&tmp_path, &creds_path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
-
-    // lock_file released on drop
-
-    // Update the profile metadata
+    // Update profile metadata first — if we crash after this but before writing
+    // credentials, the metadata is self-correcting (next refresh cycle will fix it).
     let profile_path = get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
     if profile_path.exists() {
         let meta_content = fs::read_to_string(&profile_path)?;
@@ -539,24 +443,22 @@ fn update_credentials_file(
             profile.awswit_role_expiration = expiration.cloned();
 
             let updated = serde_json::to_string_pretty(&profile)?;
-            #[cfg(unix)]
-            {
-                use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&profile_path)?;
-                file.write_all(updated.as_bytes())?;
-            }
-            #[cfg(not(unix))]
-            {
-                fs::write(&profile_path, updated)?;
-            }
+            crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes())
+                .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
         }
     }
+
+    // Write credentials using the shared, validated module
+    let creds_path = home_dir()?.join(".aws").join("credentials");
+    credentials_file::write_credentials_from_output(
+        &creds_path,
+        profile_name,
+        access_key,
+        secret_key,
+        session_token.map(|s| s.as_str()),
+        expiration.map(|s| s.as_str()),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("{}", e).into() })?;
 
     Ok(())
 }

@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use super::credentials_file;
 use crate::aws::Credentials;
 use crate::cli::Args;
 use crate::error::AwswitError;
@@ -119,8 +119,9 @@ pub async fn start_auto_refresh(
     // Save auto-refresh profile metadata
     save_auto_refresh_profile(&auto_profile)?;
 
-    // Write credentials to credentials file with auto-refresh prefix
-    write_auto_refresh_credentials(&auto_profile_name, credentials)?;
+    // Write credentials to credentials file with auto-refresh prefix (validated)
+    let creds_path = credentials_file::get_aws_credentials_path()?;
+    credentials_file::write_credentials(&creds_path, &auto_profile_name, credentials)?;
 
     // Spawn the autoawswit daemon if not already running
     spawn_autoawswit_daemon()?;
@@ -143,7 +144,8 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
     remove_auto_refresh_profile(&auto_profile_name)?;
 
     // Remove from credentials file
-    remove_auto_refresh_credentials(&auto_profile_name)?;
+    let creds_path = credentials_file::get_aws_credentials_path()?;
+    credentials_file::remove_credentials(&creds_path, &auto_profile_name)?;
 
     // Check if any auto-refresh profiles remain
     let remaining = list_auto_refresh_profiles()?;
@@ -159,10 +161,11 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     tracing::info!("Stopping all auto-refresh processes");
 
     let profiles = list_auto_refresh_profiles()?;
+    let creds_path = credentials_file::get_aws_credentials_path()?;
 
     for profile in profiles {
         remove_auto_refresh_profile(&profile)?;
-        remove_auto_refresh_credentials(&profile)?;
+        credentials_file::remove_credentials(&creds_path, &profile)?;
     }
 
     kill_autoawswit_daemon()?;
@@ -175,13 +178,6 @@ fn get_auto_refresh_dir() -> Result<PathBuf, AwswitError> {
         message: "Could not determine home directory".to_string(),
     })?;
     Ok(home.join(".awswit").join("autorefresh"))
-}
-
-fn get_aws_credentials_path() -> Result<PathBuf, AwswitError> {
-    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Could not determine home directory".to_string(),
-    })?;
-    Ok(home.join(".aws").join("credentials"))
 }
 
 fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
@@ -235,112 +231,6 @@ fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
     Ok(profiles)
 }
 
-fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitError> {
-    use fs2::FileExt;
-
-    // Lock the credentials file to prevent concurrent corruption
-    let lock_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open({
-            let mut lock_path = creds_path.as_os_str().to_owned();
-            lock_path.push(".lock");
-            PathBuf::from(lock_path)
-        })?;
-    lock_file.lock_exclusive()?;
-    Ok(lock_file)
-}
-
-fn remove_credentials_section(content: &str, profile_name: &str) -> String {
-    let section_header = format!("[{}]", profile_name);
-    let mut new_lines = Vec::new();
-    let mut skip = false;
-
-    for line in content.lines() {
-        if line.starts_with('[') {
-            skip = line.trim() == section_header;
-        }
-        if !skip {
-            new_lines.push(line);
-        }
-    }
-
-    let mut new_content = new_lines.join("\n");
-    if !new_content.ends_with('\n') && !new_content.is_empty() {
-        new_content.push('\n');
-    }
-
-    new_content
-}
-
-fn write_auto_refresh_credentials(
-    profile_name: &str,
-    creds: &Credentials,
-) -> Result<(), AwswitError> {
-    let creds_path = get_aws_credentials_path()?;
-    write_auto_refresh_credentials_at_path(&creds_path, profile_name, creds)
-}
-
-fn write_auto_refresh_credentials_at_path(
-    creds_path: &Path,
-    profile_name: &str,
-    creds: &Credentials,
-) -> Result<(), AwswitError> {
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
-    // Lock is released on Drop — no manual unlock needed, which also ensures
-    // cleanup on early-return error paths.
-
-    let content = match fs::read_to_string(creds_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
-    let mut new_content = remove_credentials_section(&content, profile_name);
-
-    let new_section = format!(
-        "[{}]\n\
-        aws_access_key_id = {}\n\
-        aws_secret_access_key = {}\n\
-        aws_session_token = {}\n\
-        autoawswit = true\n\
-        awswit_expiration = {}\n",
-        profile_name,
-        creds.access_key_id,
-        creds.secret_access_key,
-        creds.session_token.as_deref().unwrap_or(""),
-        creds.expiration.map(|e| e.to_rfc3339()).unwrap_or_default()
-    );
-
-    new_content.push_str(&new_section);
-
-    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
-
-    Ok(())
-}
-
-fn remove_auto_refresh_credentials(profile_name: &str) -> Result<(), AwswitError> {
-    let creds_path = get_aws_credentials_path()?;
-    remove_auto_refresh_credentials_at_path(&creds_path, profile_name)
-}
-
-fn remove_auto_refresh_credentials_at_path(
-    creds_path: &Path,
-    profile_name: &str,
-) -> Result<(), AwswitError> {
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
-    if !creds_path.exists() {
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(creds_path)?;
-    let new_content = remove_credentials_section(&content, profile_name);
-
-    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
-
-    Ok(())
-}
-
 fn get_pid_file_path() -> Result<PathBuf, AwswitError> {
     let dir = get_auto_refresh_dir()?;
     let parent = dir.parent().ok_or_else(|| AwswitError::AutoRefreshError {
@@ -357,27 +247,51 @@ fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
     Ok(parent.join("autoawswit.lock"))
 }
 
-fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
+/// Acquire the daemon advisory lock with timeout.
+fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
     use fs2::FileExt;
 
-    // Advisory lock protects the entire is_running → spawn sequence
-    let lock_path = get_daemon_lock_path()?;
     let lock_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|e| AwswitError::AutoRefreshError {
             message: format!("Failed to open lock: {}", e),
         })?;
-    lock_file
-        .lock_exclusive()
-        .map_err(|e| AwswitError::AutoRefreshError {
-            message: format!("Failed to acquire lock: {}", e),
-        })?;
 
-    // Lock is released on Drop — no manual unlock needed, which also ensures
-    // cleanup on early-return error paths.
+    // Try non-blocking first
+    if lock_file.try_lock_exclusive().is_ok() {
+        return Ok(lock_file);
+    }
+
+    // Exponential backoff with timeout
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(30);
+    let mut backoff = std::time::Duration::from_millis(10);
+    let max_backoff = std::time::Duration::from_secs(1);
+
+    loop {
+        std::thread::sleep(backoff);
+
+        if lock_file.try_lock_exclusive().is_ok() {
+            return Ok(lock_file);
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(AwswitError::AutoRefreshError {
+                message: "Failed to acquire daemon lock: timed out after 30s".to_string(),
+            });
+        }
+
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
+fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
+    // Advisory lock protects the entire is_running → spawn sequence
+    let lock_path = get_daemon_lock_path()?;
+    let _lock_file = lock_daemon(&lock_path)?;
 
     // Check if already running (under lock)
     if is_autoawswit_running()? {
@@ -404,9 +318,28 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
                     message: format!("Failed to spawn daemon: {}", e),
                 })?;
 
-            // Daemon writes its own PID after successful init — do NOT write from parent.
-            // The daemon may crash immediately; writing PID here would leave a stale file.
-            tracing::info!("Spawned autoawswit daemon process");
+            // Wait for daemon to write its PID file before releasing lock.
+            // This prevents a race where another caller checks is_running()
+            // before the daemon has finished init.
+            let pid_path = get_pid_file_path()?;
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+            let poll_interval = std::time::Duration::from_millis(100);
+
+            while start.elapsed() < timeout {
+                if pid_path.exists() {
+                    tracing::info!("Spawned autoawswit daemon process (PID file confirmed)");
+                    // Lock released on Drop when _lock_file goes out of scope
+                    return Ok(());
+                }
+                std::thread::sleep(poll_interval);
+            }
+
+            // PID file didn't appear, but process was spawned — log a warning
+            tracing::warn!(
+                "Spawned autoawswit daemon but PID file not written within {:?}",
+                timeout
+            );
             Ok(())
         }
         None => Err(AwswitError::AutoRefreshError {
@@ -417,23 +350,8 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 }
 
 fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
-    use fs2::FileExt;
-
     let lock_path = get_daemon_lock_path()?;
-    let lock_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| AwswitError::AutoRefreshError {
-            message: format!("Failed to open lock: {}", e),
-        })?;
-    lock_file
-        .lock_exclusive()
-        .map_err(|e| AwswitError::AutoRefreshError {
-            message: format!("Failed to acquire lock: {}", e),
-        })?;
-    // Lock is released on Drop — no manual unlock needed.
+    let _lock_file = lock_daemon(&lock_path)?;
 
     let pid_path = get_pid_file_path()?;
 
@@ -474,6 +392,10 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
                 // On non-Linux unix, fall back to kill without /proc verification
                 #[cfg(not(target_os = "linux"))]
                 if !process_gone {
+                    tracing::debug!(
+                        "Non-Linux platform: no /proc verification available for PID {}",
+                        pid
+                    );
                     verified = true;
                 }
 
@@ -602,7 +524,7 @@ mod tests {
         )
         .unwrap();
 
-        write_auto_refresh_credentials_at_path(&creds_path, "autoawswit-test", &test_credentials())
+        credentials_file::write_credentials(&creds_path, "autoawswit-test", &test_credentials())
             .unwrap();
 
         let content = fs::read_to_string(&creds_path).unwrap();
@@ -625,7 +547,7 @@ mod tests {
         )
         .unwrap();
 
-        remove_auto_refresh_credentials_at_path(&creds_path, "autoawswit-test").unwrap();
+        credentials_file::remove_credentials(&creds_path, "autoawswit-test").unwrap();
 
         let content = fs::read_to_string(&creds_path).unwrap();
         assert!(content.contains("[default]\naws_access_key_id = ORIGINAL\n"));
