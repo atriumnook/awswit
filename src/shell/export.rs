@@ -106,10 +106,8 @@ impl ShellExporter {
 
     /// Detect the current shell type
     fn detect_shell() -> ShellType {
-        // Check AWSWIT_SHELL first (set by shell wrapper), with AWSUME_SHELL as legacy fallback
-        if let Ok(shell) = std::env::var("AWSWIT_SHELL")
-            .or_else(|_| std::env::var("AWSUME_SHELL"))
-        {
+        // Check AWSWIT_SHELL first (set by shell wrapper)
+        if let Ok(shell) = std::env::var("AWSWIT_SHELL") {
             return Self::parse_shell_name(&shell);
         }
 
@@ -377,5 +375,69 @@ mod tests {
                 assert!(output.contains(var), "Missing {} in {:?} unset", var, shell);
             }
         }
+    }
+
+    #[test]
+    fn test_cmd_special_chars_escaped() {
+        let exporter = ShellExporter::for_shell(ShellType::Cmd);
+        let output = exporter.format_set("TEST", "val&ue|with<special>chars^and%percent");
+        assert!(output.contains("^&"));
+        assert!(output.contains("^|"));
+        assert!(output.contains("^<"));
+        assert!(output.contains("^>"));
+        assert!(output.contains("^^"));
+        assert!(output.contains("%%"));
+    }
+
+    #[test]
+    fn test_powershell_single_quote_escaped() {
+        let exporter = ShellExporter::for_shell(ShellType::PowerShell);
+        let output = exporter.format_set("TEST", "it's a test");
+        // PowerShell escapes single quotes by doubling them
+        assert!(output.contains("it''s a test"));
+    }
+
+    #[test]
+    fn test_bash_single_quote_escaped() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.format_set("TEST", "it's a test");
+        // Shell escapes by ending quote, backslash quote, resume quote
+        assert!(output.contains("'\\''"));
+    }
+
+    #[test]
+    fn test_fish_export_format() {
+        let exporter = ShellExporter::for_shell(ShellType::Fish);
+        let output = exporter.format_set("TEST", "value");
+        assert_eq!(output, "set -gx TEST 'value'\n");
+    }
+
+    #[test]
+    fn test_shell_output_rejects_newline_in_value() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret\ninjected".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output(&creds, "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_export_commands_skips_newline_value() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret\ninjected".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_export_commands(&creds, "test");
+        // Should skip the injected value, not include it
+        assert!(!output.contains("injected"));
     }
 }
