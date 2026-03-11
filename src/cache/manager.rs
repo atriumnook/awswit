@@ -71,7 +71,9 @@ impl CacheManager {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Corrupt cache entry '{}': {}, removing", key, e);
-                let _ = self.remove(key);
+                if let Err(e) = self.remove(key) {
+                    tracing::warn!("Failed to remove corrupt cache entry '{}': {}", key, e);
+                }
                 return Ok(None);
             }
         };

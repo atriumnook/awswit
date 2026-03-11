@@ -21,19 +21,11 @@ _awswit_rs() {
     opts=$(awswit-autocomplete 2>/dev/null)
     
     # Add common flags
-    flags="-h --help -v --version -r --refresh -s --show-commands -u --unset -a --auto-refresh -k --kill -o --output-profile -l --list-profiles --role-arn --source-profile --external-id --mfa-token --region --session-name --role-duration --with-saml --with-web-identity --credentials-file --config-file --config --info --debug"
+    flags="-h --help -v --version -r --refresh -s --show-commands -u --unset -a --auto-refresh -k --kill -l --list-profiles --role-arn --source-profile --external-id --mfa-token --region --session-name --role-duration --with-saml --with-web-identity --credentials-file --config-file --info --debug"
     
     case "${prev}" in
         --role-arn|--source-profile|--external-id|--mfa-token|--region|--session-name|--role-duration|--credentials-file|--config-file)
             # These flags expect a value, don't complete
-            return 0
-            ;;
-        -o|--output-profile)
-            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
-            return 0
-            ;;
-        --config)
-            COMPREPLY=( $(compgen -W "set get reset list" -- ${cur}) )
             return 0
             ;;
     esac
@@ -77,8 +69,6 @@ _awswit_rs() {
         '--auto-refresh[Auto-refresh credentials]'
         '-k[Kill auto-refresher]'
         '--kill[Kill auto-refresher]'
-        '-o[Output profile]:profile:($profiles)'
-        '--output-profile[Output profile]:profile:($profiles)'
         '-l[List profiles]'
         '--list-profiles[List profiles]'
         '--role-arn[Role ARN to assume]:arn:'
@@ -92,7 +82,6 @@ _awswit_rs() {
         '--with-web-identity[Use web identity]'
         '--credentials-file[Credentials file path]:file:_files'
         '--config-file[Config file path]:file:_files'
-        '--config[Manage config]:action:(set get reset list)'
         '--info[Show INFO logs]'
         '--debug[Show DEBUG logs]'
     )
@@ -124,7 +113,6 @@ complete -c awswit -s s -l show-commands -d "Show export commands"
 complete -c awswit -s u -l unset -d "Unset AWS environment variables"
 complete -c awswit -s a -l auto-refresh -d "Auto-refresh credentials"
 complete -c awswit -s k -l kill -d "Kill auto-refresher"
-complete -c awswit -s o -l output-profile -d "Output profile" -xa "(__fish_awswit_profiles)"
 complete -c awswit -s l -l list-profiles -d "List profiles"
 complete -c awswit -l role-arn -d "Role ARN to assume"
 complete -c awswit -l source-profile -d "Source profile" -xa "(__fish_awswit_profiles)"
@@ -135,7 +123,6 @@ complete -c awswit -l session-name -d "Session name"
 complete -c awswit -l role-duration -d "Role duration in seconds"
 complete -c awswit -l with-saml -d "Use SAML"
 complete -c awswit -l with-web-identity -d "Use web identity"
-complete -c awswit -l config -d "Manage config" -xa "set get reset list"
 complete -c awswit -l info -d "Show INFO logs"
 complete -c awswit -l debug -d "Show DEBUG logs"
 "#
@@ -156,7 +143,6 @@ Register-ArgumentCompleter -Native -CommandName awswit,awswit -ScriptBlock {
         '-u', '--unset',
         '-a', '--auto-refresh',
         '-k', '--kill',
-        '-o', '--output-profile',
         '-l', '--list-profiles',
         '--role-arn',
         '--source-profile',
@@ -169,7 +155,6 @@ Register-ArgumentCompleter -Native -CommandName awswit,awswit -ScriptBlock {
         '--with-web-identity',
         '--credentials-file',
         '--config-file',
-        '--config',
         '--info',
         '--debug'
     )

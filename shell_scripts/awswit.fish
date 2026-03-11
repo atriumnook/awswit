@@ -11,7 +11,7 @@ function awswit
     end
 
     for line in $output
-        set -l parts (string split '=' $line)
+        set -l parts (string split -m1 '=' $line)
         set -l key $parts[1]
         set -l value $parts[2]
 

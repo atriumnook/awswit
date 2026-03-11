@@ -131,7 +131,10 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     }
 
     // Load history once and reuse
-    let mut profile_history = history::ProfileHistory::load().unwrap_or_default();
+    let mut profile_history = history::ProfileHistory::load().unwrap_or_else(|e| {
+        tracing::warn!("Failed to load profile history: {}", e);
+        history::ProfileHistory::default()
+    });
 
     // Determine target profile - use interactive mode if no profile specified
     let target_profile_name = if args.profile_name.is_none()
@@ -185,7 +188,9 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Record usage in history
     profile_history.record_use(&target_profile_name);
-    let _ = profile_history.save();
+    if let Err(e) = profile_history.save() {
+        tracing::warn!("Failed to save profile history: {}", e);
+    }
 
     // Handle auto-refresh
     if args.auto_refresh {
