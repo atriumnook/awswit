@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Valid credential sources
-pub const VALID_CREDENTIAL_SOURCES: &[&str] = &["Environment"];
+pub const VALID_CREDENTIAL_SOURCES: &[&str] = &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
 
 /// Represents an AWS profile from config/credentials files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,18 +83,11 @@ impl Profile {
             }
 
             // Validate credential_source value
-            if has_cred_source {
+            if has_cred_source && !self.has_valid_credential_source() {
                 let cs = self.credential_source.as_deref().unwrap_or_default();
-                if cs == "Ec2InstanceMetadata" || cs == "EcsContainer" {
-                    return Err(ProfileValidationError::UnsupportedCredentialSource(
-                        cs.to_string(),
-                    ));
-                }
-                if !self.has_valid_credential_source() {
-                    return Err(ProfileValidationError::InvalidCredentialSource(
-                        cs.to_string(),
-                    ));
-                }
+                return Err(ProfileValidationError::InvalidCredentialSource(
+                    cs.to_string(),
+                ));
             }
         }
 
@@ -248,25 +241,23 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_credential_source_ec2_unsupported() {
+    fn test_validate_credential_source_ec2() {
         let profile = Profile {
             role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
             credential_source: Some("Ec2InstanceMetadata".to_string()),
             ..Default::default()
         };
-        let err = profile.validate().unwrap_err();
-        matches!(err, ProfileValidationError::UnsupportedCredentialSource(_));
+        assert!(profile.validate().is_ok());
     }
 
     #[test]
-    fn test_validate_credential_source_ecs_unsupported() {
+    fn test_validate_credential_source_ecs() {
         let profile = Profile {
             role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
             credential_source: Some("EcsContainer".to_string()),
             ..Default::default()
         };
-        let err = profile.validate().unwrap_err();
-        matches!(err, ProfileValidationError::UnsupportedCredentialSource(_));
+        assert!(profile.validate().is_ok());
     }
 
     #[test]

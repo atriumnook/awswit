@@ -1,6 +1,9 @@
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically write content to a file with restrictive permissions (0o600 on Unix).
 /// Uses write-to-temp + rename to avoid partial writes.
@@ -13,15 +16,13 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    // Include a simple random component to avoid collisions when multiple
-    // writes happen within the same nanosecond (e.g., under virtualization).
-    let rand_component: u32 = (nanos as u32).wrapping_mul(2654435761); // Knuth multiplicative hash
+    let counter = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_path = parent.join(format!(
-        ".{}.{}.{}.{:08x}.tmp",
+        ".{}.{}.{}.{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         std::process::id(),
         nanos,
-        rand_component
+        counter
     ));
 
     // Write to temp file with restrictive permissions
@@ -79,8 +80,10 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
 /// Try to acquire an exclusive file lock with exponential backoff and timeout.
 ///
 /// Uses `thread::sleep` for backoff intentionally — this is called from both
-/// sync and async contexts, and the sleep durations are short enough that
-/// blocking the thread is acceptable.
+/// sync and async contexts. In async context (autorefresh daemon), this blocks
+/// the executor thread but the max sleep is 1s with exponential backoff, and
+/// lock contention is rare. If this becomes problematic, wrap call sites in
+/// `tokio::task::spawn_blocking`.
 pub fn lock_exclusive_with_timeout(
     file: &std::fs::File,
     timeout: Duration,

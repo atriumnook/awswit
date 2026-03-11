@@ -392,7 +392,16 @@ fn determine_target_profile(
 ) -> Result<String, AwswitError> {
     // Early guard: --role-arn doesn't need a profile name
     if args.role_arn.is_some() {
-        return Ok("cli-role".to_string());
+        let name = args
+            .session_name
+            .clone()
+            .or_else(|| {
+                args.resolve_role_arn().and_then(|arn| {
+                    arn.rsplit('/').next().map(|s| s.to_string())
+                })
+            })
+            .unwrap_or_else(|| "cli-role".to_string());
+        return Ok(name);
     }
 
     // Get profile name from args or default

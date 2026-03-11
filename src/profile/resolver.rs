@@ -332,7 +332,7 @@ impl<'a> ProfileResolver<'a> {
 
         // Check credential_source
         if let Some(ref cred_source) = source_profile.credential_source {
-            return self.get_credentials_from_source(cred_source);
+            return self.get_credentials_from_source(cred_source).await;
         }
 
         // Check for source_profile
@@ -526,7 +526,7 @@ impl<'a> ProfileResolver<'a> {
     }
 
     /// Get credentials from credential_source
-    fn get_credentials_from_source(&self, source: &str) -> Result<Credentials, AwswitError> {
+    async fn get_credentials_from_source(&self, source: &str) -> Result<Credentials, AwswitError> {
         match source {
             "Environment" => {
                 let access_key =
@@ -549,9 +549,36 @@ impl<'a> ProfileResolver<'a> {
                         .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok()),
                 })
             }
-            "Ec2InstanceMetadata" | "EcsContainer" => Err(AwswitError::InvalidCredentialSource {
-                name: format!("{} should be handled by AWS SDK default chain", source),
-            }),
+            "Ec2InstanceMetadata" | "EcsContainer" => {
+                tracing::info!("Using AWS SDK default credential chain for {}", source);
+                let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+                let provider = sdk_config
+                    .credentials_provider()
+                    .ok_or_else(|| AwswitError::InvalidCredentialSource {
+                        name: format!("No credentials provider available for {}", source),
+                    })?;
+                use aws_credential_types::provider::ProvideCredentials;
+                let creds = provider
+                    .provide_credentials()
+                    .await
+                    .map_err(|e| AwswitError::InvalidCredentialSource {
+                        name: format!("Failed to get credentials from {}: {}", source, e),
+                    })?;
+                Ok(Credentials {
+                    access_key_id: creds.access_key_id().to_string(),
+                    secret_access_key: creds.secret_access_key().to_string(),
+                    session_token: creds.session_token().map(|s| s.to_string()),
+                    expiration: creds.expiry().and_then(|e| {
+                        e.duration_since(std::time::UNIX_EPOCH).ok().and_then(|d| {
+                            chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                d.as_secs() as i64,
+                                d.subsec_nanos(),
+                            )
+                        })
+                    }),
+                    region: None,
+                })
+            }
             _ => Err(AwswitError::InvalidCredentialSource {
                 name: source.to_string(),
             }),

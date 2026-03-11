@@ -383,15 +383,35 @@ debug:
 | コード | 名前 | 説明 |
 |--------|------|------|
 | E001 | ProfileNotFound | 指定されたプロファイルが見つからない |
-| E002 | CredentialsExpired | キャッシュされたクレデンシャルが期限切れ |
-| E003 | AssumeRoleFailed | AssumeRole API 呼び出しが失敗 |
-| E004 | MfaRequired | MFA トークンが必要 |
-| E005 | InvalidMfaToken | MFA トークンが無効 |
-| E006 | RoleChainTooDeep | ロールチェーンが深すぎる (> 10) |
-| E007 | ConfigFileError | 設定ファイルの読み込みエラー |
-| E008 | CacheError | キャッシュ操作エラー |
-| E009 | ShellError | シェル連携エラー |
-| E010 | AutoRefreshDurationLimit | 自動リフレッシュ時の期間制限超過 |
+| E002 | InvalidProfile | プロファイル設定が無効 |
+| E003 | SourceProfileNotFound | ソースプロファイルが見つからない |
+| E004 | RoleChainCycle | ロールチェーンの循環を検出 |
+| E005 | MissingProfileKey | プロファイルに必要なキーが不足 |
+| E006 | InvalidCredentialSource | 無効なクレデンシャルソース |
+| E007 | AssumeRoleFailed | AssumeRole API 呼び出しが失敗 |
+| E008 | GetSessionTokenFailed | GetSessionToken API 呼び出しが失敗 |
+| E009 | MfaTokenRequired | MFA トークンが必要 |
+| E010 | InvalidMfaToken | MFA トークンが無効 |
+| E011 | CacheError | キャッシュ操作エラー |
+| E012 | ConfigFileError | 設定ファイルの読み込みエラー |
+| E013 | ConfigKeyNotFound | 設定キーが見つからない |
+| E014 | InvalidConfigCommand | 無効な設定コマンド |
+| E015 | AwsSdkError | AWS STS SDK エラー |
+| E016 | CredentialProcessFailed | credential_process の実行が失敗 |
+| E017 | AutoRefreshError | 自動リフレッシュエラー |
+| E018 | ShellError | シェル連携エラー |
+| E019 | IoError | IO エラー |
+| E020 | YamlError | YAML パースエラー |
+| E021 | JsonError | JSON パースエラー |
+| E022 | ValidationError | バリデーションエラー |
+| E023 | AutoRefreshDurationLimit | 自動リフレッシュ時の期間制限超過 (> 1時間) |
+| E024 | EnvError | 環境変数エラー |
+| E025 | UserCancelled | ユーザーによる操作キャンセル |
+| E026 | StsTimeout | STS リクエストタイムアウト |
+| E027 | InvalidStsTimestamp | 無効な STS タイムスタンプ |
+| E099 | Other | その他のエラー |
+
+> **Note:** エラーコードの正式な定義は `src/error.rs` を参照してください。
 
 ---
 

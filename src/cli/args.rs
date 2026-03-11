@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 /// awswit: A fast, modern AWS profile switcher with interactive TUI
 ///
 /// A convenient way to manage session tokens and assume role credentials.
-#[derive(Parser, Debug, Clone, Default)]
+#[derive(Parser, Clone, Default)]
 #[command(name = "awswit")]
 #[command(author, about, long_about = None, disable_version_flag = true)]
 #[command(after_help = "Thank you for using awswit!")]
@@ -37,7 +37,7 @@ pub struct Args {
     pub auto_refresh: bool,
 
     /// Kill the auto-refresher for a profile (or all if no profile specified)
-    #[arg(short = 'k', long = "kill")]
+    #[arg(short = 'k', long = "kill-refresher", alias = "kill")]
     pub kill_refresher: bool,
 
     /// List available profiles. Pass 'more' for additional details
@@ -149,9 +149,49 @@ impl Args {
     }
 }
 
+impl std::fmt::Debug for Args {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Args")
+            .field("command", &self.command)
+            .field("profile_name", &self.profile_name)
+            .field("version", &self.version)
+            .field("force_refresh", &self.force_refresh)
+            .field("show_commands", &self.show_commands)
+            .field("unset", &self.unset)
+            .field("auto_refresh", &self.auto_refresh)
+            .field("kill_refresher", &self.kill_refresher)
+            .field("list_profiles", &self.list_profiles)
+            .field("refresh_autocomplete", &self.refresh_autocomplete)
+            .field("role_arn", &self.role_arn)
+            .field("source_profile", &self.source_profile)
+            .field("external_id", &self.external_id)
+            .field("mfa_token", &self.mfa_token.as_ref().map(|_| "[REDACTED]"))
+            .field("region", &self.region)
+            .field("session_name", &self.session_name)
+            .field("role_duration", &self.role_duration)
+            .field("credentials_file", &self.credentials_file)
+            .field("config_file", &self.config_file)
+            .field("info", &self.info)
+            .field("debug", &self.debug)
+            .field("no_interactive", &self.no_interactive)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_debug_redacts_mfa_token() {
+        let args = Args {
+            mfa_token: Some("123456".to_string()),
+            ..Default::default()
+        };
+        let debug_output = format!("{:?}", args);
+        assert!(!debug_output.contains("123456"));
+        assert!(debug_output.contains("[REDACTED]"));
+    }
 
     #[test]
     fn test_resolve_role_arn_full() {
@@ -187,5 +227,16 @@ mod tests {
     fn test_get_session_name_short_profile() {
         let args = Args::default();
         assert_eq!(args.get_session_name("x"), "_x_");
+    }
+
+    #[test]
+    fn test_kill_refresher_flag_both_forms() {
+        use clap::Parser;
+        let args = Args::try_parse_from(["awswit", "--kill-refresher"]).unwrap();
+        assert!(args.kill_refresher);
+        let args = Args::try_parse_from(["awswit", "--kill"]).unwrap();
+        assert!(args.kill_refresher);
+        let args = Args::try_parse_from(["awswit", "-k"]).unwrap();
+        assert!(args.kill_refresher);
     }
 }
