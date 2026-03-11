@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand};
 
-/// AWSume-rs: A Rust implementation of AWSume - AWS Assume Made Awesome
+/// awswit: A fast, modern AWS profile switcher with interactive TUI
 ///
 /// A convenient way to manage session tokens and assume role credentials.
 #[derive(Parser, Debug, Clone, Default)]
 #[command(name = "awswit")]
-#[command(author, version, about, long_about = None)]
-#[command(after_help = "Thank you for using AWSume-rs! https://github.com/yourusername/awswit")]
+#[command(author, about, long_about = None, disable_version_flag = true)]
+#[command(after_help = "Thank you for using awswit!")]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
     #[command(subcommand)]
@@ -72,25 +72,9 @@ pub struct Args {
     #[arg(long = "session-name", value_name = "session_name")]
     pub session_name: Option<String>,
 
-    /// Session policy JSON document (reserved for future use)
-    #[arg(long = "session-policy", value_name = "session_policy", hide = true)]
-    pub session_policy: Option<String>,
-
-    /// Session policy ARNs (reserved for future use)
-    #[arg(long = "session-policy-arns", value_name = "session_policy_arns", num_args = 1.., hide = true)]
-    pub session_policy_arns: Option<Vec<String>>,
-
     /// Role duration in seconds
     #[arg(long = "role-duration", value_name = "role_duration")]
     pub role_duration: Option<i32>,
-
-    /// Use SAML assertion for authentication
-    #[arg(long = "with-saml", conflicts_with = "with_web_identity")]
-    pub with_saml: bool,
-
-    /// Use web identity for authentication
-    #[arg(long = "with-web-identity", conflicts_with = "with_saml")]
-    pub with_web_identity: bool,
 
     /// Path to credentials file
     #[arg(long = "credentials-file", value_name = "credentials_file")]
@@ -107,14 +91,6 @@ pub struct Args {
     /// Display DEBUG level logs
     #[arg(long = "debug")]
     pub debug: bool,
-
-    /// Clean up expired output profiles
-    #[arg(long = "clean")]
-    pub clean: bool,
-
-    /// Principal ARN for SAML
-    #[arg(long = "principal-arn", value_name = "principal_arn")]
-    pub principal_arn: Option<String>,
 
     /// Disable interactive mode (use when piping or scripting)
     #[arg(long = "no-interactive", short = 'n')]

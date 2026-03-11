@@ -4,7 +4,7 @@ function awswit {
         [string[]]$Arguments
     )
 
-    $output = & awswit @Arguments
+    $output = & (Get-Command awswit -CommandType Application).Source @Arguments
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -ne 0) {

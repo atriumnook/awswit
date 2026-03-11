@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
@@ -11,11 +10,15 @@ use crate::error::AwswitError;
 use crate::profile::Profile;
 
 /// Build a consistent cache key for MFA sessions.
-/// Uses the hashed mfa_serial to avoid storing raw serial numbers in cache file names.
+/// Uses hex-encoded mfa_serial for deterministic, cross-version stability
+/// (DefaultHasher is not guaranteed to be stable across Rust versions).
 fn mfa_cache_key(access_key_id: &str, mfa_serial: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    mfa_serial.hash(&mut hasher);
-    format!("session-{}-{:x}", access_key_id, hasher.finish())
+    let hex: String = mfa_serial
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("session-{}-{}", access_key_id, hex)
 }
 
 /// Resolves profile credentials, handling role chains and MFA
@@ -186,6 +189,7 @@ impl<'a> ProfileResolver<'a> {
                     args,
                     sts_client,
                     role_duration,
+                    &mfa_serial,
                 )
                 .await;
         }
@@ -204,46 +208,72 @@ impl<'a> ProfileResolver<'a> {
             source_credentials
         };
 
-        // Assume the role
-        let role_arn =
-            target_profile
-                .role_arn
-                .as_ref()
-                .ok_or_else(|| AwswitError::InvalidProfile {
-                    profile_name: profile_name.to_string(),
-                    message: "missing role_arn".to_string(),
-                })?;
+        // Iterate through the role chain, assuming each role in sequence.
+        // The last profile in `chain` is the target; intermediate hops use profile settings.
+        let mut current_creds = assume_source;
+        for (i, role_profile) in chain.iter().enumerate() {
+            // Skip the first element if it's not a role profile (it's the source)
+            if !role_profile.is_role_profile() {
+                continue;
+            }
 
-        let session_name = args
-            .session_name
-            .clone()
-            .or(target_profile.role_session_name.clone())
-            .or(self.config.role_session_name.clone())
-            .unwrap_or_else(|| profile_name.to_string());
+            let is_final_hop = i == chain.len() - 1
+                || std::ptr::eq(*role_profile, target_profile);
 
-        let region = args
-            .region
-            .clone()
-            .or(target_profile.region.clone())
-            .or(self.config.region.clone());
+            let role_arn =
+                role_profile
+                    .role_arn
+                    .as_ref()
+                    .ok_or_else(|| AwswitError::InvalidProfile {
+                        profile_name: role_profile.name.clone(),
+                        message: "missing role_arn".to_string(),
+                    })?;
 
-        let external_id = args
-            .external_id
-            .clone()
-            .or(target_profile.external_id.clone());
+            let (session_name, region, external_id, hop_duration) = if is_final_hop {
+                // Final hop: apply CLI args overrides
+                let session_name = args
+                    .session_name
+                    .clone()
+                    .or(role_profile.role_session_name.clone())
+                    .or(self.config.role_session_name.clone())
+                    .unwrap_or_else(|| profile_name.to_string());
+                let region = args
+                    .region
+                    .clone()
+                    .or(role_profile.region.clone())
+                    .or(self.config.region.clone());
+                let external_id = args
+                    .external_id
+                    .clone()
+                    .or(role_profile.external_id.clone());
+                (session_name, region, external_id, role_duration)
+            } else {
+                // Intermediate hop: use profile settings only
+                let session_name = role_profile
+                    .role_session_name
+                    .clone()
+                    .unwrap_or_else(|| role_profile.name.clone());
+                let region = role_profile.region.clone();
+                let external_id = role_profile.external_id.clone();
+                let hop_duration = role_profile.duration_seconds;
+                (session_name, region, external_id, hop_duration)
+            };
 
-        sts_client
-            .assume_role(
-                Some(&assume_source),
-                role_arn,
-                &session_name,
-                external_id.as_deref(),
-                region.as_deref(),
-                role_duration,
-                None,
-                None,
-            )
-            .await
+            current_creds = sts_client
+                .assume_role(
+                    Some(&current_creds),
+                    role_arn,
+                    &session_name,
+                    external_id.as_deref(),
+                    region.as_deref(),
+                    hop_duration,
+                    None,
+                    None,
+                )
+                .await?;
+        }
+
+        Ok(current_creds)
     }
 
     /// Get the role chain for a profile, detecting cycles immediately via HashSet
@@ -447,12 +477,13 @@ impl<'a> ProfileResolver<'a> {
         args: &Args,
         sts_client: &StsClient,
         role_duration: Option<i32>,
+        mfa_serial: &Option<String>,
     ) -> Result<Credentials, AwswitError> {
         if args.auto_refresh && role_duration.map(|d| d > 3600).unwrap_or(false) {
             return Err(AwswitError::AutoRefreshDurationLimit);
         }
 
-        let mfa_serial = self.get_mfa_serial_for_chain(&[profile]);
+        let mfa_serial = mfa_serial.clone();
         let (mfa_serial_val, mfa_token_val) = if let Some(ref serial) = mfa_serial {
             let (s, t) = self.extract_mfa_args(serial, args)?;
             (Some(s), Some(t))
@@ -581,8 +612,10 @@ impl<'a> ProfileResolver<'a> {
                 }
                 #[cfg(not(unix))]
                 {
-                    // Best effort: the thread will eventually return
-                    let _ = child_id;
+                    tracing::warn!(
+                        "credential_process timed out; process kill is not supported on this platform (pid={})",
+                        child_id
+                    );
                 }
                 // Wait for the thread to finish after the kill
                 let _ = handle.join();
@@ -652,7 +685,7 @@ impl<'a> ProfileResolver<'a> {
 }
 
 /// Validate MFA token: must be 6-8 ASCII digits
-fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
+pub fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
     if token.len() < 6 || token.len() > 8 {
         return Err(AwswitError::InvalidMfaToken {
             message: format!(
@@ -706,10 +739,10 @@ mod tests {
     }
 
     #[test]
-    fn mfa_cache_key_uses_hash_format() {
+    fn mfa_cache_key_uses_hex_format() {
         let key = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user");
         assert!(key.starts_with("session-AKIAEXAMPLE-"));
-        // Should NOT contain the raw mfa_serial
-        assert!(!key.contains("arn:aws:iam"));
+        // Should contain hex-encoded mfa_serial
+        assert!(key.contains("61726e3a6177733a69616d"));
     }
 }
