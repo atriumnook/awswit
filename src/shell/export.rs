@@ -53,6 +53,10 @@ fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<VarBindin
             name: "AWS_DEFAULT_REGION",
             value: creds.region.clone(),
         },
+        // Unset AWS_PROFILE and AWS_DEFAULT_PROFILE to prevent conflict with the
+        // directly-exported credential environment variables above. If AWS_PROFILE
+        // remained set, the AWS SDK would resolve credentials from the named profile
+        // in ~/.aws/credentials instead of using the exported env vars.
         VarBinding {
             name: "AWS_PROFILE",
             value: None,

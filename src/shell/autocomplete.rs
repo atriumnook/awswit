@@ -45,7 +45,7 @@ complete -F _awswit_rs awswit
 
 fn generate_zsh_autocomplete() -> String {
     r#"
-#compdef awswit awswit
+#compdef awswit
 
 _awswit_rs() {
     local -a profiles flags
@@ -89,6 +89,7 @@ _awswit_rs() {
     _arguments -s $flags '*:profile:($profiles)'
 }
 
+compdef _awswit_rs awswit
 _awswit_rs "$@"
 "#
     .to_string()

@@ -99,7 +99,8 @@ fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
         .map(|(p, _)| p.to_string())
 }
 
-/// Calculate longest common subsequence length
+/// Calculate longest common subsequence length.
+/// Uses two-row rolling array for O(n) space instead of O(m*n).
 fn longest_common_subsequence(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
@@ -107,19 +108,22 @@ fn longest_common_subsequence(a: &str, b: &str) -> usize {
     let m = a_chars.len();
     let n = b_chars.len();
 
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    let mut prev = vec![0usize; n + 1];
+    let mut curr = vec![0usize; n + 1];
 
     for i in 1..=m {
         for j in 1..=n {
             if a_chars[i - 1] == b_chars[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
+                curr[j] = prev[j - 1] + 1;
             } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+                curr[j] = prev[j].max(curr[j - 1]);
             }
         }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.iter_mut().for_each(|x| *x = 0);
     }
 
-    dp[m][n]
+    prev[n]
 }
 
 /// Match profiles using Levenshtein distance
