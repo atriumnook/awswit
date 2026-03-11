@@ -1,27 +1,7 @@
-// TODO: The following test modules reimplement logic locally instead of exercising real code:
-// - `mfa_validation` should call `awswit::profile::resolver::validate_mfa_token` (needs pub)
-// - `credential_process_parsing` duplicates CredentialProcessOutput struct
-// - `credentials_expiry` should call `Credentials::is_expired()`
-// - `shell_export` / `shell_detect` should use `awswit::shell::export::ShellExporter`
-// - `sorted_profile_names` duplicates sorting logic from profile listing
-// See also: tests/config_parsing.rs (file I/O only), tests/profile_resolution.rs (ARN parsing only).
-
-//! Required unit tests for critical untested paths
+//! Unit tests that exercise real awswit library code instead of local reimplementations.
 
 mod mfa_validation {
-    // Test MFA token validation (imported logic)
-    fn validate_mfa_token(token: &str) -> Result<(), String> {
-        if token.len() < 6 || token.len() > 8 {
-            return Err(format!(
-                "MFA token must be 6-8 digits, got {} characters",
-                token.len()
-            ));
-        }
-        if !token.chars().all(|c| c.is_ascii_digit()) {
-            return Err("MFA token must contain only digits".to_string());
-        }
-        Ok(())
-    }
+    use awswit::profile::validate_mfa_token;
 
     #[test]
     fn test_valid_6_digit() {
@@ -55,270 +35,162 @@ mod mfa_validation {
     }
 }
 
-mod credential_process_parsing {
-    use chrono::{DateTime, Utc};
-    use serde::Deserialize;
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "PascalCase")]
-    #[allow(dead_code)]
-    struct CredentialProcessOutput {
-        access_key_id: String,
-        secret_access_key: String,
-        session_token: Option<String>,
-        expiration: Option<String>,
-    }
-
-    #[test]
-    fn test_valid_rfc3339() {
-        let json = r#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret","SessionToken":"tok","Expiration":"2025-01-01T00:00:00Z"}"#;
-        let creds: CredentialProcessOutput = serde_json::from_str(json).unwrap();
-        let exp = creds.expiration.unwrap();
-        let parsed = DateTime::parse_from_rfc3339(&exp).map(|dt| dt.with_timezone(&Utc));
-        assert!(parsed.is_ok());
-    }
-
-    #[test]
-    fn test_malformed_date_error() {
-        let json = r#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret","Expiration":"not-a-date"}"#;
-        let creds: CredentialProcessOutput = serde_json::from_str(json).unwrap();
-        let exp = creds.expiration.unwrap();
-        let parsed = DateTime::parse_from_rfc3339(&exp);
-        assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn test_missing_access_key_id() {
-        let json = r#"{"SecretAccessKey":"secret"}"#;
-        let result = serde_json::from_str::<CredentialProcessOutput>(json);
-        assert!(result.is_err());
-    }
-}
-
 mod credentials_expiry {
+    use awswit::aws::Credentials;
     use chrono::{Duration, Utc};
 
-    fn is_expired_with_buffer(expiration: chrono::DateTime<Utc>) -> bool {
-        expiration < Utc::now() + Duration::seconds(60)
+    #[test]
+    fn test_expired_credentials() {
+        let creds = Credentials {
+            expiration: Some(Utc::now() - Duration::hours(1)),
+            ..Default::default()
+        };
+        assert!(creds.is_expired());
     }
 
     #[test]
-    fn test_59s_before_expiry_is_expired() {
-        let exp = Utc::now() + Duration::seconds(59);
-        assert!(is_expired_with_buffer(exp));
+    fn test_not_expired_credentials() {
+        let creds = Credentials {
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            ..Default::default()
+        };
+        assert!(!creds.is_expired());
     }
 
     #[test]
-    fn test_61s_before_expiry_is_not_expired() {
-        let exp = Utc::now() + Duration::seconds(61);
-        assert!(!is_expired_with_buffer(exp));
+    fn test_no_expiration_not_expired() {
+        let creds = Credentials::default();
+        assert!(!creds.is_expired());
     }
 }
 
 mod shell_export {
+    use awswit::shell::ShellExporter;
+    use awswit::shell::ShellType;
+
     #[test]
     fn test_no_session_token_emits_unset_bash() {
-        // Simulate generate_export_commands with session_token=None
-        let session_token: Option<String> = None;
-        let mut output = String::new();
-        match &session_token {
-            Some(val) => output.push_str(&format!("export AWS_SESSION_TOKEN='{}'\n", val)),
-            None => output.push_str("unset AWS_SESSION_TOKEN\n"),
-        }
+        let creds = awswit::aws::Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_export_commands(&creds, "test");
         assert!(output.contains("unset AWS_SESSION_TOKEN"));
+        assert!(output.contains("unset AWS_SECURITY_TOKEN"));
+    }
+
+    #[test]
+    fn test_shell_output_rejects_newline_in_profile() {
+        let creds = awswit::aws::Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output(&creds, "evil\nprofile");
+        assert!(result.is_err());
     }
 }
 
-mod shell_detect {
-    fn detect_from_env(
-        awsume_shell: Option<&str>,
-        psmodulepath: bool,
-        shell: Option<&str>,
-    ) -> &'static str {
-        if let Some(s) = awsume_shell {
-            return parse_shell(s);
-        }
-        // $SHELL checked BEFORE PSModulePath — .NET SDK sets PSModulePath on
-        // Linux even for bash/zsh users, causing false positives.
-        if let Some(s) = shell {
-            return parse_shell(s);
-        }
-        if psmodulepath {
-            return "powershell";
-        }
-        "bash"
-    }
+mod credential_file_validation {
+    use awswit::autorefresh::credentials_file::{validate_credential_value, validate_profile_name};
 
-    fn parse_shell(name: &str) -> &'static str {
-        let lower = name.to_lowercase();
-        if lower.contains("fish") {
-            "fish"
-        } else if lower.contains("zsh") {
-            "zsh"
-        } else if lower.contains("powershell") || lower.contains("pwsh") {
-            "powershell"
-        } else {
-            "bash"
-        }
+    #[test]
+    fn shell_quote_injection_in_profile_name() {
+        assert!(validate_profile_name("evil]\n[injected").is_err());
     }
 
     #[test]
-    fn test_awsume_shell_takes_priority() {
+    fn control_chars_in_credential_value() {
+        assert!(validate_credential_value("key", "value\x00null").is_err());
+    }
+
+    #[test]
+    fn section_header_injection_in_value() {
+        assert!(validate_credential_value("key", "[injected]").is_err());
+    }
+
+    #[test]
+    fn valid_profile_name() {
+        assert!(validate_profile_name("autoawswit-my.profile_1").is_ok());
+    }
+
+    #[test]
+    fn valid_credential_value() {
+        assert!(validate_credential_value("key", "AKIAIOSFODNN7EXAMPLE").is_ok());
+    }
+}
+
+mod fuzzy_matching {
+    use std::collections::HashMap;
+    use awswit::profile::Profile;
+    use awswit::utils::fuzzy::find_closest_profile;
+
+    fn create_profiles(names: &[&str]) -> HashMap<String, Profile> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), Profile::default()))
+            .collect()
+    }
+
+    #[test]
+    fn test_exact_match() {
+        let profiles = create_profiles(&["staging", "dev-admin"]);
         assert_eq!(
-            detect_from_env(Some("fish"), true, Some("/bin/bash")),
-            "fish"
+            find_closest_profile("staging", &profiles),
+            Some("staging".to_string())
         );
     }
 
     #[test]
-    fn test_shell_before_psmodulepath() {
-        // $SHELL takes priority over PSModulePath to avoid .NET SDK false positives
-        assert_eq!(detect_from_env(None, true, Some("/bin/bash")), "bash");
+    fn test_prefix_match() {
+        let profiles = create_profiles(&["staging", "dev-admin", "prod-admin"]);
+        assert_eq!(
+            find_closest_profile("stag", &profiles),
+            Some("staging".to_string())
+        );
     }
 
     #[test]
-    fn test_psmodulepath_when_no_shell() {
-        assert_eq!(detect_from_env(None, true, None), "powershell");
-    }
-
-    #[test]
-    fn test_shell_var() {
-        assert_eq!(detect_from_env(None, false, Some("/usr/bin/zsh")), "zsh");
-    }
-
-    #[test]
-    fn test_default_bash() {
-        assert_eq!(detect_from_env(None, false, None), "bash");
-    }
-
-    #[test]
-    fn test_pwsh_detected() {
-        assert_eq!(parse_shell("/usr/bin/pwsh"), "powershell");
+    fn test_typo_match() {
+        let profiles = create_profiles(&["staging", "dev-admin"]);
+        assert_eq!(
+            find_closest_profile("stagin", &profiles),
+            Some("staging".to_string())
+        );
     }
 }
 
-mod sorted_profile_names {
-    struct Entry {
-        name: String,
-        is_favorite: bool,
-        last_used: Option<i64>, // epoch seconds for simplicity
-    }
+mod profile_resolution {
+    use awswit::cli::Args;
 
-    fn sorted_names(entries: &mut [Entry]) -> Vec<String> {
-        entries.sort_by(|a, b| match (a.is_favorite, b.is_favorite) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => match (&a.last_used, &b.last_used) {
-                (Some(a_t), Some(b_t)) => b_t.cmp(a_t),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            },
-        });
-        entries.iter().map(|e| e.name.clone()).collect()
+    #[test]
+    fn test_resolve_role_arn_full() {
+        let args = Args {
+            role_arn: Some("arn:aws:iam::123456789012:role/MyRole".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_role_arn(),
+            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
+        );
     }
 
     #[test]
-    fn test_recency_tiebreak() {
-        let mut entries = vec![
-            Entry {
-                name: "old".into(),
-                is_favorite: false,
-                last_used: Some(100),
-            },
-            Entry {
-                name: "new".into(),
-                is_favorite: false,
-                last_used: Some(200),
-            },
-        ];
-        let names = sorted_names(&mut entries);
-        assert_eq!(names, vec!["new", "old"]);
-    }
-
-    #[test]
-    fn test_never_used_alphabetical() {
-        let mut entries = vec![
-            Entry {
-                name: "zebra".into(),
-                is_favorite: false,
-                last_used: None,
-            },
-            Entry {
-                name: "alpha".into(),
-                is_favorite: false,
-                last_used: None,
-            },
-        ];
-        let names = sorted_names(&mut entries);
-        assert_eq!(names, vec!["alpha", "zebra"]);
-    }
-
-    #[test]
-    fn test_favorites_first() {
-        let mut entries = vec![
-            Entry {
-                name: "normal".into(),
-                is_favorite: false,
-                last_used: Some(999),
-            },
-            Entry {
-                name: "fav".into(),
-                is_favorite: true,
-                last_used: None,
-            },
-        ];
-        let names = sorted_names(&mut entries);
-        assert_eq!(names[0], "fav");
-    }
-}
-
-mod cache_corrupt_json {
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_corrupt_json_is_cache_miss_not_hard_error() {
-        let temp = TempDir::new().unwrap();
-        let cache_dir = temp.path().join("cache");
-        fs::create_dir_all(&cache_dir).unwrap();
-        let path = cache_dir.join("test.json");
-        fs::write(&path, "{{invalid json").unwrap();
-
-        let content = fs::read_to_string(&path).unwrap();
-        let result = serde_json::from_str::<serde_json::Value>(&content);
-        assert!(result.is_err()); // parse fails
-                                  // In real code, this returns Ok(None), not Err
-    }
-}
-
-mod autoawswit_config_parsing {
-    fn parse_bool_config(value: &str) -> bool {
-        matches!(value.to_lowercase().as_str(), "true" | "1" | "yes")
-    }
-
-    #[test]
-    fn test_true() {
-        assert!(parse_bool_config("true"));
-    }
-    #[test]
-    fn test_one() {
-        assert!(parse_bool_config("1"));
-    }
-    #[test]
-    fn test_yes() {
-        assert!(parse_bool_config("yes"));
-    }
-    #[test]
-    fn test_false() {
-        assert!(!parse_bool_config("false"));
-    }
-    #[test]
-    fn test_zero() {
-        assert!(!parse_bool_config("0"));
-    }
-    #[test]
-    fn test_no() {
-        assert!(!parse_bool_config("no"));
+    fn test_resolve_role_arn_shorthand() {
+        let args = Args {
+            role_arn: Some("123456789012:MyRole".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_role_arn(),
+            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
+        );
     }
 }

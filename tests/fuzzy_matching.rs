@@ -1,27 +1,33 @@
-//! Fuzzy matching tests
+//! Fuzzy matching tests using the real awswit library
 
-use strsim::jaro_winkler;
+use std::collections::HashMap;
+use awswit::profile::Profile;
+use awswit::utils::fuzzy::find_closest_profile;
+
+fn profiles(names: &[&str]) -> HashMap<String, Profile> {
+    names.iter().map(|n| (n.to_string(), Profile::default())).collect()
+}
 
 #[test]
 fn test_fuzzy_exact_match() {
-    let similarity = jaro_winkler("dev-admin", "dev-admin");
-    assert!(similarity > 0.99);
+    let p = profiles(&["dev-admin", "staging"]);
+    assert_eq!(find_closest_profile("dev-admin", &p), Some("dev-admin".to_string()));
 }
 
 #[test]
 fn test_fuzzy_prefix_match() {
-    let similarity = jaro_winkler("dev", "dev-admin");
-    assert!(similarity > 0.7);
+    let p = profiles(&["dev-admin", "staging"]);
+    assert_eq!(find_closest_profile("stag", &p), Some("staging".to_string()));
 }
 
 #[test]
 fn test_fuzzy_typo() {
-    let similarity = jaro_winkler("dev-admni", "dev-admin");
-    assert!(similarity > 0.9);
+    let p = profiles(&["dev-admin", "staging"]);
+    assert_eq!(find_closest_profile("stagin", &p), Some("staging".to_string()));
 }
 
 #[test]
 fn test_fuzzy_completely_different() {
-    let similarity = jaro_winkler("xyz", "dev-admin");
-    assert!(similarity < 0.5);
+    let p = profiles(&["dev-admin", "staging"]);
+    assert_eq!(find_closest_profile("zzzzzzzzzzzzz", &p), None);
 }
