@@ -36,6 +36,20 @@ impl AwsFiles {
             return Ok(HashMap::new());
         }
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = fs::metadata(&path) {
+                if meta.mode() & 0o002 != 0 {
+                    tracing::warn!(
+                        "AWS config file {} is world-writable (mode {:o}). This is a security risk.",
+                        path,
+                        meta.mode() & 0o777
+                    );
+                }
+            }
+        }
+
         let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
             message: format!("Failed to read {}: {}", path, e),
         })?;
@@ -117,7 +131,18 @@ impl AwsFiles {
             mfa_serial: get("mfa_serial"),
             external_id: get("external_id"),
             role_session_name: get("role_session_name"),
-            duration_seconds: get("duration_seconds").and_then(|s| s.parse().ok()),
+            duration_seconds: get("duration_seconds").and_then(|s| {
+                match s.parse() {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse duration_seconds '{}' in section '{}': {}",
+                            s, section, e
+                        );
+                        None
+                    }
+                }
+            }),
             region: get("region"),
             output: get("output"),
             // SSO fields

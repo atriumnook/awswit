@@ -50,7 +50,7 @@ impl<'a> ProfilePicker<'a> {
     pub fn new(profiles: &'a HashMap<String, Profile>) -> Self {
         Self {
             profiles,
-            history: ProfileHistory::load().unwrap_or_default(),
+            history: ProfileHistory::default(),
             theme: Theme::default(),
         }
     }
@@ -292,13 +292,15 @@ impl PickerApp {
         frame.render_widget(block, area);
 
         // Search icon and query
+        let (before_cursor, after_cursor) = self.query.split_at(self.cursor_pos);
         let search_line = Line::from(vec![
             Span::styled(
                 format!("{} ", self.theme.icons.search),
                 Style::default().fg(self.theme.primary),
             ),
-            Span::raw(&self.query),
-            Span::styled("│", Style::default().fg(self.theme.accent)), // Cursor
+            Span::raw(before_cursor.to_string()),
+            Span::styled("│", Style::default().fg(self.theme.accent)),
+            Span::raw(after_cursor.to_string()),
         ]);
 
         let search_widget = Paragraph::new(search_line);

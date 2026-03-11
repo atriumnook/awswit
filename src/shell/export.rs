@@ -5,7 +5,13 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// All environment variable names managed by awswit
+/// All environment variable names managed by awswit.
+///
+/// These must be kept in sync with the variable lists in:
+/// - src/init/bash.sh (case statement + AWSWIT_UNSET handler)
+/// - src/init/zsh.sh (case statement + AWSWIT_UNSET handler)
+/// - src/init/fish.fish (switch statement + AWSWIT_UNSET handler)
+/// - src/init/powershell.ps1 (switch statement + AWSWIT_UNSET handler)
 const MANAGED_VARS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -388,6 +394,21 @@ mod tests {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
         let result = exporter.generate_shell_output(&creds, "test");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_init_scripts_contain_all_managed_vars() {
+        let bash = include_str!("../init/bash.sh");
+        let zsh = include_str!("../init/zsh.sh");
+        let fish = include_str!("../init/fish.fish");
+        let ps1 = include_str!("../init/powershell.ps1");
+
+        for var in MANAGED_VARS {
+            assert!(bash.contains(var), "bash.sh missing {}", var);
+            assert!(zsh.contains(var), "zsh.sh missing {}", var);
+            assert!(fish.contains(var), "fish.fish missing {}", var);
+            assert!(ps1.contains(var), "powershell.ps1 missing {}", var);
+        }
     }
 
     #[test]

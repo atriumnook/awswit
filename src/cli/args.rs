@@ -120,6 +120,7 @@ impl Args {
                 arn.clone()
             } else if arn.contains(':') {
                 // Shorthand format: account_id:role_name
+                // Note: shorthand always uses arn:aws partition. For GovCloud/China, use full ARN.
                 let parts: Vec<&str> = arn.splitn(2, ':').collect();
                 if parts.len() == 2 {
                     format!("arn:aws:iam::{}:role/{}", parts[0], parts[1])

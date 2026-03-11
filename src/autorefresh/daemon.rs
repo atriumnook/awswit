@@ -352,9 +352,10 @@ fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
                     }
                 }
 
-                // On non-Linux unix, fall back to kill without /proc verification
                 #[cfg(not(target_os = "linux"))]
                 if !process_gone {
+                    // TODO: macOS could use sysctl(KERN_PROCARGS2) for process identity verification.
+                    // Current fallback: trust PID file without verification on non-Linux Unix.
                     tracing::debug!(
                         "Non-Linux platform: no /proc verification available for PID {}",
                         pid

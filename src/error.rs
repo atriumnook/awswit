@@ -65,7 +65,7 @@ pub enum AwswitError {
     IoError(#[from] std::io::Error),
 
     #[error("[E020] YAML parse error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_yml::Error),
 
     #[error("[E021] JSON parse error: {0}")]
     JsonError(#[from] serde_json::Error),

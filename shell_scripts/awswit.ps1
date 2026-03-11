@@ -52,6 +52,3 @@ function awswit {
         }
     }
 }
-
-# Export the function
-Export-ModuleMember -Function awswit

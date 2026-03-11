@@ -42,8 +42,7 @@ clap = { version = "4.4", features = ["derive", "env", "string"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# TODO: serde_yaml 0.9 is unmaintained; consider migrating to serde_yml
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 
 # INI file parsing
 configparser = "3.0"
