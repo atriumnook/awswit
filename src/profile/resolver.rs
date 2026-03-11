@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
@@ -360,7 +361,11 @@ impl<'a> ProfileResolver<'a> {
     ) -> Result<Credentials, AwswitError> {
         // Check cache first (unless force refresh)
         if !args.force_refresh {
-            let cache_key = format!("session-{}", source_credentials.access_key_id);
+            let cache_key = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                mfa_serial.hash(&mut hasher);
+                format!("session-{}-{:x}", source_credentials.access_key_id, hasher.finish())
+            };
             if let Some(cached) = cache_manager.get(&cache_key)? {
                 if !cached.is_expired() {
                     tracing::info!("Using cached MFA session credentials");
@@ -382,7 +387,10 @@ impl<'a> ProfileResolver<'a> {
             .await?;
 
         // Cache the session
-        let cache_key = format!("session-{}", source_credentials.access_key_id);
+        let cache_key = format!(
+            "session-{}-{}",
+            source_credentials.access_key_id, mfa_serial
+        );
         cache_manager.set(&cache_key, &session)?;
 
         Ok(session)
