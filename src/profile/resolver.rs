@@ -10,6 +10,14 @@ use crate::config::AwswitConfig;
 use crate::error::AwswitError;
 use crate::profile::Profile;
 
+/// Build a consistent cache key for MFA sessions.
+/// Uses the hashed mfa_serial to avoid storing raw serial numbers in cache file names.
+fn mfa_cache_key(access_key_id: &str, mfa_serial: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mfa_serial.hash(&mut hasher);
+    format!("session-{}-{:x}", access_key_id, hasher.finish())
+}
+
 /// Resolves profile credentials, handling role chains and MFA
 pub struct ProfileResolver<'a> {
     profiles: &'a HashMap<String, Profile>,
@@ -361,11 +369,7 @@ impl<'a> ProfileResolver<'a> {
     ) -> Result<Credentials, AwswitError> {
         // Check cache first (unless force refresh)
         if !args.force_refresh {
-            let cache_key = {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                mfa_serial.hash(&mut hasher);
-                format!("session-{}-{:x}", source_credentials.access_key_id, hasher.finish())
-            };
+            let cache_key = mfa_cache_key(&source_credentials.access_key_id, mfa_serial);
             if let Some(cached) = cache_manager.get(&cache_key)? {
                 if !cached.is_expired() {
                     tracing::info!("Using cached MFA session credentials");
@@ -387,10 +391,7 @@ impl<'a> ProfileResolver<'a> {
             .await?;
 
         // Cache the session
-        let cache_key = format!(
-            "session-{}-{}",
-            source_credentials.access_key_id, mfa_serial
-        );
+        let cache_key = mfa_cache_key(&source_credentials.access_key_id, mfa_serial);
         cache_manager.set(&cache_key, &session)?;
 
         Ok(session)
@@ -680,4 +681,35 @@ struct CredentialProcessOutput {
     session_token: Option<String>,
     #[serde(alias = "Expiration")]
     expiration: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mfa_cache_key_is_consistent() {
+        let key1 = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user");
+        let key2 = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user");
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn mfa_cache_key_differs_for_different_inputs() {
+        let key1 = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user1");
+        let key2 = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user2");
+        assert_ne!(key1, key2);
+
+        let key3 = mfa_cache_key("AKIAEXAMPLE1", "arn:aws:iam::123456789012:mfa/user");
+        let key4 = mfa_cache_key("AKIAEXAMPLE2", "arn:aws:iam::123456789012:mfa/user");
+        assert_ne!(key3, key4);
+    }
+
+    #[test]
+    fn mfa_cache_key_uses_hash_format() {
+        let key = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user");
+        assert!(key.starts_with("session-AKIAEXAMPLE-"));
+        // Should NOT contain the raw mfa_serial
+        assert!(!key.contains("arn:aws:iam"));
+    }
 }
