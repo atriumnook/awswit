@@ -217,8 +217,7 @@ impl<'a> ProfileResolver<'a> {
                 continue;
             }
 
-            let is_final_hop = i == chain.len() - 1
-                || std::ptr::eq(*role_profile, target_profile);
+            let is_final_hop = i == chain.len() - 1;
 
             let role_arn =
                 role_profile
@@ -605,10 +604,27 @@ impl<'a> ProfileResolver<'a> {
                     message: format!("Failed to wait on credential_process: {}", e),
                 })?,
             Err(_) => {
-                // Timed out — kill the process
+                // Timed out — gracefully terminate: SIGTERM → wait → SIGKILL
                 #[cfg(unix)]
-                unsafe {
-                    libc::kill(child_id as i32, libc::SIGKILL);
+                {
+                    let pid = child_id as i32;
+                    // Try graceful termination first
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+
+                    // Give the process 1 second to exit gracefully
+                    let grace = std::time::Duration::from_secs(1);
+                    let grace_start = std::time::Instant::now();
+                    loop {
+                        if unsafe { libc::kill(pid, 0) } != 0 {
+                            break; // Process exited
+                        }
+                        if grace_start.elapsed() >= grace {
+                            // Force kill and reap
+                            unsafe { libc::kill(pid, libc::SIGKILL) };
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                 }
                 #[cfg(not(unix))]
                 {
@@ -617,7 +633,7 @@ impl<'a> ProfileResolver<'a> {
                         child_id
                     );
                 }
-                // Wait for the thread to finish after the kill
+                // Wait for the thread to finish to reap the process (avoid zombie)
                 let _ = handle.join();
                 return Err(AwswitError::CredentialProcessFailed {
                     message: "credential_process timed out after 30 seconds".to_string(),
@@ -744,5 +760,152 @@ mod tests {
         assert!(key.starts_with("session-AKIAEXAMPLE-"));
         // Should contain hex-encoded mfa_serial
         assert!(key.contains("61726e3a6177733a69616d"));
+    }
+
+    fn make_user_profile(name: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            aws_access_key_id: Some("AKIATEST".to_string()),
+            aws_secret_access_key: Some("secret".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_role_profile(name: &str, role_arn: &str, source_profile: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            role_arn: Some(role_arn.to_string()),
+            source_profile: Some(source_profile.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn default_config() -> AwswitConfig {
+        AwswitConfig::default()
+    }
+
+    #[test]
+    fn role_chain_single_hop() {
+        let mut profiles = HashMap::new();
+        profiles.insert("base".to_string(), make_user_profile("base"));
+        profiles.insert(
+            "dev".to_string(),
+            make_role_profile("dev", "arn:aws:iam::111:role/Dev", "base"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("dev").unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].name, "dev");
+    }
+
+    #[test]
+    fn role_chain_multi_hop() {
+        let mut profiles = HashMap::new();
+        profiles.insert("base".to_string(), make_user_profile("base"));
+        profiles.insert(
+            "hop1".to_string(),
+            make_role_profile("hop1", "arn:aws:iam::111:role/Hop1", "base"),
+        );
+        profiles.insert(
+            "hop2".to_string(),
+            make_role_profile("hop2", "arn:aws:iam::222:role/Hop2", "hop1"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("hop2").unwrap();
+        // Chain should be [hop1, hop2] (reversed, source first)
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].name, "hop1");
+        assert_eq!(chain[1].name, "hop2");
+    }
+
+    #[test]
+    fn role_chain_cycle_detection() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "a".to_string(),
+            make_role_profile("a", "arn:aws:iam::111:role/A", "b"),
+        );
+        profiles.insert(
+            "b".to_string(),
+            make_role_profile("b", "arn:aws:iam::222:role/B", "a"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let result = resolver.get_role_chain("a");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AwswitError::RoleChainCycle { .. } => {}
+            e => panic!("Expected RoleChainCycle, got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn role_chain_missing_profile() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "orphan".to_string(),
+            make_role_profile("orphan", "arn:aws:iam::111:role/X", "nonexistent"),
+        );
+        // nonexistent source doesn't exist, but get_role_chain stops when source is not a role profile
+        // It should still return the chain with just orphan
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("orphan").unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].name, "orphan");
+    }
+
+    #[test]
+    fn role_chain_stops_at_user_profile() {
+        let mut profiles = HashMap::new();
+        profiles.insert("user".to_string(), make_user_profile("user"));
+        profiles.insert(
+            "role".to_string(),
+            make_role_profile("role", "arn:aws:iam::111:role/R", "user"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("role").unwrap();
+        // Should contain only the role profile, not the user source
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].name, "role");
+    }
+
+    #[test]
+    fn get_mfa_serial_from_source_profile() {
+        let mut profiles = HashMap::new();
+        let mut user = make_user_profile("user");
+        user.mfa_serial = Some("arn:aws:iam::111:mfa/user".to_string());
+        profiles.insert("user".to_string(), user);
+        profiles.insert(
+            "role".to_string(),
+            make_role_profile("role", "arn:aws:iam::111:role/R", "user"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("role").unwrap();
+        let mfa = resolver.get_mfa_serial_for_chain(&chain);
+        assert_eq!(
+            mfa,
+            Some("arn:aws:iam::111:mfa/user".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_mfa_token_rejects_spaces() {
+        assert!(validate_mfa_token("12 345").is_err());
+    }
+
+    #[test]
+    fn validate_mfa_token_rejects_fullwidth_digits() {
+        // Full-width digits (U+FF10-FF19) should be rejected
+        assert!(validate_mfa_token("\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}").is_err());
     }
 }

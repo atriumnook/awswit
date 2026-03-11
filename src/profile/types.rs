@@ -236,4 +236,86 @@ mod tests {
         profile.source_profile = Some("default".to_string());
         assert!(profile.validate().is_ok());
     }
+
+    #[test]
+    fn test_validate_credential_source_environment() {
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            credential_source: Some("Environment".to_string()),
+            ..Default::default()
+        };
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_credential_source_ec2_unsupported() {
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            credential_source: Some("Ec2InstanceMetadata".to_string()),
+            ..Default::default()
+        };
+        let err = profile.validate().unwrap_err();
+        matches!(err, ProfileValidationError::UnsupportedCredentialSource(_));
+    }
+
+    #[test]
+    fn test_validate_credential_source_ecs_unsupported() {
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            credential_source: Some("EcsContainer".to_string()),
+            ..Default::default()
+        };
+        let err = profile.validate().unwrap_err();
+        matches!(err, ProfileValidationError::UnsupportedCredentialSource(_));
+    }
+
+    #[test]
+    fn test_validate_source_and_credential_source_conflict() {
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            source_profile: Some("default".to_string()),
+            credential_source: Some("Environment".to_string()),
+            ..Default::default()
+        };
+        let err = profile.validate().unwrap_err();
+        matches!(err, ProfileValidationError::ConflictingCredentialSource);
+    }
+
+    #[test]
+    fn test_validate_credential_process_role() {
+        let profile = Profile {
+            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
+            credential_process: Some("my-cred-process".to_string()),
+            ..Default::default()
+        };
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_profile_missing_keys() {
+        let profile = Profile::default();
+        let err = profile.validate().unwrap_err();
+        matches!(err, ProfileValidationError::MissingAccessKeys);
+    }
+
+    #[test]
+    fn test_validate_user_with_credential_process() {
+        let profile = Profile {
+            credential_process: Some("my-cred-process".to_string()),
+            ..Default::default()
+        };
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn test_is_sso_profile() {
+        let mut profile = Profile::default();
+        assert!(!profile.is_sso_profile());
+
+        profile.sso_start_url = Some("https://example.awsapps.com/start".to_string());
+        assert!(!profile.is_sso_profile()); // Needs account_id too
+
+        profile.sso_account_id = Some("123456789012".to_string());
+        assert!(profile.is_sso_profile());
+    }
 }

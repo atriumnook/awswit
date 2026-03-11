@@ -1,6 +1,10 @@
 #!/bin/bash
-# awswit shell wrapper for Bash/Zsh
-# Source this file or use: alias awswit='source /path/to/awswit.sh'
+# Legacy standalone shell wrapper for awswit.
+# Prefer using the built-in shell integration instead:
+#   eval "$(awswit init bash)"   # for bash
+#   eval "$(awswit init zsh)"    # for zsh
+#
+# This script is for use as: alias awswit='source /path/to/awswit.sh'
 
 _awswit() {
     local output
