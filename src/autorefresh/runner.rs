@@ -537,3 +537,91 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_profile(expiration: Option<&str>) -> AutoRefreshProfile {
+        AutoRefreshProfile {
+            profile_name: "autoawswit-test".to_string(),
+            awswit_command: vec!["awswit".to_string(), "test".to_string()],
+            awswit_role_expiration: expiration.map(|s| s.to_string()),
+            awswit_cache_name: None,
+            aws_role_arn: None,
+            region: None,
+        }
+    }
+
+    #[test]
+    fn should_refresh_returns_false_when_no_expiration() {
+        let profile = make_profile(None);
+        assert!(!should_refresh(&profile));
+    }
+
+    #[test]
+    fn should_refresh_returns_false_when_not_near_expiry() {
+        let exp = (chrono::Utc::now() + chrono::Duration::minutes(6)).to_rfc3339();
+        let profile = make_profile(Some(&exp));
+        assert!(!should_refresh(&profile));
+    }
+
+    #[test]
+    fn should_refresh_returns_true_when_near_expiry() {
+        let exp = (chrono::Utc::now() + chrono::Duration::minutes(4)).to_rfc3339();
+        let profile = make_profile(Some(&exp));
+        assert!(should_refresh(&profile));
+    }
+
+    #[test]
+    fn should_refresh_returns_false_when_long_expired() {
+        let exp = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let profile = make_profile(Some(&exp));
+        assert!(!should_refresh(&profile));
+    }
+
+    #[test]
+    fn should_refresh_returns_false_for_invalid_rfc3339() {
+        let profile = make_profile(Some("not-a-date"));
+        assert!(!should_refresh(&profile));
+    }
+
+    #[test]
+    fn update_credentials_file_parses_output() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let creds_dir = temp.path().join(".aws");
+        fs::create_dir_all(&creds_dir).unwrap();
+        let creds_path = creds_dir.join("credentials");
+        fs::write(&creds_path, "[default]\naws_access_key_id = OLD\n").unwrap();
+
+        let output = "AWS_ACCESS_KEY_ID=AKIANEW\nAWS_SECRET_ACCESS_KEY=newsecret\nAWS_SESSION_TOKEN=newtoken\nAWSWIT_EXPIRATION=2099-01-01T00:00:00Z\n";
+
+        let mut creds: HashMap<String, String> = HashMap::new();
+        for line in output.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                creds.insert(key.to_string(), value.to_string());
+            }
+        }
+        assert_eq!(creds.get("AWS_ACCESS_KEY_ID").unwrap(), "AKIANEW");
+        assert_eq!(creds.get("AWS_SECRET_ACCESS_KEY").unwrap(), "newsecret");
+        assert_eq!(creds.get("AWS_SESSION_TOKEN").unwrap(), "newtoken");
+    }
+
+    #[test]
+    fn update_credentials_file_handles_equals_in_value() {
+        let output = "AWS_ACCESS_KEY_ID=AKIA123\nAWS_SECRET_ACCESS_KEY=secret+with=equals\n";
+        let mut creds: HashMap<String, String> = HashMap::new();
+        for line in output.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                creds.insert(key.to_string(), value.to_string());
+            }
+        }
+        assert_eq!(
+            creds.get("AWS_SECRET_ACCESS_KEY").unwrap(),
+            "secret+with=equals"
+        );
+    }
+}

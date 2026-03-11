@@ -32,7 +32,7 @@ pub struct AwswitConfig {
 
     /// Plugin-specific configurations (preserved as-is)
     #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, serde_yaml::Value>,
+    pub extra: std::collections::HashMap<String, serde_yml::Value>,
 }
 
 impl Default for AwswitConfig {
@@ -63,16 +63,20 @@ impl AwswitConfig {
     pub fn load() -> Result<Self, AwswitError> {
         let path = Self::config_path()?;
 
-        if !path.exists() {
-            tracing::debug!("awswit config not found, using defaults");
-            return Ok(Self::default());
-        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("awswit config not found, using defaults");
+                return Ok(Self::default());
+            }
+            Err(e) => {
+                return Err(AwswitError::ConfigFileError {
+                    message: format!("Failed to read config: {}", e),
+                });
+            }
+        };
 
-        let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
-            message: format!("Failed to read config: {}", e),
-        })?;
-
-        let config: Self = serde_yaml::from_str(&content)?;
+        let config: Self = serde_yml::from_str(&content)?;
         Ok(config)
     }
 
@@ -85,7 +89,7 @@ impl AwswitConfig {
             fs::create_dir_all(parent)?;
         }
 
-        let content = serde_yaml::to_string(self)?;
+        let content = serde_yml::to_string(self)?;
         crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
 
         tracing::debug!("Saved config to {:?}", path);
@@ -134,7 +138,7 @@ impl AwswitConfig {
                 // Store in extra for plugins
                 self.extra.insert(
                     key.to_string(),
-                    serde_yaml::Value::String(value.to_string()),
+                    serde_yml::Value::String(value.to_string()),
                 );
             }
         }
@@ -151,7 +155,7 @@ impl AwswitConfig {
             "role-session-name" => self.role_session_name.clone(),
             "session-token-duration" => self.session_token_duration.map(|d| d.to_string()),
             _ => self.extra.get(key).map(|v| match v {
-                serde_yaml::Value::String(s) => s.clone(),
+                serde_yml::Value::String(s) => s.clone(),
                 other => format!("{:?}", other),
             }),
         }
@@ -207,8 +211,40 @@ mod tests {
     #[test]
     fn test_yaml_serialization() {
         let config = AwswitConfig::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml = serde_yml::to_string(&config).unwrap();
         assert!(yaml.contains("colors"));
         assert!(yaml.contains("fuzzy-match"));
+    }
+
+    #[test]
+    fn test_session_token_duration_boundary_low_reject() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("session-token-duration", "899").is_err());
+    }
+
+    #[test]
+    fn test_session_token_duration_boundary_low_accept() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("session-token-duration", "900").is_ok());
+        assert_eq!(config.session_token_duration, Some(900));
+    }
+
+    #[test]
+    fn test_session_token_duration_boundary_high_accept() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("session-token-duration", "129600").is_ok());
+        assert_eq!(config.session_token_duration, Some(129600));
+    }
+
+    #[test]
+    fn test_session_token_duration_boundary_high_reject() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("session-token-duration", "129601").is_err());
+    }
+
+    #[test]
+    fn test_session_token_duration_non_numeric() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("session-token-duration", "abc").is_err());
     }
 }

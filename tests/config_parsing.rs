@@ -1,8 +1,10 @@
-//! Config and credentials file parsing tests
+//! Config and credentials file parsing tests using real library code
 
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
+
+use awswit::config::AwsFiles;
 
 fn setup_test_aws_dir() -> TempDir {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -44,35 +46,64 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 }
 
 #[test]
-fn test_config_file_parsing() {
+fn test_load_and_parse_config_profiles() {
     let temp_dir = setup_test_aws_dir();
     let config_path = temp_dir.path().join("config");
-
-    assert!(config_path.exists());
-
-    let content = fs::read_to_string(&config_path).expect("Failed to read config");
-    assert!(content.contains("[default]"));
-    assert!(content.contains("[profile dev]"));
-    assert!(content.contains("[profile prod]"));
-}
-
-#[test]
-fn test_credentials_file_parsing() {
-    let temp_dir = setup_test_aws_dir();
     let creds_path = temp_dir.path().join("credentials");
 
-    assert!(creds_path.exists());
+    let aws_files = AwsFiles::load(
+        config_path.to_str().unwrap(),
+        creds_path.to_str().unwrap(),
+    )
+    .unwrap();
 
-    let content = fs::read_to_string(&creds_path).expect("Failed to read credentials");
-    assert!(content.contains("[default]"));
-    assert!(content.contains("aws_access_key_id"));
+    assert!(aws_files.config_profiles.contains_key("dev"));
+    assert!(aws_files.config_profiles.contains_key("prod"));
+    assert!(aws_files.config_profiles.contains_key("default"));
+
+    let dev = &aws_files.config_profiles["dev"];
+    assert_eq!(
+        dev.role_arn,
+        Some("arn:aws:iam::123456789012:role/DevRole".to_string())
+    );
+    assert_eq!(dev.source_profile, Some("default".to_string()));
+    assert_eq!(dev.region, Some("us-west-2".to_string()));
 }
 
 #[test]
-fn test_account_id_extraction() {
-    let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-    let parts: Vec<&str> = role_arn.split(':').collect();
+fn test_merge_profiles_credentials_override() {
+    let temp_dir = setup_test_aws_dir();
+    let config_path = temp_dir.path().join("config");
+    let creds_path = temp_dir.path().join("credentials");
 
-    assert!(parts.len() >= 5);
-    assert_eq!(parts[4], "123456789012");
+    let aws_files = AwsFiles::load(
+        config_path.to_str().unwrap(),
+        creds_path.to_str().unwrap(),
+    )
+    .unwrap();
+
+    let merged = aws_files.merge_profiles();
+
+    let default = &merged["default"];
+    assert_eq!(
+        default.aws_access_key_id,
+        Some("AKIAIOSFODNN7EXAMPLE".to_string())
+    );
+    assert_eq!(default.region, Some("us-east-1".to_string()));
+}
+
+#[test]
+fn test_account_id_extraction_via_profile() {
+    let temp_dir = setup_test_aws_dir();
+    let config_path = temp_dir.path().join("config");
+    let creds_path = temp_dir.path().join("credentials");
+
+    let aws_files = AwsFiles::load(
+        config_path.to_str().unwrap(),
+        creds_path.to_str().unwrap(),
+    )
+    .unwrap();
+
+    let dev = &aws_files.config_profiles["dev"];
+    assert_eq!(dev.get_account_id(), Some("123456789012".to_string()));
 }

@@ -185,7 +185,8 @@ mod tests {
 
         // Ambiguous prefix (dev- matches multiple)
         let result = find_closest_profile("dev", &profiles);
-        assert!(result.is_none() || result.is_some()); // Either none or one match
+        // "dev" is ambiguous prefix (matches dev-admin and dev-readonly), so no match
+        assert!(result.is_none());
     }
 
     #[test]
