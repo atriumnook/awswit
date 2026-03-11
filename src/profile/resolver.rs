@@ -37,11 +37,11 @@ impl<'a> ProfileResolver<'a> {
 
         // Get the target profile
         let target_profile = self.profiles.get(profile_name)
-            .ok_or_else(|| AwswitError::ProfileNotFound(profile_name.to_string()))?;
+            .ok_or_else(|| AwswitError::ProfileNotFound { name: profile_name.to_string() })?;
 
         // Handle credential_process
         if target_profile.uses_credential_process() {
-            return self.get_credentials_from_process(target_profile).await;
+            return self.get_credentials_from_process(target_profile);
         }
 
         // If it's a role profile, resolve the chain
@@ -75,15 +75,13 @@ impl<'a> ProfileResolver<'a> {
         // Get source credentials
         let source_credentials = if let Some(ref source_profile_name) = args.source_profile {
             let source_profile = self.profiles.get(source_profile_name)
-                .ok_or_else(|| AwswitError::SourceProfileNotFound(source_profile_name.clone()))?;
-            
+                .ok_or_else(|| AwswitError::SourceProfileNotFound { name: source_profile_name.clone() })?;
+
             // Check if source requires MFA
             if source_profile.requires_mfa() {
-                // This is more complex - would need to get session token first
-                // For now, use the profile's credentials directly
                 tracing::warn!("Source profile requires MFA - this may not work correctly");
             }
-            
+
             Some(self.profile_to_credentials(source_profile)?)
         } else {
             None
@@ -117,15 +115,12 @@ impl<'a> ProfileResolver<'a> {
         sts_client: &StsClient,
         cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
-        // Get the role chain
+        // Get the role chain (with cycle detection via visited set)
         let chain = self.get_role_chain(profile_name)?;
         tracing::debug!("Role chain: {:?}", chain.iter().map(|p| &p.name).collect::<Vec<_>>());
 
-        // The first profile in the chain should be the source (user profile or credential_source)
-        // We work backwards: get source credentials, then assume each role in sequence
-
         let target_profile = self.profiles.get(profile_name)
-            .ok_or_else(|| AwswitError::ProfileNotFound(profile_name.to_string()))?;
+            .ok_or_else(|| AwswitError::ProfileNotFound { name: profile_name.to_string() })?;
 
         // Get source credentials
         let source_credentials = self.get_source_credentials(
@@ -145,10 +140,9 @@ impl<'a> ProfileResolver<'a> {
 
         // Check for MFA requirement
         let mfa_serial = self.get_mfa_serial_for_chain(&chain);
-        
+
         // If MFA is required and role_duration > 3600, we need special handling
         if mfa_serial.is_some() && role_duration.map(|d| d > 3600).unwrap_or(false) {
-            // Cannot use temp creds for custom role duration > 1 hour
             return self.assume_role_with_mfa_large_duration(
                 target_profile,
                 &source_credentials,
@@ -173,8 +167,11 @@ impl<'a> ProfileResolver<'a> {
 
         // Assume the role
         let role_arn = target_profile.role_arn.as_ref()
-            .ok_or_else(|| AwswitError::invalid_profile(profile_name, "missing role_arn"))?;
-        
+            .ok_or_else(|| AwswitError::InvalidProfile {
+                profile_name: profile_name.to_string(),
+                message: "missing role_arn".to_string(),
+            })?;
+
         let session_name = args.session_name.clone()
             .or(target_profile.role_session_name.clone())
             .or(self.config.role_session_name.clone())
@@ -199,21 +196,20 @@ impl<'a> ProfileResolver<'a> {
         ).await
     }
 
-    /// Get the role chain for a profile
+    /// Get the role chain for a profile, detecting cycles immediately via HashSet
     fn get_role_chain(&self, profile_name: &str) -> Result<Vec<&Profile>, AwswitError> {
         let mut chain = Vec::new();
         let mut visited = HashSet::new();
         let mut current_name = profile_name.to_string();
 
         loop {
-            // Check for cycles
-            if visited.contains(&current_name) {
-                return Err(AwswitError::RoleChainCycle(current_name));
+            // Check for cycles before doing anything else
+            if !visited.insert(current_name.clone()) {
+                return Err(AwswitError::RoleChainCycle { chain: current_name });
             }
-            visited.insert(current_name.clone());
 
             let profile = self.profiles.get(&current_name)
-                .ok_or_else(|| AwswitError::ProfileNotFound(current_name.clone()))?;
+                .ok_or_else(|| AwswitError::ProfileNotFound { name: current_name.clone() })?;
 
             chain.push(profile);
 
@@ -240,24 +236,24 @@ impl<'a> ProfileResolver<'a> {
     async fn get_source_credentials(
         &self,
         chain: &[&Profile],
-        args: &Args,
-        sts_client: &StsClient,
-        cache_manager: &CacheManager,
+        _args: &Args,
+        _sts_client: &StsClient,
+        _cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         // Get the first profile in the chain (source)
         let source_profile = chain.first()
-            .ok_or_else(|| AwswitError::ValidationError("Empty role chain".to_string()))?;
+            .ok_or_else(|| AwswitError::ValidationError { message: "Empty role chain".to_string() })?;
 
         // Check credential_source
         if let Some(ref cred_source) = source_profile.credential_source {
-            return self.get_credentials_from_source(cred_source).await;
+            return self.get_credentials_from_source(cred_source);
         }
 
         // Check for source_profile
         if let Some(ref source_name) = source_profile.source_profile {
             let user_profile = self.profiles.get(source_name)
-                .ok_or_else(|| AwswitError::SourceProfileNotFound(source_name.clone()))?;
-            
+                .ok_or_else(|| AwswitError::SourceProfileNotFound { name: source_name.clone() })?;
+
             return self.profile_to_credentials(user_profile);
         }
 
@@ -267,7 +263,6 @@ impl<'a> ProfileResolver<'a> {
 
     /// Get MFA serial for a role chain
     fn get_mfa_serial_for_chain(&self, chain: &[&Profile]) -> Option<String> {
-        // Check source profiles for mfa_serial
         for profile in chain {
             if let Some(ref mfa_serial) = profile.mfa_serial {
                 return Some(mfa_serial.clone());
@@ -281,6 +276,16 @@ impl<'a> ProfileResolver<'a> {
             }
         }
         None
+    }
+
+    /// Extract MFA args from profile and args, returning (serial, token) if MFA is needed
+    fn extract_mfa_args(
+        &self,
+        mfa_serial: &str,
+        args: &Args,
+    ) -> Result<(String, String), AwswitError> {
+        let token = self.get_mfa_token(args)?;
+        Ok((mfa_serial.to_string(), token))
     }
 
     /// Get session token with MFA
@@ -304,13 +309,13 @@ impl<'a> ProfileResolver<'a> {
         }
 
         // Need to get new session token
-        let mfa_token = self.get_mfa_token(args)?;
+        let (_serial, token) = self.extract_mfa_args(mfa_serial, args)?;
 
         let session = sts_client.get_session_token(
             source_credentials,
             Some(mfa_serial),
-            Some(&mfa_token),
-            self.config.debug.session_token_duration,
+            Some(&token),
+            self.config.session_token_duration,
         ).await?;
 
         // Cache the session
@@ -323,6 +328,7 @@ impl<'a> ProfileResolver<'a> {
     /// Get MFA token from args or prompt user
     fn get_mfa_token(&self, args: &Args) -> Result<String, AwswitError> {
         if let Some(ref token) = args.mfa_token {
+            validate_mfa_token(token)?;
             return Ok(token.clone());
         }
 
@@ -333,6 +339,7 @@ impl<'a> ProfileResolver<'a> {
             .interact_text()
             .map_err(|_| AwswitError::MfaTokenRequired)?;
 
+        validate_mfa_token(&token)?;
         Ok(token)
     }
 
@@ -371,14 +378,18 @@ impl<'a> ProfileResolver<'a> {
         }
 
         let mfa_serial = self.get_mfa_serial_for_chain(&[profile]);
-        let mfa_token = if mfa_serial.is_some() {
-            Some(self.get_mfa_token(args)?)
+        let (mfa_serial_val, mfa_token_val) = if let Some(ref serial) = mfa_serial {
+            let (s, t) = self.extract_mfa_args(serial, args)?;
+            (Some(s), Some(t))
         } else {
-            None
+            (None, None)
         };
 
         let role_arn = profile.role_arn.as_ref()
-            .ok_or_else(|| AwswitError::invalid_profile(&profile.name, "missing role_arn"))?;
+            .ok_or_else(|| AwswitError::InvalidProfile {
+                profile_name: profile.name.clone(),
+                message: "missing role_arn".to_string(),
+            })?;
 
         let session_name = args.session_name.clone()
             .or(profile.role_session_name.clone())
@@ -396,20 +407,19 @@ impl<'a> ProfileResolver<'a> {
             profile.external_id.as_deref(),
             region.as_deref(),
             role_duration,
-            mfa_serial.as_deref(),
-            mfa_token.as_deref(),
+            mfa_serial_val.as_deref(),
+            mfa_token_val.as_deref(),
         ).await
     }
 
     /// Get credentials from credential_source
-    async fn get_credentials_from_source(&self, source: &str) -> Result<Credentials, AwswitError> {
+    fn get_credentials_from_source(&self, source: &str) -> Result<Credentials, AwswitError> {
         match source {
             "Environment" => {
-                // Get from environment variables
                 let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-                    .map_err(|_| AwswitError::EnvError("AWS_ACCESS_KEY_ID not set".to_string()))?;
+                    .map_err(|_| AwswitError::EnvError { message: "AWS_ACCESS_KEY_ID not set".to_string() })?;
                 let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-                    .map_err(|_| AwswitError::EnvError("AWS_SECRET_ACCESS_KEY not set".to_string()))?;
+                    .map_err(|_| AwswitError::EnvError { message: "AWS_SECRET_ACCESS_KEY not set".to_string() })?;
                 let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
 
                 Ok(Credentials {
@@ -421,47 +431,64 @@ impl<'a> ProfileResolver<'a> {
                 })
             }
             "Ec2InstanceMetadata" | "EcsContainer" => {
-                // Use default credential chain which handles these
-                Err(AwswitError::InvalidCredentialSource(format!(
-                    "{} should be handled by AWS SDK default chain", source
-                )))
+                Err(AwswitError::InvalidCredentialSource {
+                    name: format!("{} should be handled by AWS SDK default chain", source),
+                })
             }
             _ => {
-                Err(AwswitError::InvalidCredentialSource(source.to_string()))
+                Err(AwswitError::InvalidCredentialSource { name: source.to_string() })
             }
         }
     }
 
-    /// Get credentials from credential_process
-    async fn get_credentials_from_process(&self, profile: &Profile) -> Result<Credentials, AwswitError> {
+    /// Get credentials from credential_process (sync - no async needed)
+    fn get_credentials_from_process(&self, profile: &Profile) -> Result<Credentials, AwswitError> {
         let command = profile.credential_process.as_ref()
-            .ok_or_else(|| AwswitError::invalid_profile(&profile.name, "missing credential_process"))?;
+            .ok_or_else(|| AwswitError::InvalidProfile {
+                profile_name: profile.name.clone(),
+                message: "missing credential_process".to_string(),
+            })?;
 
-        tracing::info!("Running credential_process: {}", command);
+        // TRUST BOUNDARY: credential_process is executed via `sh -c` exactly as
+        // specified in the user's AWS config file (~/.aws/config). This matches
+        // AWS CLI behavior. The config file is trusted user input — if an attacker
+        // can modify it, they already have arbitrary code execution.
+        tracing::info!("Running credential_process for profile '{}'", profile.name);
 
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .output()
-            .map_err(|e| AwswitError::CredentialProcessFailed(e.to_string()))?;
+            .map_err(|e| AwswitError::CredentialProcessFailed { message: e.to_string() })?;
 
         if !output.status.success() {
+            // Log stderr at debug only - may contain secrets
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AwswitError::CredentialProcessFailed(stderr.to_string()));
+            tracing::debug!("credential_process stderr: {}", stderr);
+            return Err(AwswitError::CredentialProcessFailed {
+                message: format!("credential_process exited with status {}", output.status),
+            });
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let creds: CredentialProcessOutput = serde_json::from_str(&stdout)?;
 
+        let expiration = match creds.expiration {
+            Some(ref e) => Some(
+                chrono::DateTime::parse_from_rfc3339(e)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|_| AwswitError::CredentialProcessFailed {
+                        message: format!("Invalid expiration date format: {}", e),
+                    })?
+            ),
+            None => None,
+        };
+
         Ok(Credentials {
             access_key_id: creds.access_key_id,
             secret_access_key: creds.secret_access_key,
             session_token: creds.session_token,
-            expiration: creds.expiration.and_then(|e| {
-                chrono::DateTime::parse_from_rfc3339(&e)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .ok()
-            }),
+            expiration,
             region: profile.region.clone(),
         })
     }
@@ -469,9 +496,15 @@ impl<'a> ProfileResolver<'a> {
     /// Convert a profile to credentials
     fn profile_to_credentials(&self, profile: &Profile) -> Result<Credentials, AwswitError> {
         let access_key = profile.aws_access_key_id.clone()
-            .ok_or_else(|| AwswitError::missing_key(&profile.name, "aws_access_key_id"))?;
+            .ok_or_else(|| AwswitError::MissingProfileKey {
+                profile_name: profile.name.clone(),
+                key: "aws_access_key_id".to_string(),
+            })?;
         let secret_key = profile.aws_secret_access_key.clone()
-            .ok_or_else(|| AwswitError::missing_key(&profile.name, "aws_secret_access_key"))?;
+            .ok_or_else(|| AwswitError::MissingProfileKey {
+                profile_name: profile.name.clone(),
+                key: "aws_secret_access_key".to_string(),
+            })?;
 
         Ok(Credentials {
             access_key_id: access_key,
@@ -481,6 +514,21 @@ impl<'a> ProfileResolver<'a> {
             region: profile.region.clone(),
         })
     }
+}
+
+/// Validate MFA token: must be 6-8 ASCII digits
+fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
+    if token.len() < 6 || token.len() > 8 {
+        return Err(AwswitError::InvalidMfaToken {
+            message: format!("MFA token must be 6-8 digits, got {} characters", token.len()),
+        });
+    }
+    if !token.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AwswitError::InvalidMfaToken {
+            message: "MFA token must contain only digits".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Output format for credential_process

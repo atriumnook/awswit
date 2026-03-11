@@ -2,8 +2,44 @@ use crate::aws::Credentials;
 
 /// Shell-quote a value by wrapping in single quotes and escaping embedded single quotes
 fn shell_quote(s: &str) -> String {
-    // Replace ' with '\'' (end quote, escaped quote, start quote)
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// All environment variable names managed by awswit
+const MANAGED_VARS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWSWIT_PROFILE",
+    "AWSWIT_EXPIRATION",
+];
+
+/// Credential variables that always get set, plus their value extractors
+struct VarBinding {
+    name: &'static str,
+    value: Option<String>,
+}
+
+fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<VarBinding> {
+    let expiration_str = creds.expiration.map(|exp| exp.to_rfc3339());
+
+    vec![
+        VarBinding { name: "AWS_ACCESS_KEY_ID", value: Some(creds.access_key_id.clone()) },
+        VarBinding { name: "AWS_SECRET_ACCESS_KEY", value: Some(creds.secret_access_key.clone()) },
+        VarBinding { name: "AWS_SESSION_TOKEN", value: creds.session_token.clone() },
+        VarBinding { name: "AWS_SECURITY_TOKEN", value: creds.session_token.clone() },
+        VarBinding { name: "AWS_REGION", value: creds.region.clone() },
+        VarBinding { name: "AWS_DEFAULT_REGION", value: creds.region.clone() },
+        VarBinding { name: "AWS_PROFILE", value: None },
+        VarBinding { name: "AWS_DEFAULT_PROFILE", value: None },
+        VarBinding { name: "AWSWIT_PROFILE", value: Some(profile_name.to_string()) },
+        VarBinding { name: "AWSWIT_EXPIRATION", value: expiration_str },
+    ]
 }
 
 /// Handles exporting credentials to shell environment
@@ -39,16 +75,19 @@ impl ShellExporter {
             return Self::parse_shell_name(&shell);
         }
 
-        // Check SHELL environment variable
+        // Check SHELL environment variable before PSModulePath — .NET SDK sets
+        // PSModulePath on Linux even for bash/zsh users, causing false positives.
         if let Ok(shell) = std::env::var("SHELL") {
             return Self::parse_shell_name(&shell);
         }
 
+        // Check PSModulePath (reliable on Windows / when SHELL is unset)
+        if std::env::var("PSModulePath").is_ok() {
+            return ShellType::PowerShell;
+        }
+
         // Windows detection
         if cfg!(windows) {
-            if std::env::var("PSModulePath").is_ok() {
-                return ShellType::PowerShell;
-            }
             return ShellType::Cmd;
         }
 
@@ -73,264 +112,111 @@ impl ShellExporter {
 
     /// Generate export commands that can be displayed to the user
     pub fn generate_export_commands(&self, credentials: &Credentials, profile_name: &str) -> String {
-        match self.shell_type {
-            ShellType::Bash | ShellType::Zsh => {
-                self.generate_posix_export(credentials, profile_name)
-            }
-            ShellType::Fish => {
-                self.generate_fish_export(credentials, profile_name)
-            }
-            ShellType::PowerShell => {
-                self.generate_powershell_export(credentials, profile_name)
-            }
-            ShellType::Cmd => {
-                self.generate_cmd_export(credentials, profile_name)
-            }
-        }
-    }
-
-    /// Generate output for shell wrapper to eval
-    pub fn generate_shell_output(&self, credentials: &Credentials, profile_name: &str) -> String {
-        // The shell wrapper will source this output
-        // Format: key=value pairs, one per line
-        // The shell wrapper converts these to appropriate export commands
+        let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
-        output.push_str(&format!("AWS_ACCESS_KEY_ID={}\n", &credentials.access_key_id));
-        output.push_str(&format!("AWS_SECRET_ACCESS_KEY={}\n", &credentials.secret_access_key));
-
-        if let Some(ref token) = credentials.session_token {
-            output.push_str(&format!("AWS_SESSION_TOKEN={}\n", token));
-            output.push_str(&format!("AWS_SECURITY_TOKEN={}\n", token)); // Legacy
-        }
-
-        if let Some(ref region) = credentials.region {
-            output.push_str(&format!("AWS_REGION={}\n", region));
-            output.push_str(&format!("AWS_DEFAULT_REGION={}\n", region));
-        }
-
-        output.push_str(&format!("AWSWIT_PROFILE={}\n", profile_name));
-
-        if let Some(expiration) = credentials.expiration {
-            output.push_str(&format!(
-                "AWSWIT_EXPIRATION={}\n",
-                expiration.format("%Y-%m-%dT%H:%M:%S")
-            ));
+        for binding in &bindings {
+            match &binding.value {
+                Some(val) => {
+                    output.push_str(&self.format_set(binding.name, val));
+                }
+                None => {
+                    // Unset variables with no value (e.g., region when new profile has none)
+                    output.push_str(&self.format_unset(binding.name));
+                }
+            }
         }
 
         output
+    }
+
+    /// Generate output for shell wrapper to eval
+    ///
+    /// Values are validated to reject newlines and carriage returns, which could
+    /// inject extra KEY=VALUE lines and corrupt the shell wrapper's parsing.
+    pub fn generate_shell_output(&self, credentials: &Credentials, profile_name: &str) -> Result<String, crate::error::AwswitError> {
+        let bindings = credential_bindings(credentials, profile_name);
+        let mut output = String::new();
+
+        for binding in &bindings {
+            match &binding.value {
+                Some(val) => {
+                    if val.contains('\n') || val.contains('\r') {
+                        return Err(crate::error::AwswitError::ShellError {
+                            message: format!(
+                                "Value for {} contains newline characters, which is not allowed in shell output",
+                                binding.name
+                            ),
+                        });
+                    }
+                    output.push_str(&format!("{}={}\n", binding.name, val));
+                }
+                None => {
+                    // Empty value signals unset to shell wrapper
+                    output.push_str(&format!("{}=\n", binding.name));
+                }
+            }
+        }
+
+        Ok(output)
     }
 
     /// Generate unset commands for display
     pub fn generate_unset_commands(&self) -> String {
-        match self.shell_type {
-            ShellType::Bash | ShellType::Zsh => {
-                self.generate_posix_unset()
-            }
-            ShellType::Fish => {
-                self.generate_fish_unset()
-            }
-            ShellType::PowerShell => {
-                self.generate_powershell_unset()
-            }
-            ShellType::Cmd => {
-                self.generate_cmd_unset()
-            }
+        let mut output = String::new();
+        for var in MANAGED_VARS {
+            output.push_str(&self.format_unset(var));
         }
+        output
     }
 
     /// Generate unset output for shell wrapper
     pub fn generate_unset_output(&self) -> String {
-        // Special marker to indicate unset
         "AWSWIT_UNSET=1\n".to_string()
     }
 
-    // POSIX shell (bash, zsh)
-    fn generate_posix_export(&self, creds: &Credentials, profile: &str) -> String {
-        let mut output = String::new();
-
-        output.push_str(&format!("export AWS_ACCESS_KEY_ID={}\n", shell_quote(&creds.access_key_id)));
-        output.push_str(&format!("export AWS_SECRET_ACCESS_KEY={}\n", shell_quote(&creds.secret_access_key)));
-
-        if let Some(ref token) = creds.session_token {
-            output.push_str(&format!("export AWS_SESSION_TOKEN={}\n", shell_quote(token)));
-            output.push_str(&format!("export AWS_SECURITY_TOKEN={}\n", shell_quote(token)));
+    /// Format a set/export command for the detected shell
+    fn format_set(&self, name: &str, value: &str) -> String {
+        match self.shell_type {
+            ShellType::Bash | ShellType::Zsh => {
+                format!("export {}={}\n", name, shell_quote(value))
+            }
+            ShellType::Fish => {
+                format!("set -gx {} {}\n", name, shell_quote(value))
+            }
+            ShellType::PowerShell => {
+                let ps_value = format!("'{}'", value.replace('\'', "''"));
+                format!("$env:{} = {}\n", name, ps_value)
+            }
+            ShellType::Cmd => {
+                let escaped = value
+                    .replace('^', "^^")
+                    .replace('&', "^&")
+                    .replace('|', "^|")
+                    .replace('<', "^<")
+                    .replace('>', "^>")
+                    .replace('%', "%%");
+                format!("set {}={}\n", name, escaped)
+            }
         }
-
-        if let Some(ref region) = creds.region {
-            output.push_str(&format!("export AWS_REGION={}\n", shell_quote(region)));
-            output.push_str(&format!("export AWS_DEFAULT_REGION={}\n", shell_quote(region)));
-        }
-
-        output.push_str(&format!("export AWSWIT_PROFILE={}\n", shell_quote(profile)));
-
-        if let Some(exp) = creds.expiration {
-            output.push_str(&format!(
-                "export AWSWIT_EXPIRATION={}\n",
-                shell_quote(&exp.format("%Y-%m-%dT%H:%M:%S").to_string())
-            ));
-        }
-
-        output
     }
 
-    fn generate_posix_unset(&self) -> String {
-        r#"unset AWS_ACCESS_KEY_ID
-unset AWS_SECRET_ACCESS_KEY
-unset AWS_SESSION_TOKEN
-unset AWS_SECURITY_TOKEN
-unset AWS_REGION
-unset AWS_DEFAULT_REGION
-unset AWS_PROFILE
-unset AWS_DEFAULT_PROFILE
-unset AWSWIT_PROFILE
-unset AWSWIT_EXPIRATION
-"#.to_string()
-    }
-
-    // Fish shell
-    fn generate_fish_export(&self, creds: &Credentials, profile: &str) -> String {
-        let mut output = String::new();
-
-        output.push_str(&format!("set -gx AWS_ACCESS_KEY_ID {}\n", shell_quote(&creds.access_key_id)));
-        output.push_str(&format!("set -gx AWS_SECRET_ACCESS_KEY {}\n", shell_quote(&creds.secret_access_key)));
-
-        if let Some(ref token) = creds.session_token {
-            output.push_str(&format!("set -gx AWS_SESSION_TOKEN {}\n", shell_quote(token)));
-            output.push_str(&format!("set -gx AWS_SECURITY_TOKEN {}\n", shell_quote(token)));
+    /// Format an unset command for the detected shell
+    fn format_unset(&self, name: &str) -> String {
+        match self.shell_type {
+            ShellType::Bash | ShellType::Zsh => {
+                format!("unset {}\n", name)
+            }
+            ShellType::Fish => {
+                format!("set -e {}\n", name)
+            }
+            ShellType::PowerShell => {
+                format!("Remove-Item Env:\\{} -ErrorAction SilentlyContinue\n", name)
+            }
+            ShellType::Cmd => {
+                format!("set {}=\n", name)
+            }
         }
-
-        if let Some(ref region) = creds.region {
-            output.push_str(&format!("set -gx AWS_REGION {}\n", shell_quote(region)));
-            output.push_str(&format!("set -gx AWS_DEFAULT_REGION {}\n", shell_quote(region)));
-        }
-
-        output.push_str(&format!("set -gx AWSWIT_PROFILE {}\n", shell_quote(profile)));
-
-        if let Some(exp) = creds.expiration {
-            output.push_str(&format!(
-                "set -gx AWSWIT_EXPIRATION {}\n",
-                shell_quote(&exp.format("%Y-%m-%dT%H:%M:%S").to_string())
-            ));
-        }
-
-        output
-    }
-
-    fn generate_fish_unset(&self) -> String {
-        r#"set -e AWS_ACCESS_KEY_ID
-set -e AWS_SECRET_ACCESS_KEY
-set -e AWS_SESSION_TOKEN
-set -e AWS_SECURITY_TOKEN
-set -e AWS_REGION
-set -e AWS_DEFAULT_REGION
-set -e AWS_PROFILE
-set -e AWS_DEFAULT_PROFILE
-set -e AWSWIT_PROFILE
-set -e AWSWIT_EXPIRATION
-"#.to_string()
-    }
-
-    // PowerShell
-    fn generate_powershell_export(&self, creds: &Credentials, profile: &str) -> String {
-        let mut output = String::new();
-
-        // PowerShell escapes single quotes by doubling them
-        let ps_quote = |s: &str| -> String {
-            format!("'{}'", s.replace('\'', "''"))
-        };
-
-        output.push_str(&format!("$env:AWS_ACCESS_KEY_ID = {}\n", ps_quote(&creds.access_key_id)));
-        output.push_str(&format!("$env:AWS_SECRET_ACCESS_KEY = {}\n", ps_quote(&creds.secret_access_key)));
-
-        if let Some(ref token) = creds.session_token {
-            output.push_str(&format!("$env:AWS_SESSION_TOKEN = {}\n", ps_quote(token)));
-            output.push_str(&format!("$env:AWS_SECURITY_TOKEN = {}\n", ps_quote(token)));
-        }
-
-        if let Some(ref region) = creds.region {
-            output.push_str(&format!("$env:AWS_REGION = {}\n", ps_quote(region)));
-            output.push_str(&format!("$env:AWS_DEFAULT_REGION = {}\n", ps_quote(region)));
-        }
-
-        output.push_str(&format!("$env:AWSWIT_PROFILE = {}\n", ps_quote(profile)));
-
-        if let Some(exp) = creds.expiration {
-            output.push_str(&format!(
-                "$env:AWSWIT_EXPIRATION = {}\n",
-                ps_quote(&exp.format("%Y-%m-%dT%H:%M:%S").to_string())
-            ));
-        }
-
-        output
-    }
-
-    fn generate_powershell_unset(&self) -> String {
-        r#"Remove-Item Env:\AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_SECURITY_TOKEN -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_REGION -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_DEFAULT_REGION -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_PROFILE -ErrorAction SilentlyContinue
-Remove-Item Env:\AWS_DEFAULT_PROFILE -ErrorAction SilentlyContinue
-Remove-Item Env:\AWSWIT_PROFILE -ErrorAction SilentlyContinue
-Remove-Item Env:\AWSWIT_EXPIRATION -ErrorAction SilentlyContinue
-"#.to_string()
-    }
-
-    // Windows Command Prompt
-    fn generate_cmd_export(&self, creds: &Credentials, profile: &str) -> String {
-        let mut output = String::new();
-
-        // CMD set doesn't need quoting for values (everything after = is the value)
-        // but we need to escape special CMD chars: & | < > ^ %
-        let cmd_escape = |s: &str| -> String {
-            s.replace('^', "^^")
-                .replace('&', "^&")
-                .replace('|', "^|")
-                .replace('<', "^<")
-                .replace('>', "^>")
-                .replace('%', "%%")
-        };
-
-        output.push_str(&format!("set AWS_ACCESS_KEY_ID={}\n", cmd_escape(&creds.access_key_id)));
-        output.push_str(&format!("set AWS_SECRET_ACCESS_KEY={}\n", cmd_escape(&creds.secret_access_key)));
-
-        if let Some(ref token) = creds.session_token {
-            output.push_str(&format!("set AWS_SESSION_TOKEN={}\n", cmd_escape(token)));
-            output.push_str(&format!("set AWS_SECURITY_TOKEN={}\n", cmd_escape(token)));
-        }
-
-        if let Some(ref region) = creds.region {
-            output.push_str(&format!("set AWS_REGION={}\n", cmd_escape(region)));
-            output.push_str(&format!("set AWS_DEFAULT_REGION={}\n", cmd_escape(region)));
-        }
-
-        output.push_str(&format!("set AWSWIT_PROFILE={}\n", cmd_escape(profile)));
-
-        if let Some(exp) = creds.expiration {
-            output.push_str(&format!(
-                "set AWSWIT_EXPIRATION={}\n",
-                exp.format("%Y-%m-%dT%H:%M:%S")
-            ));
-        }
-
-        output
-    }
-
-    fn generate_cmd_unset(&self) -> String {
-        r#"set AWS_ACCESS_KEY_ID=
-set AWS_SECRET_ACCESS_KEY=
-set AWS_SESSION_TOKEN=
-set AWS_SECURITY_TOKEN=
-set AWS_REGION=
-set AWS_DEFAULT_REGION=
-set AWS_PROFILE=
-set AWS_DEFAULT_PROFILE=
-set AWSWIT_PROFILE=
-set AWSWIT_EXPIRATION=
-"#.to_string()
     }
 }
 
@@ -383,5 +269,43 @@ mod tests {
         let output = exporter.generate_export_commands(&creds, "test-profile");
 
         assert!(output.contains("$env:AWS_ACCESS_KEY_ID = 'AKIATEST123'"));
+    }
+
+    #[test]
+    fn test_no_region_emits_unset() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST123".to_string(),
+            secret_access_key: "secretkey123".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_export_commands(&creds, "test");
+        assert!(output.contains("unset AWS_REGION"));
+        assert!(output.contains("unset AWS_DEFAULT_REGION"));
+        assert!(output.contains("unset AWS_SESSION_TOKEN"));
+        assert!(output.contains("unset AWS_SECURITY_TOKEN"));
+
+        let exporter = ShellExporter::for_shell(ShellType::Fish);
+        let output = exporter.generate_export_commands(&creds, "test");
+        assert!(output.contains("set -e AWS_REGION"));
+
+        let exporter = ShellExporter::for_shell(ShellType::PowerShell);
+        let output = exporter.generate_export_commands(&creds, "test");
+        assert!(output.contains("Remove-Item Env:\\AWS_REGION"));
+    }
+
+    #[test]
+    fn test_unset_commands_all_shells() {
+        for shell in [ShellType::Bash, ShellType::Fish, ShellType::PowerShell, ShellType::Cmd] {
+            let exporter = ShellExporter::for_shell(shell);
+            let output = exporter.generate_unset_commands();
+            // All managed vars should appear
+            for var in MANAGED_VARS {
+                assert!(output.contains(var), "Missing {} in {:?} unset", var, shell);
+            }
+        }
     }
 }

@@ -9,10 +9,21 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
+/// Check interval between refresh cycles
+const CHECK_INTERVAL_SECS: u64 = 300;
+/// Refresh when credentials expire within this window
+const REFRESH_WINDOW_MINS: i64 = 5;
+/// Exit after this many consecutive failures
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+/// Initial backoff sleep after failure
+const INITIAL_BACKOFF_SECS: u64 = 60;
+/// Maximum backoff sleep
+const MAX_BACKOFF_SECS: u64 = 600;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AutoRefreshProfile {
     profile_name: String,
-    awswit_command: String,
+    awswit_command: Vec<String>,
     aws_access_key_id: String,
     aws_secret_access_key: String,
     aws_session_token: Option<String>,
@@ -53,15 +64,67 @@ fn main() {
         .with_target(false)
         .init();
 
-    tracing::info!("Autoawswit daemon started");
+    // Write our own PID file after successful init (not from parent)
+    if let Err(e) = write_own_pid_file() {
+        tracing::error!("Failed to write PID file: {}", e);
+        std::process::exit(1);
+    }
+
+    tracing::info!("Autoawswit daemon started (pid={})", std::process::id());
 
     // Start tokio runtime after fork
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async_main());
+
+    // Clean up PID file on normal exit.
+    // NOTE: On SIGTERM this line is unreachable. Stale PID files are detected
+    // and cleaned up by `is_autoawswit_running()` in the daemon spawner, which
+    // verifies the PID is alive and belongs to an autoawswit process before
+    // treating it as valid.
+    let _ = fs::remove_file(get_pid_file_path());
+}
+
+fn write_own_pid_file() -> Result<(), Box<dyn std::error::Error>> {
+    let pid_path = get_pid_file_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = pid_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Write PID with restrictive permissions (0o600)
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&pid_path)?;
+        file.write_all(std::process::id().to_string().as_bytes())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&pid_path, std::process::id().to_string())?;
+    }
+
+    Ok(())
+}
+
+fn get_pid_file_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".awswit")
+        .join("autoawswit.pid")
 }
 
 async fn async_main() {
-    // Main refresh loop
+    let mut consecutive_failures: u32 = 0;
+    let mut backoff_secs = INITIAL_BACKOFF_SECS;
+
     loop {
         match refresh_all_profiles().await {
             Ok(has_profiles) => {
@@ -69,20 +132,39 @@ async fn async_main() {
                     tracing::info!("No auto-refresh profiles, exiting");
                     break;
                 }
+                // Reset failure tracking on success
+                consecutive_failures = 0;
+                backoff_secs = INITIAL_BACKOFF_SECS;
             }
             Err(e) => {
-                tracing::error!("Error refreshing profiles: {}", e);
+                consecutive_failures += 1;
+                tracing::error!(
+                    "Error refreshing profiles ({}/{}): {}",
+                    consecutive_failures, MAX_CONSECUTIVE_FAILURES, e
+                );
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    tracing::error!(
+                        "Exiting after {} consecutive failures",
+                        MAX_CONSECUTIVE_FAILURES
+                    );
+                    break;
+                }
+
+                // Exponential backoff on failure
+                sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs.saturating_mul(2)).min(MAX_BACKOFF_SECS);
+                continue;
             }
         }
 
-        // Sleep before next check (check every 5 minutes)
-        sleep(Duration::from_secs(300)).await;
+        sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
     }
 }
 
 async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
     let profiles = load_auto_refresh_profiles()?;
-    
+
     if profiles.is_empty() {
         return Ok(false);
     }
@@ -90,9 +172,9 @@ async fn refresh_all_profiles() -> Result<bool, Box<dyn std::error::Error>> {
     tracing::info!("Checking {} auto-refresh profiles", profiles.len());
 
     for (name, profile) in &profiles {
-        if should_refresh(&profile) {
+        if should_refresh(profile) {
             tracing::info!("Refreshing profile: {}", name);
-            if let Err(e) = refresh_profile(&profile).await {
+            if let Err(e) = refresh_profile(profile).await {
                 tracing::error!("Failed to refresh {}: {}", name, e);
             }
         }
@@ -115,11 +197,11 @@ fn load_auto_refresh_profiles() -> Result<HashMap<String, AutoRefreshProfile>, B
     }
 
     let mut profiles = HashMap::new();
-    
+
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             let content = fs::read_to_string(&path)?;
             if let Ok(profile) = serde_json::from_str::<AutoRefreshProfile>(&content) {
@@ -145,20 +227,17 @@ fn should_refresh(profile: &AutoRefreshProfile) -> bool {
     let now = Utc::now();
     let time_until_exp = exp_time - now;
 
-    // Refresh if expires within 5 minutes
-    time_until_exp < chrono::Duration::minutes(5)
+    time_until_exp < chrono::Duration::minutes(REFRESH_WINDOW_MINS)
 }
 
 async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std::error::Error>> {
     // Re-run the awswit command to get new credentials
-    let parts: Vec<&str> = profile.awswit_command.split_whitespace().collect();
-    
-    if parts.is_empty() {
+    if profile.awswit_command.is_empty() {
         return Err("Empty command".into());
     }
 
-    let output = tokio::process::Command::new(&parts[0])
-        .args(&parts[1..])
+    let output = tokio::process::Command::new(&profile.awswit_command[0])
+        .args(&profile.awswit_command[1..])
         .output()
         .await?;
 
@@ -169,7 +248,7 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
 
     // Parse the output and update credentials
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Update the credentials file
     update_credentials_file(&profile.profile_name, &stdout)?;
 
@@ -181,7 +260,7 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), Box<dyn std
 fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Parse the output (key=value format)
     let mut creds: HashMap<String, String> = HashMap::new();
-    
+
     for line in output.lines() {
         if let Some((key, value)) = line.split_once('=') {
             creds.insert(key.to_string(), value.to_string());
@@ -258,8 +337,9 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Box<d
             profile.aws_secret_access_key = secret_key.clone();
             profile.aws_session_token = session_token.cloned();
             profile.awswit_role_expiration = expiration.cloned();
-            
+
             let updated = serde_json::to_string_pretty(&profile)?;
+            #[cfg(unix)]
             {
                 use std::io::Write;
                 use std::os::unix::fs::OpenOptionsExt;
@@ -270,6 +350,10 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Box<d
                     .mode(0o600)
                     .open(&profile_path)?;
                 file.write_all(updated.as_bytes())?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::write(&profile_path, updated)?;
             }
         }
     }

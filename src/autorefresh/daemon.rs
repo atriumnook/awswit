@@ -12,7 +12,7 @@ use crate::error::AwswitError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoRefreshProfile {
     pub profile_name: String,
-    pub awswit_command: String,
+    pub awswit_command: Vec<String>,
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub aws_session_token: Option<String>,
@@ -39,19 +39,19 @@ pub async fn start_auto_refresh(
 
     // Refuse auto-refresh for MFA-protected profiles (daemon has no terminal for MFA prompt)
     if args.mfa_token.is_some() {
-        return Err(AwswitError::AutoRefreshError(
-            "Auto-refresh is not supported for MFA-protected profiles. \
-             The daemon cannot prompt for MFA tokens.".to_string()
-        ));
+        return Err(AwswitError::AutoRefreshError {
+            message: "Auto-refresh is not supported for MFA-protected profiles. \
+                     The daemon cannot prompt for MFA tokens.".to_string(),
+        });
     }
 
     // Create auto-refresh profile
     let auto_profile_name = format!("autoawswit-{}", profile_name);
-    
+
     // Build the awswit command to replay
     let mut command_parts = vec!["awswit".to_string()];
     command_parts.push(profile_name.to_string());
-    
+
     if let Some(ref region) = args.region {
         command_parts.push("--region".to_string());
         command_parts.push(region.clone());
@@ -67,7 +67,7 @@ pub async fn start_auto_refresh(
 
     let auto_profile = AutoRefreshProfile {
         profile_name: auto_profile_name.clone(),
-        awswit_command: command_parts.join(" "),
+        awswit_command: command_parts,
         aws_access_key_id: credentials.access_key_id.clone(),
         aws_secret_access_key: credentials.secret_access_key.clone(),
         aws_session_token: credentials.session_token.clone(),
@@ -109,7 +109,6 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
     // Check if any auto-refresh profiles remain
     let remaining = list_auto_refresh_profiles()?;
     if remaining.is_empty() {
-        // Kill the daemon
         kill_autoawswit_daemon()?;
     }
 
@@ -120,7 +119,6 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
 pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     tracing::info!("Stopping all auto-refresh processes");
 
-    // Get all auto-refresh profiles
     let profiles = list_auto_refresh_profiles()?;
 
     for profile in profiles {
@@ -128,7 +126,6 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
         remove_auto_refresh_credentials(&profile)?;
     }
 
-    // Kill the daemon
     kill_autoawswit_daemon()?;
 
     Ok(())
@@ -148,24 +145,7 @@ fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitE
     let path = dir.join(format!("{}.json", profile.profile_name));
     let content = serde_json::to_string_pretty(profile)?;
 
-    // Write with restrictive permissions since file contains secrets
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(content.as_bytes())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, content)?;
-    }
+    crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
 
     Ok(())
 }
@@ -199,7 +179,6 @@ fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
 
 fn write_auto_refresh_credentials(profile_name: &str, creds: &Credentials) -> Result<(), AwswitError> {
     use fs2::FileExt;
-    use std::io::Write;
 
     let creds_path = dirs::home_dir()
         .unwrap_or_default()
@@ -212,6 +191,8 @@ fn write_auto_refresh_credentials(profile_name: &str, creds: &Credentials) -> Re
         .create(true)
         .open(creds_path.with_extension("lock"))?;
     lock_file.lock_exclusive()?;
+    // Lock is released on Drop — no manual unlock needed, which also ensures
+    // cleanup on early-return error paths.
 
     let content = fs::read_to_string(&creds_path).unwrap_or_default();
 
@@ -252,8 +233,6 @@ fn write_auto_refresh_credentials(profile_name: &str, creds: &Credentials) -> Re
     new_content.push_str(&new_section);
     fs::write(&creds_path, new_content)?;
 
-    lock_file.unlock()?;
-
     Ok(())
 }
 
@@ -269,7 +248,6 @@ fn remove_auto_refresh_credentials(profile_name: &str) -> Result<(), AwswitError
 
     let content = fs::read_to_string(&creds_path)?;
 
-    // Removal: find exact [profile_name] section and remove until next section
     let section_header = format!("[{}]", profile_name);
     let lines: Vec<&str> = content.lines().collect();
     let mut new_lines = Vec::new();
@@ -295,8 +273,29 @@ fn get_pid_file_path() -> PathBuf {
         .join("autoawswit.pid")
 }
 
+fn get_daemon_lock_path() -> PathBuf {
+    get_auto_refresh_dir().parent()
+        .unwrap_or_else(|| std::path::Path::new("/tmp"))
+        .join("autoawswit.lock")
+}
+
 fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
-    // Check if already running via PID file
+    use fs2::FileExt;
+
+    // Advisory lock protects the entire is_running → spawn sequence
+    let lock_path = get_daemon_lock_path();
+    let lock_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| AwswitError::AutoRefreshError { message: format!("Failed to open lock: {}", e) })?;
+    lock_file.lock_exclusive()
+        .map_err(|e| AwswitError::AutoRefreshError { message: format!("Failed to acquire lock: {}", e) })?;
+
+    // Lock is released on Drop — no manual unlock needed, which also ensures
+    // cleanup on early-return error paths.
+
+    // Check if already running (under lock)
     if is_autoawswit_running() {
         tracing::debug!("Autoawswit daemon already running");
         return Ok(());
@@ -304,7 +303,7 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 
     // Spawn the daemon process
     let exe = std::env::current_exe()
-        .map_err(|e| AwswitError::AutoRefreshError(e.to_string()))?;
+        .map_err(|e| AwswitError::AutoRefreshError { message: e.to_string() })?;
 
     // Look for autoawswit binary in same directory
     let autoawswit_path = exe.parent()
@@ -312,15 +311,13 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
         .filter(|p| p.exists());
 
     if let Some(path) = autoawswit_path {
-        let child = Command::new(path)
+        let _child = Command::new(path)
             .spawn()
-            .map_err(|e| AwswitError::AutoRefreshError(format!("Failed to spawn daemon: {}", e)))?;
+            .map_err(|e| AwswitError::AutoRefreshError { message: format!("Failed to spawn daemon: {}", e) })?;
 
-        // Write PID file
-        let pid_path = get_pid_file_path();
-        let _ = fs::write(&pid_path, child.id().to_string());
-
-        tracing::info!("Started autoawswit daemon (pid={})", child.id());
+        // Daemon writes its own PID after successful init — do NOT write from parent.
+        // The daemon may crash immediately; writing PID here would leave a stale file.
+        tracing::info!("Spawned autoawswit daemon process");
     } else {
         tracing::warn!("autoawswit binary not found");
     }
@@ -329,15 +326,29 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 }
 
 fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
+    use fs2::FileExt;
+
+    let lock_path = get_daemon_lock_path();
+    let lock_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| AwswitError::AutoRefreshError { message: format!("Failed to open lock: {}", e) })?;
+    lock_file.lock_exclusive()
+        .map_err(|e| AwswitError::AutoRefreshError { message: format!("Failed to acquire lock: {}", e) })?;
+    // Lock is released on Drop — no manual unlock needed.
+
     let pid_path = get_pid_file_path();
 
-    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            #[cfg(unix)]
-            {
-                unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if let Some(pid) = read_pid(&pid_path) {
+        #[cfg(unix)]
+        {
+            if let Ok(pid_i32) = i32::try_from(pid) {
+                unsafe { libc::kill(pid_i32, libc::SIGTERM) };
+                tracing::info!("Killed autoawswit daemon (pid={})", pid);
+            } else {
+                tracing::warn!("PID {} exceeds i32::MAX, cannot signal", pid);
             }
-            tracing::info!("Killed autoawswit daemon (pid={})", pid);
         }
         let _ = fs::remove_file(&pid_path);
     }
@@ -345,22 +356,70 @@ fn kill_autoawswit_daemon() -> Result<(), AwswitError> {
     Ok(())
 }
 
+/// Read PID from a PID file, returning None if missing or unparseable
+fn read_pid(pid_path: &std::path::Path) -> Option<u32> {
+    let pid_str = fs::read_to_string(pid_path).ok()?;
+    pid_str.trim().parse::<u32>().ok()
+}
+
+/// Check if the autoawswit daemon is running, verifying process identity
 fn is_autoawswit_running() -> bool {
     let pid_path = get_pid_file_path();
 
-    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            #[cfg(unix)]
-            {
-                // kill(pid, 0) checks if process exists without sending a signal
-                if unsafe { libc::kill(pid, 0) } == 0 {
-                    return true;
-                }
-            }
+    let pid = match read_pid(&pid_path) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let pid_i32 = match i32::try_from(pid) {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("PID {} exceeds i32::MAX, removing stale PID file", pid);
+            let _ = fs::remove_file(&pid_path);
+            return false;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        // Check if process exists
+        if unsafe { libc::kill(pid_i32, 0) } != 0 {
             // Process is gone, clean up stale PID file
             let _ = fs::remove_file(&pid_path);
+            return false;
         }
+
+        // On Linux, verify the process is actually autoawswit (not a recycled PID)
+        // via /proc/{pid}/comm. On other unix platforms, fall back to the kill(0)
+        // check above — no /proc filesystem is available.
+        #[cfg(target_os = "linux")]
+        {
+            let comm_path = format!("/proc/{}/comm", pid);
+            match fs::read_to_string(&comm_path) {
+                Ok(comm) => {
+                    if comm.trim() != "autoawswit" {
+                        tracing::warn!(
+                            "PID {} is '{}', not autoawswit — stale PID file",
+                            pid, comm.trim()
+                        );
+                        let _ = fs::remove_file(&pid_path);
+                        return false;
+                    }
+                }
+                Err(_) => {
+                    // /proc not available or process gone between kill(0) and read
+                    let _ = fs::remove_file(&pid_path);
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
-    false
+    #[cfg(not(unix))]
+    {
+        let _ = pid_i32;
+        false
+    }
 }
