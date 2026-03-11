@@ -1,8 +1,13 @@
+use std::time::Duration;
+
 use aws_sdk_sts::Client;
 use chrono::{DateTime, Utc};
+use tokio::time::timeout;
 
 use crate::aws::Credentials;
 use crate::error::AwswitError;
+
+const STS_TIMEOUT_SECS: u64 = 30;
 
 /// AWS STS client wrapper
 pub struct StsClient {
@@ -13,6 +18,16 @@ impl StsClient {
     /// Create a new STS client
     pub async fn new() -> Self {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+
+        // Warn if no region is explicitly configured (silent fallback breaks GovCloud/China)
+        if config.region().is_none() {
+            tracing::warn!(
+                "No AWS region configured. Falling back to SDK default (us-east-1). \
+                 This may not work for GovCloud or China regions. \
+                 Set AWS_REGION or configure a region in your profile."
+            );
+        }
+
         let client = Client::new(&config);
         Self { default_client: client }
     }
@@ -85,26 +100,24 @@ impl StsClient {
             request = request.token_code(token);
         }
 
-        let response = request.send().await
-            .map_err(|e| AwswitError::AssumeRoleFailed(e.to_string()))?;
+        let response = timeout(Duration::from_secs(STS_TIMEOUT_SECS), request.send())
+            .await
+            .map_err(|_| AwswitError::StsTimeout { seconds: STS_TIMEOUT_SECS })?
+            .map_err(|e| {
+                tracing::debug!("AssumeRole SDK error: {}", e);
+                AwswitError::AssumeRoleFailed { message: sanitize_sdk_error(&e) }
+            })?;
 
         let aws_creds = response.credentials()
-            .ok_or_else(|| AwswitError::AssumeRoleFailed("No credentials in response".to_string()))?;
+            .ok_or_else(|| AwswitError::AssumeRoleFailed { message: "No credentials in response".to_string() })?;
 
-        let e = aws_creds.expiration();
-        let expiration = Some(
-            DateTime::<Utc>::from_timestamp(e.secs(), e.subsec_nanos())
-                .unwrap_or_else(|| {
-                    tracing::warn!("Failed to parse STS expiration timestamp (secs={}, nanos={}), falling back to current time", e.secs(), e.subsec_nanos());
-                    Utc::now()
-                })
-        );
+        let expiration = parse_sts_expiration(aws_creds.expiration())?;
 
         Ok(Credentials {
             access_key_id: aws_creds.access_key_id().to_string(),
             secret_access_key: aws_creds.secret_access_key().to_string(),
             session_token: Some(aws_creds.session_token().to_string()),
-            expiration,
+            expiration: Some(expiration),
             region: region.map(String::from),
         })
     }
@@ -138,56 +151,56 @@ impl StsClient {
             request = request.duration_seconds(duration);
         }
 
-        let response = request.send().await
-            .map_err(|e| AwswitError::GetSessionTokenFailed(e.to_string()))?;
+        let response = timeout(Duration::from_secs(STS_TIMEOUT_SECS), request.send())
+            .await
+            .map_err(|_| AwswitError::StsTimeout { seconds: STS_TIMEOUT_SECS })?
+            .map_err(|e| {
+                tracing::debug!("GetSessionToken SDK error: {}", e);
+                AwswitError::GetSessionTokenFailed { message: sanitize_sdk_error(&e) }
+            })?;
 
         let aws_creds = response.credentials()
-            .ok_or_else(|| AwswitError::GetSessionTokenFailed("No credentials in response".to_string()))?;
+            .ok_or_else(|| AwswitError::GetSessionTokenFailed { message: "No credentials in response".to_string() })?;
 
-        let e = aws_creds.expiration();
-        let expiration = Some(
-            DateTime::<Utc>::from_timestamp(e.secs(), e.subsec_nanos())
-                .unwrap_or_else(|| {
-                    tracing::warn!("Failed to parse STS expiration timestamp (secs={}, nanos={}), falling back to current time", e.secs(), e.subsec_nanos());
-                    Utc::now()
-                })
-        );
+        let expiration = parse_sts_expiration(aws_creds.expiration())?;
 
         Ok(Credentials {
             access_key_id: aws_creds.access_key_id().to_string(),
             secret_access_key: aws_creds.secret_access_key().to_string(),
             session_token: Some(aws_creds.session_token().to_string()),
-            expiration,
+            expiration: Some(expiration),
             region: source_credentials.region.clone(),
-        })
-    }
-
-    /// Get caller identity
-    pub async fn get_caller_identity(
-        &self,
-        credentials: Option<&Credentials>,
-    ) -> Result<CallerIdentity, AwswitError> {
-        let client = if let Some(creds) = credentials {
-            Self::client_with_credentials(creds, creds.region.as_deref()).await?
-        } else {
-            self.default_client.clone()
-        };
-
-        let response = client.get_caller_identity().send().await
-            .map_err(|e| AwswitError::AwsSdkError(e.to_string()))?;
-
-        Ok(CallerIdentity {
-            account: response.account().map(String::from),
-            arn: response.arn().map(String::from),
-            user_id: response.user_id().map(String::from),
         })
     }
 }
 
-/// Result of GetCallerIdentity
-#[derive(Debug, Clone)]
-pub struct CallerIdentity {
-    pub account: Option<String>,
-    pub arn: Option<String>,
-    pub user_id: Option<String>,
+/// Parse STS expiration timestamp, returning error instead of silently ignoring
+fn parse_sts_expiration(
+    e: &aws_sdk_sts::primitives::DateTime,
+) -> Result<DateTime<Utc>, AwswitError> {
+    DateTime::<Utc>::from_timestamp(e.secs(), e.subsec_nanos())
+        .ok_or_else(|| {
+            tracing::warn!(
+                "Failed to parse STS expiration: secs={}, nanos={}",
+                e.secs(),
+                e.subsec_nanos()
+            );
+            AwswitError::InvalidStsTimestamp
+        })
+}
+
+/// Extract only error code/message from SDK error, hiding request IDs and internal details
+fn sanitize_sdk_error<E: std::error::Error>(err: &aws_sdk_sts::error::SdkError<E>) -> String {
+    match err {
+        aws_sdk_sts::error::SdkError::ServiceError(service_err) => {
+            format!("{}", service_err.err())
+        }
+        aws_sdk_sts::error::SdkError::TimeoutError(_) => {
+            "Request timed out".to_string()
+        }
+        aws_sdk_sts::error::SdkError::DispatchFailure(_) => {
+            "Failed to connect to AWS".to_string()
+        }
+        _ => "AWS request failed".to_string(),
+    }
 }

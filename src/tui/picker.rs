@@ -32,6 +32,7 @@ pub enum PickerResult {
 #[derive(Clone)]
 struct ProfileEntry {
     name: String,
+    name_lower: String, // Pre-computed lowercase for fuzzy matching
     profile: Profile,
     is_favorite: bool,
     last_used: Option<chrono::DateTime<chrono::Utc>>,
@@ -40,14 +41,14 @@ struct ProfileEntry {
 }
 
 /// Interactive profile picker with fuzzy search
-pub struct ProfilePicker {
-    profiles: HashMap<String, Profile>,
+pub struct ProfilePicker<'a> {
+    profiles: &'a HashMap<String, Profile>,
     history: ProfileHistory,
     theme: Theme,
 }
 
-impl ProfilePicker {
-    pub fn new(profiles: HashMap<String, Profile>) -> Self {
+impl<'a> ProfilePicker<'a> {
+    pub fn new(profiles: &'a HashMap<String, Profile>) -> Self {
         Self {
             profiles,
             history: ProfileHistory::load().unwrap_or_default(),
@@ -113,19 +114,20 @@ struct PickerApp {
 
 impl PickerApp {
     fn new(
-        profiles: HashMap<String, Profile>,
+        profiles: &HashMap<String, Profile>,
         history: ProfileHistory,
         theme: Theme,
     ) -> Self {
-        // Create entries with history data
+        // Create entries with history data, pre-compute lowercase names
         let mut entries: Vec<ProfileEntry> = profiles
-            .into_iter()
+            .iter()
             .map(|(name, profile)| {
-                let history_entry = history.get(&name);
+                let history_entry = history.get(name);
                 ProfileEntry {
                     name: name.clone(),
-                    profile,
-                    is_favorite: history.is_favorite(&name),
+                    name_lower: name.to_lowercase(),
+                    profile: profile.clone(),
+                    is_favorite: history.is_favorite(name),
                     last_used: history_entry.map(|h| h.last_used),
                     use_count: history_entry.map(|h| h.use_count).unwrap_or(0),
                     score: None,
@@ -219,6 +221,13 @@ impl PickerApp {
                             return Ok(PickerResult::Cancelled);
                         }
 
+                        // Clear query
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.query.clear();
+                            self.cursor_pos = 0;
+                            self.update_filter();
+                        }
+
                         // Query editing
                         KeyCode::Char(c) => {
                             self.query.insert(self.cursor_pos, c);
@@ -227,7 +236,6 @@ impl PickerApp {
                         }
                         KeyCode::Backspace => {
                             if self.cursor_pos > 0 {
-                                // Find the previous character boundary
                                 let prev = self.query[..self.cursor_pos]
                                     .char_indices()
                                     .next_back()
@@ -261,13 +269,6 @@ impl PickerApp {
                                     .map(|(idx, _)| self.cursor_pos + idx)
                                     .unwrap_or(self.query.len());
                             }
-                        }
-
-                        // Clear query
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.query.clear();
-                            self.cursor_pos = 0;
-                            self.update_filter();
                         }
 
                         _ => {}
@@ -324,7 +325,7 @@ impl PickerApp {
         let count_text = format!(" {}/{} ", self.filtered.len(), self.entries.len());
         let count_x = area.right().saturating_sub(count_text.len() as u16 + 2);
         let count_area = Rect::new(count_x, area.y, count_text.len() as u16 + 2, 1);
-        
+
         let count_widget = Paragraph::new(Span::styled(
             count_text,
             self.theme.muted_style(),
@@ -334,7 +335,6 @@ impl PickerApp {
 
     fn render_main_area(&mut self, frame: &mut Frame, area: Rect) {
         if self.show_preview && area.width > 80 {
-            // Split for list and preview
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -406,11 +406,11 @@ impl PickerApp {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(self.theme.muted))
                 .title(" Preview ");
-            
+
             let paragraph = Paragraph::new("No profile selected")
                 .block(block)
                 .style(self.theme.muted_style());
-            
+
             frame.render_widget(paragraph, area);
         }
     }
@@ -451,32 +451,29 @@ impl PickerApp {
     fn update_filter(&mut self) {
         if self.query.is_empty() {
             self.filtered = (0..self.entries.len()).collect();
-            // Reset scores
             for entry in &mut self.entries {
                 entry.score = None;
             }
         } else {
             let query_lower = self.query.to_lowercase();
-            
-            // Score each entry using Jaro-Winkler similarity
+
+            // Use pre-computed name_lower for matching
             let mut scored: Vec<(usize, u32)> = self.entries
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, entry)| {
-                    let name_lower = entry.name.to_lowercase();
-                    
                     // Check for exact prefix match (highest priority)
-                    if name_lower.starts_with(&query_lower) {
+                    if entry.name_lower.starts_with(&query_lower) {
                         return Some((idx, 1100));
                     }
 
                     // Check for substring match (high priority)
-                    if name_lower.contains(&query_lower) {
+                    if entry.name_lower.contains(&query_lower) {
                         return Some((idx, 1000));
                     }
 
                     // Fuzzy match using Jaro-Winkler
-                    let similarity = jaro_winkler(&name_lower, &query_lower);
+                    let similarity = jaro_winkler(&entry.name_lower, &query_lower);
                     if similarity > 0.6 {
                         Some((idx, (similarity * 100.0) as u32))
                     } else {
@@ -489,7 +486,7 @@ impl PickerApp {
             scored.sort_by(|a, b| b.1.cmp(&a.1));
 
             self.filtered = scored.iter().map(|(idx, _)| *idx).collect();
-            
+
             // Update scores in entries
             for (idx, score) in scored {
                 self.entries[idx].score = Some(score);
@@ -545,7 +542,7 @@ impl PickerApp {
             if let Some(&entry_idx) = self.filtered.get(selected) {
                 let entry = &mut self.entries[entry_idx];
                 entry.is_favorite = !entry.is_favorite;
-                
+
                 // Update history
                 self.history.set_favorite(&entry.name, entry.is_favorite);
                 let _ = self.history.save();

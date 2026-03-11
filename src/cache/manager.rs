@@ -1,8 +1,18 @@
 use std::fs;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::aws::Credentials;
 use crate::error::AwswitError;
+
+/// Cache entry wrapping credentials with the original key for collision detection
+#[derive(Serialize, Deserialize)]
+struct CacheEntry {
+    cache_key: String,
+    #[serde(flatten)]
+    credentials: Credentials,
+}
 
 /// Manages credential caching in ~/.awswit/cache/
 pub struct CacheManager {
@@ -13,19 +23,25 @@ impl CacheManager {
     /// Create a new cache manager
     pub fn new() -> Result<Self, AwswitError> {
         let cache_dir = dirs::home_dir()
-            .ok_or_else(|| AwswitError::CacheError("Cannot determine home directory".to_string()))?
+            .ok_or_else(|| AwswitError::CacheError { message: "Cannot determine home directory".to_string() })?
             .join(".awswit")
             .join("cache");
 
-        // Ensure cache directory exists
-        fs::create_dir_all(&cache_dir)?;
-
-        // Set permissions on the cache directory (unix only)
+        // Ensure cache directory exists with restrictive permissions
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(0o700);
-            fs::set_permissions(&cache_dir, permissions)?;
+            use std::fs::DirBuilder;
+            use std::os::unix::fs::DirBuilderExt;
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&cache_dir)
+                .map_err(|e| AwswitError::CacheError { message: format!("Failed to create cache dir: {}", e) })?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(&cache_dir)?;
         }
 
         Ok(Self { cache_dir })
@@ -34,49 +50,53 @@ impl CacheManager {
     /// Get cached credentials by key
     pub fn get(&self, key: &str) -> Result<Option<Credentials>, AwswitError> {
         let path = self.cache_file_path(key);
-        
-        if !path.exists() {
+
+        // Read directly — handle NotFound as cache miss (no TOCTOU)
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(AwswitError::CacheError { message: format!("Failed to read cache: {}", e) }),
+        };
+
+        // Corrupt JSON → cache miss, not hard error
+        let entry: CacheEntry = match serde_json::from_str(&content) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Corrupt cache entry '{}': {}, removing", key, e);
+                let _ = self.remove(key);
+                return Ok(None);
+            }
+        };
+
+        // Verify the stored key matches to detect sanitization collisions
+        if entry.cache_key != key {
+            tracing::warn!(
+                "Cache key mismatch: requested '{}' but file contains '{}', treating as miss",
+                key, entry.cache_key
+            );
             return Ok(None);
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::CacheError(format!("Failed to read cache: {}", e)))?;
-
-        let credentials: Credentials = serde_json::from_str(&content)?;
-
         // Check if expired
-        if credentials.is_expired() {
+        if entry.credentials.is_expired() {
             tracing::debug!("Cache entry '{}' is expired, removing", key);
             self.remove(key)?;
             return Ok(None);
         }
 
-        Ok(Some(credentials))
+        Ok(Some(entry.credentials))
     }
 
     /// Set cached credentials
     pub fn set(&self, key: &str, credentials: &Credentials) -> Result<(), AwswitError> {
         let path = self.cache_file_path(key);
-        let content = serde_json::to_string_pretty(credentials)?;
+        let entry = CacheEntry {
+            cache_key: key.to_string(),
+            credentials: credentials.clone(),
+        };
+        let content = serde_json::to_string_pretty(&entry)?;
 
-        // Write with restrictive permissions atomically to avoid TOCTOU
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?;
-            file.write_all(content.as_bytes())?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            fs::write(&path, &content)?;
-        }
+        crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
 
         tracing::debug!("Cached credentials with key: {}", key);
         Ok(())
@@ -85,10 +105,11 @@ impl CacheManager {
     /// Remove cached credentials
     pub fn remove(&self, key: &str) -> Result<(), AwswitError> {
         let path = self.cache_file_path(key);
-        
-        if path.exists() {
-            fs::remove_file(&path)?;
-            tracing::debug!("Removed cache entry: {}", key);
+
+        match fs::remove_file(&path) {
+            Ok(()) => tracing::debug!("Removed cache entry: {}", key),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
 
         Ok(())
@@ -113,11 +134,11 @@ impl CacheManager {
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file() {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(creds) = serde_json::from_str::<Credentials>(&content) {
-                        if creds.is_expired() {
+                    if let Ok(entry) = serde_json::from_str::<CacheEntry>(&content) {
+                        if entry.credentials.is_expired() {
                             fs::remove_file(&path)?;
                             removed += 1;
                         }
@@ -166,7 +187,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = temp_dir.path().join(".awswit").join("cache");
         fs::create_dir_all(&cache_dir).unwrap();
-        
+
         let manager = CacheManager { cache_dir };
         (manager, temp_dir)
     }
@@ -174,7 +195,7 @@ mod tests {
     #[test]
     fn test_set_and_get() {
         let (manager, _temp) = create_test_manager();
-        
+
         let creds = Credentials {
             access_key_id: "AKIATEST".to_string(),
             secret_access_key: "secret".to_string(),
@@ -184,7 +205,7 @@ mod tests {
         };
 
         manager.set("test-key", &creds).unwrap();
-        
+
         let retrieved = manager.get("test-key").unwrap().unwrap();
         assert_eq!(retrieved.access_key_id, "AKIATEST");
     }
@@ -192,7 +213,7 @@ mod tests {
     #[test]
     fn test_expired_credentials() {
         let (manager, _temp) = create_test_manager();
-        
+
         let creds = Credentials {
             access_key_id: "AKIATEST".to_string(),
             secret_access_key: "secret".to_string(),
@@ -202,7 +223,7 @@ mod tests {
         };
 
         manager.set("expired-key", &creds).unwrap();
-        
+
         // Should return None for expired credentials
         let retrieved = manager.get("expired-key").unwrap();
         assert!(retrieved.is_none());
@@ -211,13 +232,29 @@ mod tests {
     #[test]
     fn test_remove() {
         let (manager, _temp) = create_test_manager();
-        
+
         let creds = Credentials::default();
         manager.set("remove-key", &creds).unwrap();
-        
+
         manager.remove("remove-key").unwrap();
-        
+
         let retrieved = manager.get("remove-key").unwrap();
         assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_corrupt_json_returns_cache_miss() {
+        let (manager, _temp) = create_test_manager();
+
+        // Write corrupt JSON to cache file
+        let path = manager.cache_file_path("corrupt-key");
+        fs::write(&path, "not valid json{{{").unwrap();
+
+        // Should return None, not error
+        let result = manager.get("corrupt-key").unwrap();
+        assert!(result.is_none());
+
+        // Corrupt file should be cleaned up
+        assert!(!path.exists());
     }
 }

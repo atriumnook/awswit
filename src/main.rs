@@ -28,18 +28,7 @@ use error::AwswitError;
 async fn main() {
     let args = Args::parse();
 
-    // Setup logging
-    setup_logging(&args);
-
-    // Run the main application
-    if let Err(e) = run(args).await {
-        // Output error in a format the shell wrapper can handle
-        eprintln!("{}", e);
-        std::process::exit(1);
-    }
-}
-
-fn setup_logging(args: &Args) {
+    // Setup logging - determine level once, init once
     let level = if args.debug {
         Level::DEBUG
     } else if args.info {
@@ -58,6 +47,15 @@ fn setup_logging(args: &Args) {
 
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
+
+    // Run the main application
+    if let Err(e) = run(args).await {
+        if matches!(e, AwswitError::UserCancelled) {
+            std::process::exit(0);
+        }
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
 }
 
 async fn run(args: Args) -> Result<(), AwswitError> {
@@ -97,6 +95,9 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         return handle_kill_refresher(&args).await;
     }
 
+    // Handle --role-arn early - no need to load profiles if just assuming a direct role ARN
+    // (moved below profile loading since we may still need profiles for --source-profile)
+
     // Load AWS config and credentials files
     let credentials_file = match args.credentials_file.clone()
         .or_else(|| std::env::var("AWS_SHARED_CREDENTIALS_FILE").ok())
@@ -104,7 +105,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         Some(path) => path,
         None => {
             let home = dirs::home_dir()
-                .ok_or_else(|| AwswitError::ShellError("Could not determine home directory".to_string()))?;
+                .ok_or_else(|| AwswitError::ShellError { message: "Could not determine home directory".to_string() })?;
             home.join(".aws").join("credentials").to_string_lossy().to_string()
         }
     };
@@ -115,7 +116,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         Some(path) => path,
         None => {
             let home = dirs::home_dir()
-                .ok_or_else(|| AwswitError::ShellError("Could not determine home directory".to_string()))?;
+                .ok_or_else(|| AwswitError::ShellError { message: "Could not determine home directory".to_string() })?;
             home.join(".aws").join("config").to_string_lossy().to_string()
         }
     };
@@ -126,7 +127,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle list profiles
     if args.list_profiles.is_some() {
-        return handle_list_profiles(&profiles, &args, &awswit_config).await;
+        return handle_list_profiles(&profiles, &args, &awswit_config);
     }
 
     // Handle refresh autocomplete
@@ -134,32 +135,32 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         return handle_refresh_autocomplete(&profiles);
     }
 
-    // Load history
+    // Load history once and reuse
     let mut profile_history = history::ProfileHistory::load().unwrap_or_default();
 
     // Determine target profile - use interactive mode if no profile specified
-    let target_profile_name = if args.profile_name.is_none() 
-        && args.role_arn.is_none() 
+    let target_profile_name = if args.profile_name.is_none()
+        && args.role_arn.is_none()
         && !args.interactive_disabled()
         && std::io::stdout().is_terminal()
     {
-        // Launch interactive picker
-        let picker = tui::ProfilePicker::new(profiles.clone())
+        // Launch interactive picker - pass reference, not clone
+        let picker = tui::ProfilePicker::new(&profiles)
             .with_history(profile_history.clone());
-        
+
         match picker.run() {
             Ok(tui::picker::PickerResult::Selected(name)) => name,
             Ok(tui::picker::PickerResult::Cancelled) => {
-                return Ok(());
+                return Err(AwswitError::UserCancelled);
             }
             Err(e) => {
-                return Err(AwswitError::ShellError(format!("Picker error: {}", e)));
+                return Err(AwswitError::ShellError { message: format!("Picker error: {}", e) });
             }
         }
     } else {
         determine_target_profile(&args, &profiles, &awswit_config)?
     };
-    
+
     tracing::info!("Target profile: {}", target_profile_name);
 
     // Show spinner while resolving credentials
@@ -202,22 +203,31 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         handle_output_profile(output_profile, &credentials, &credentials_file)?;
     }
 
-    // Export credentials to shell
+    // Emit credentials
+    emit_credentials(&credentials, &target_profile_name, &args)?;
+
+    Ok(())
+}
+
+/// Emit credentials as shell output or export commands
+fn emit_credentials(
+    credentials: &aws::Credentials,
+    profile_name: &str,
+    args: &Args,
+) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
     if args.show_commands {
-        // Print export commands for manual use
-        let commands = exporter.generate_export_commands(&credentials, &target_profile_name);
-        println!("{}", commands);
+        // Print export commands to stdout (not stderr) so `> file` works
+        print!("{}", exporter.generate_export_commands(credentials, profile_name));
     } else {
-        // Show nice status message
+        // Show nice status message on stderr
         tui::StatusLine::profile_assumed(
-            &target_profile_name,
+            profile_name,
             credentials.expiration.map(|e| e.format("%Y-%m-%d %H:%M:%S").to_string()).as_deref(),
         );
-        
+
         // Output in a format the shell wrapper can eval
-        let output = exporter.generate_shell_output(&credentials, &target_profile_name);
-        print!("{}", output);
+        print!("{}", exporter.generate_shell_output(credentials, profile_name)?);
     }
 
     Ok(())
@@ -225,7 +235,6 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
 fn handle_config_command(config: &AwswitConfig, options: &[String]) -> Result<(), AwswitError> {
     if options.is_empty() {
-        // List all config
         println!("{}", serde_yaml::to_string(config)?);
         return Ok(());
     }
@@ -244,7 +253,7 @@ fn handle_config_command(config: &AwswitConfig, options: &[String]) -> Result<()
             if let Some(value) = config.get_value(key) {
                 println!("{}", value);
             } else {
-                return Err(AwswitError::ConfigKeyNotFound(key.clone()));
+                return Err(AwswitError::ConfigKeyNotFound { key: key.clone() });
             }
         }
         Some("reset") | Some("clear") if options.len() >= 2 => {
@@ -258,7 +267,7 @@ fn handle_config_command(config: &AwswitConfig, options: &[String]) -> Result<()
             println!("{}", serde_yaml::to_string(config)?);
         }
         _ => {
-            return Err(AwswitError::InvalidConfigCommand(options.join(" ")));
+            return Err(AwswitError::InvalidConfigCommand { command: options.join(" ") });
         }
     }
 
@@ -268,11 +277,9 @@ fn handle_config_command(config: &AwswitConfig, options: &[String]) -> Result<()
 fn handle_unset(args: &Args) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
     if args.show_commands {
-        let commands = exporter.generate_unset_commands();
-        println!("{}", commands);
+        print!("{}", exporter.generate_unset_commands());
     } else {
-        let output = exporter.generate_unset_output();
-        print!("{}", output);
+        print!("{}", exporter.generate_unset_output());
     }
     Ok(())
 }
@@ -288,7 +295,7 @@ async fn handle_kill_refresher(args: &Args) -> Result<(), AwswitError> {
     Ok(())
 }
 
-async fn handle_list_profiles(
+fn handle_list_profiles(
     profiles: &std::collections::HashMap<String, profile::Profile>,
     args: &Args,
     config: &AwswitConfig,
@@ -298,6 +305,7 @@ async fn handle_list_profiles(
     let show_more = args.list_profiles.as_ref().map(|s| s == "more").unwrap_or(false);
     let use_colors = config.colors && !cfg!(windows);
 
+    // Print to stdout so `| less` and `> file` work
     println!();
     let header = "========================AWS Profiles==========================";
     if use_colors {
@@ -327,9 +335,8 @@ async fn handle_list_profiles(
             .unwrap_or("None");
         let mfa = if profile.mfa_serial.is_some() { "Yes" } else { "No" };
         let region = profile.region.as_deref().unwrap_or("-");
-        
+
         let account = if show_more {
-            // Would need to make STS call here
             "Fetching...".to_string()
         } else {
             profile.role_arn.as_ref()
@@ -353,7 +360,6 @@ async fn handle_list_profiles(
 }
 
 fn extract_account_from_arn(arn: &str) -> Option<String> {
-    // arn:aws:iam::123456789012:role/RoleName
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() >= 5 {
         Some(parts[4].to_string())
@@ -387,7 +393,7 @@ fn determine_target_profile(
     profiles: &std::collections::HashMap<String, profile::Profile>,
     config: &AwswitConfig,
 ) -> Result<String, AwswitError> {
-    // If role ARN is provided directly, we don't need a profile name
+    // Early guard: --role-arn doesn't need a profile name
     if args.role_arn.is_some() {
         return Ok("cli-role".to_string());
     }
@@ -411,7 +417,7 @@ fn determine_target_profile(
         }
     }
 
-    Err(AwswitError::ProfileNotFound(profile_name))
+    Err(AwswitError::ProfileNotFound { name: profile_name })
 }
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {
@@ -420,10 +426,12 @@ fn handle_init(shell: &str) -> Result<(), AwswitError> {
         "fish" => include_str!("init/fish.fish"),
         "powershell" | "pwsh" => include_str!("init/powershell.ps1"),
         _ => {
-            return Err(AwswitError::ShellError(format!(
-                "Unsupported shell: {}. Supported shells: bash, zsh, fish, powershell",
-                shell
-            )));
+            return Err(AwswitError::ShellError {
+                message: format!(
+                    "Unsupported shell: {}. Supported shells: bash, zsh, fish, powershell",
+                    shell
+                ),
+            });
         }
     };
     print!("{}", script);
@@ -468,6 +476,8 @@ fn handle_output_profile(
         new_content.push('\n');
     }
 
+    let expiration_str = credentials.expiration.map(|e| e.to_rfc3339()).unwrap_or_default();
+
     let profile_content = format!(
         "[{}]\n\
         aws_access_key_id = {}\n\
@@ -479,7 +489,7 @@ fn handle_output_profile(
         credentials.access_key_id,
         credentials.secret_access_key,
         credentials.session_token.as_deref().unwrap_or(""),
-        credentials.expiration.map(|e| e.to_rfc3339()).unwrap_or_default()
+        expiration_str
     );
 
     new_content.push_str(&profile_content);

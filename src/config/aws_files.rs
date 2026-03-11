@@ -37,11 +37,11 @@ impl AwsFiles {
         }
 
         let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError(format!("Failed to read {}: {}", path, e)))?;
+            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read {}: {}", path, e) })?;
 
         let mut ini = Ini::new_cs(); // Case sensitive
         ini.read(content)
-            .map_err(|e| AwswitError::ConfigFileError(format!("Failed to parse {}: {}", path, e)))?;
+            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to parse {}: {}", path, e) })?;
 
         let mut profiles = HashMap::new();
 
@@ -74,11 +74,11 @@ impl AwsFiles {
         }
 
         let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError(format!("Failed to read {}: {}", path, e)))?;
+            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read {}: {}", path, e) })?;
 
         let mut ini = Ini::new_cs();
         ini.read(content)
-            .map_err(|e| AwswitError::ConfigFileError(format!("Failed to parse {}: {}", path, e)))?;
+            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to parse {}: {}", path, e) })?;
 
         let mut profiles = HashMap::new();
 

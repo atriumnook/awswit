@@ -12,13 +12,13 @@ use crate::error::AwswitError;
 pub struct HistoryEntry {
     /// Profile name
     pub name: String,
-    
+
     /// Last time this profile was used
     pub last_used: DateTime<Utc>,
-    
+
     /// Number of times used
     pub use_count: u32,
-    
+
     /// Is this a favorite profile
     pub is_favorite: bool,
 }
@@ -28,9 +28,6 @@ pub struct HistoryEntry {
 pub struct ProfileHistory {
     /// History entries by profile name
     entries: HashMap<String, HistoryEntry>,
-    
-    /// Favorite profiles (for quick access)
-    favorites: Vec<String>,
 }
 
 impl ProfileHistory {
@@ -45,46 +42,40 @@ impl ProfileHistory {
     /// Load history from file
     pub fn load() -> Result<Self, AwswitError> {
         let path = Self::history_path();
-        
+
         if !path.exists() {
             return Ok(Self::default());
         }
 
         let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::CacheError(format!("Failed to read history: {}", e)))?;
+            .map_err(|e| AwswitError::CacheError { message: format!("Failed to read history: {}", e) })?;
 
-        let history: Self = serde_json::from_str(&content)
-            .map_err(|e| AwswitError::CacheError(format!("Failed to parse history: {}", e)))?;
-
-        Ok(history)
+        match serde_json::from_str::<Self>(&content) {
+            Ok(history) => Ok(history),
+            Err(e) => {
+                // Backup corrupt file before resetting to prevent data loss
+                let backup_path = path.with_extension("json.corrupt");
+                tracing::warn!(
+                    "History file is corrupt ({}), backing up to {:?} and resetting",
+                    e, backup_path
+                );
+                let _ = fs::copy(&path, &backup_path);
+                Ok(Self::default())
+            }
+        }
     }
 
     /// Save history to file
     pub fn save(&self) -> Result<(), AwswitError> {
         let path = Self::history_path();
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?;
-            file.write_all(content.as_bytes())?;
-        }
-        #[cfg(not(unix))]
-        {
-            fs::write(&path, content)?;
-        }
+        crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
 
         Ok(())
     }
@@ -92,7 +83,7 @@ impl ProfileHistory {
     /// Record profile usage
     pub fn record_use(&mut self, profile_name: &str) {
         let now = Utc::now();
-        
+
         if let Some(entry) = self.entries.get_mut(profile_name) {
             entry.last_used = now;
             entry.use_count += 1;
@@ -114,25 +105,22 @@ impl ProfileHistory {
 
     /// Check if a profile is favorite
     pub fn is_favorite(&self, profile_name: &str) -> bool {
-        self.favorites.contains(&profile_name.to_string())
+        self.entries.get(profile_name).map(|e| e.is_favorite).unwrap_or(false)
     }
 
     /// Set favorite status
     pub fn set_favorite(&mut self, profile_name: &str, is_favorite: bool) {
-        let name = profile_name.to_string();
-        
-        if is_favorite {
-            if !self.favorites.contains(&name) {
-                self.favorites.push(name.clone());
-            }
-            if let Some(entry) = self.entries.get_mut(&name) {
-                entry.is_favorite = true;
-            }
-        } else {
-            self.favorites.retain(|n| n != &name);
-            if let Some(entry) = self.entries.get_mut(&name) {
-                entry.is_favorite = false;
-            }
+        if let Some(entry) = self.entries.get_mut(profile_name) {
+            entry.is_favorite = is_favorite;
+        } else if is_favorite {
+            // Create entry for favoriting a profile that hasn't been used yet
+            let entry = HistoryEntry {
+                name: profile_name.to_string(),
+                last_used: Utc::now(),
+                use_count: 0,
+                is_favorite: true,
+            };
+            self.entries.insert(profile_name.to_string(), entry);
         }
     }
 
@@ -152,7 +140,10 @@ impl ProfileHistory {
 
     /// Get favorite profiles
     pub fn favorite_profiles(&self) -> Vec<&str> {
-        self.favorites.iter().map(|s| s.as_str()).collect()
+        self.entries.values()
+            .filter(|e| e.is_favorite)
+            .map(|e| e.name.as_str())
+            .collect()
     }
 
     /// Get most used profiles
@@ -165,9 +156,8 @@ impl ProfileHistory {
     /// Clean up old entries (older than 90 days)
     pub fn cleanup_old(&mut self, days: i64) {
         let cutoff = Utc::now() - chrono::Duration::days(days);
-        let favorites = self.favorites.clone();
-        self.entries.retain(|name, entry| {
-            entry.last_used > cutoff || favorites.contains(name)
+        self.entries.retain(|_, entry| {
+            entry.last_used > cutoff || entry.is_favorite
         });
     }
 
@@ -189,10 +179,10 @@ mod tests {
     #[test]
     fn test_record_use() {
         let mut history = ProfileHistory::default();
-        
+
         history.record_use("test-profile");
         assert_eq!(history.get("test-profile").unwrap().use_count, 1);
-        
+
         history.record_use("test-profile");
         assert_eq!(history.get("test-profile").unwrap().use_count, 2);
     }
@@ -200,12 +190,12 @@ mod tests {
     #[test]
     fn test_favorites() {
         let mut history = ProfileHistory::default();
-        
+
         assert!(!history.is_favorite("test-profile"));
-        
+
         history.set_favorite("test-profile", true);
         assert!(history.is_favorite("test-profile"));
-        
+
         history.set_favorite("test-profile", false);
         assert!(!history.is_favorite("test-profile"));
     }
@@ -213,13 +203,13 @@ mod tests {
     #[test]
     fn test_toggle_favorite() {
         let mut history = ProfileHistory::default();
-        
+
         assert!(!history.is_favorite("test"));
-        
+
         let status = history.toggle_favorite("test");
         assert!(status);
         assert!(history.is_favorite("test"));
-        
+
         let status = history.toggle_favorite("test");
         assert!(!status);
         assert!(!history.is_favorite("test"));
@@ -228,13 +218,13 @@ mod tests {
     #[test]
     fn test_recent_profiles() {
         let mut history = ProfileHistory::default();
-        
+
         history.record_use("profile-a");
         std::thread::sleep(std::time::Duration::from_millis(10));
         history.record_use("profile-b");
         std::thread::sleep(std::time::Duration::from_millis(10));
         history.record_use("profile-c");
-        
+
         let recent = history.recent_profiles(2);
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].name, "profile-c");

@@ -26,20 +26,13 @@ pub struct AwswitConfig {
     #[serde(rename = "role-session-name")]
     pub role_session_name: Option<String>,
 
-    /// Debug settings
-    #[serde(default)]
-    pub debug: DebugConfig,
+    /// Custom session token duration in seconds
+    #[serde(rename = "session-token-duration")]
+    pub session_token_duration: Option<i32>,
 
     /// Plugin-specific configurations (preserved as-is)
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_yaml::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DebugConfig {
-    /// Custom session token duration
-    #[serde(rename = "session_token_duration")]
-    pub session_token_duration: Option<i32>,
 }
 
 impl Default for AwswitConfig {
@@ -50,7 +43,7 @@ impl Default for AwswitConfig {
             role_duration: 0,
             region: None,
             role_session_name: None,
-            debug: DebugConfig::default(),
+            session_token_duration: None,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -68,14 +61,14 @@ impl AwswitConfig {
     /// Load config from file, or return default if not found
     pub fn load() -> Result<Self, AwswitError> {
         let path = Self::config_path();
-        
+
         if !path.exists() {
             tracing::debug!("awswit config not found, using defaults");
             return Ok(Self::default());
         }
 
         let content = fs::read_to_string(&path)
-            .map_err(|e| AwswitError::ConfigFileError(format!("Failed to read config: {}", e)))?;
+            .map_err(|e| AwswitError::ConfigFileError { message: format!("Failed to read config: {}", e) })?;
 
         let config: Self = serde_yaml::from_str(&content)?;
         Ok(config)
@@ -84,25 +77,15 @@ impl AwswitConfig {
     /// Save config to file
     pub fn save(&self) -> Result<(), AwswitError> {
         let path = Self::config_path();
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let content = serde_yaml::to_string(self)?;
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?;
-            file.write_all(content.as_bytes())?;
-        }
-        
+        crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
+
         tracing::debug!("Saved config to {:?}", path);
         Ok(())
     }
@@ -112,21 +95,31 @@ impl AwswitConfig {
         match key {
             "colors" => {
                 self.colors = value.parse()
-                    .map_err(|_| AwswitError::ValidationError(format!("Invalid boolean: {}", value)))?;
+                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid boolean: {}", value) })?;
             }
             "fuzzy-match" => {
                 self.fuzzy_match = value.parse()
-                    .map_err(|_| AwswitError::ValidationError(format!("Invalid boolean: {}", value)))?;
+                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid boolean: {}", value) })?;
             }
             "role-duration" => {
                 self.role_duration = value.parse()
-                    .map_err(|_| AwswitError::ValidationError(format!("Invalid number: {}", value)))?;
+                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid number: {}", value) })?;
             }
             "region" => {
                 self.region = Some(value.to_string());
             }
             "role-session-name" => {
                 self.role_session_name = Some(value.to_string());
+            }
+            "session-token-duration" => {
+                let duration: i32 = value.parse()
+                    .map_err(|_| AwswitError::ValidationError { message: format!("Invalid number: {}", value) })?;
+                if duration < 900 || duration > 129600 {
+                    return Err(AwswitError::ValidationError {
+                        message: format!("session-token-duration must be between 900 and 129600 seconds, got {}", duration),
+                    });
+                }
+                self.session_token_duration = Some(duration);
             }
             _ => {
                 // Store in extra for plugins
@@ -144,6 +137,7 @@ impl AwswitConfig {
             "role-duration" => Some(self.role_duration.to_string()),
             "region" => self.region.clone(),
             "role-session-name" => self.role_session_name.clone(),
+            "session-token-duration" => self.session_token_duration.map(|d| d.to_string()),
             _ => self.extra.get(key).map(|v| format!("{:?}", v)),
         }
     }
@@ -157,6 +151,7 @@ impl AwswitConfig {
             "role-duration" => self.role_duration = default.role_duration,
             "region" => self.region = None,
             "role-session-name" => self.role_session_name = None,
+            "session-token-duration" => self.session_token_duration = None,
             _ => {
                 self.extra.remove(key);
             }
@@ -174,17 +169,21 @@ mod tests {
         let config = AwswitConfig::default();
         assert!(config.fuzzy_match);
         assert_eq!(config.role_duration, 0);
+        assert!(config.session_token_duration.is_none());
     }
 
     #[test]
     fn test_set_get_value() {
         let mut config = AwswitConfig::default();
-        
+
         config.set_value("role-duration", "3600").unwrap();
         assert_eq!(config.get_value("role-duration"), Some("3600".to_string()));
-        
+
         config.set_value("fuzzy-match", "false").unwrap();
         assert_eq!(config.get_value("fuzzy-match"), Some("false".to_string()));
+
+        config.set_value("session-token-duration", "43200").unwrap();
+        assert_eq!(config.get_value("session-token-duration"), Some("43200".to_string()));
     }
 
     #[test]

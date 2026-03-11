@@ -1,108 +1,116 @@
 use thiserror::Error;
 
+pub type Result<T> = std::result::Result<T, AwswitError>;
+
 #[derive(Error, Debug)]
 pub enum AwswitError {
-    #[error("Profile not found: {0}")]
-    ProfileNotFound(String),
+    #[error("[E001] Profile not found: {name}")]
+    ProfileNotFound { name: String },
 
-    #[error("Invalid profile '{profile_name}': {message}")]
+    #[error("[E002] Invalid profile '{profile_name}': {message}")]
     InvalidProfile {
         profile_name: String,
         message: String,
     },
 
-    #[error("Source profile not found: {0}")]
-    SourceProfileNotFound(String),
+    #[error("[E003] Source profile not found: {name}")]
+    SourceProfileNotFound { name: String },
 
-    #[error("Role chain cycle detected: {0}")]
-    RoleChainCycle(String),
+    #[error("[E004] Role chain cycle detected: {chain}")]
+    RoleChainCycle { chain: String },
 
-    #[error("Missing required profile key: {key} in profile {profile_name}")]
+    #[error("[E005] Missing required profile key: {key} in profile {profile_name}")]
     MissingProfileKey {
         profile_name: String,
         key: String,
     },
 
-    #[error("Invalid credential source: {0}")]
-    InvalidCredentialSource(String),
+    #[error("[E006] Invalid credential source: {name}")]
+    InvalidCredentialSource { name: String },
 
-    #[error("Failed to assume role: {0}")]
-    AssumeRoleFailed(String),
+    #[error("[E007] Failed to assume role: {message}")]
+    AssumeRoleFailed { message: String },
 
-    #[error("Failed to get session token: {0}")]
-    GetSessionTokenFailed(String),
+    #[error("[E008] Failed to get session token: {message}")]
+    GetSessionTokenFailed { message: String },
 
-    #[error("MFA token required")]
+    #[error("[E009] MFA token required")]
     MfaTokenRequired,
 
-    #[error("Invalid MFA token")]
-    InvalidMfaToken,
+    #[error("[E010] Invalid MFA token: {message}")]
+    InvalidMfaToken { message: String },
 
-    #[error("Credentials expired")]
-    CredentialsExpired,
+    #[error("[E011] Cache error: {message}")]
+    CacheError { message: String },
 
-    #[error("Cache error: {0}")]
-    CacheError(String),
+    #[error("[E012] Config file error: {message}")]
+    ConfigFileError { message: String },
 
-    #[error("Config file error: {0}")]
-    ConfigFileError(String),
+    #[error("[E013] Config key not found: {key}")]
+    ConfigKeyNotFound { key: String },
 
-    #[error("Config key not found: {0}")]
-    ConfigKeyNotFound(String),
+    #[error("[E014] Invalid config command: {command}")]
+    InvalidConfigCommand { command: String },
 
-    #[error("Invalid config command: {0}")]
-    InvalidConfigCommand(String),
+    #[error("[E015] AWS STS error: {message}")]
+    AwsSdkError { message: String },
 
-    #[error("AWS SDK error: {0}")]
-    AwsSdkError(String),
+    #[error("[E016] Credential process failed: {message}")]
+    CredentialProcessFailed { message: String },
 
-    #[error("Credential process failed: {0}")]
-    CredentialProcessFailed(String),
+    #[error("[E017] Auto-refresh error: {message}")]
+    AutoRefreshError { message: String },
 
-    #[error("Auto-refresh error: {0}")]
-    AutoRefreshError(String),
+    #[error("[E018] Shell error: {message}")]
+    ShellError { message: String },
 
-    #[error("Shell error: {0}")]
-    ShellError(String),
-
-    #[error("IO error: {0}")]
+    #[error("[E019] IO error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("YAML parse error: {0}")]
+    #[error("[E020] YAML parse error: {0}")]
     YamlError(#[from] serde_yaml::Error),
 
-    #[error("JSON parse error: {0}")]
+    #[error("[E021] JSON parse error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    #[error("Validation error: {0}")]
-    ValidationError(String),
+    #[error("[E022] Validation error: {message}")]
+    ValidationError { message: String },
 
-    #[error("Cannot use auto-refresh with custom role duration > 1 hour")]
+    #[error("[E023] Cannot use auto-refresh with custom role duration > 1 hour")]
     AutoRefreshDurationLimit,
 
-    #[error("Environment variable error: {0}")]
-    EnvError(String),
+    #[error("[E024] Environment variable error: {message}")]
+    EnvError { message: String },
+
+    #[error("[E025] Operation cancelled by user")]
+    UserCancelled,
+
+    #[error("[E099] {0}")]
+    Other(String),
+
+    #[error("[E026] STS request timed out after {seconds}s")]
+    StsTimeout { seconds: u64 },
+
+    #[error("[E027] Invalid STS expiration timestamp")]
+    InvalidStsTimestamp,
 }
 
-impl AwswitError {
-    pub fn invalid_profile(profile_name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::InvalidProfile {
-            profile_name: profile_name.into(),
-            message: message.into(),
-        }
-    }
-
-    pub fn missing_key(profile_name: impl Into<String>, key: impl Into<String>) -> Self {
-        Self::MissingProfileKey {
-            profile_name: profile_name.into(),
-            key: key.into(),
-        }
-    }
-}
-
-// Convert AWS SDK errors
+// Convert AWS SDK errors - sanitize for security
 impl<E: std::error::Error> From<aws_sdk_sts::error::SdkError<E>> for AwswitError {
     fn from(err: aws_sdk_sts::error::SdkError<E>) -> Self {
-        AwswitError::AwsSdkError(err.to_string())
+        tracing::debug!("AWS SDK error details: {}", err);
+        let message = match &err {
+            aws_sdk_sts::error::SdkError::ServiceError(service_err) => {
+                format!("{}", service_err.err())
+            }
+            aws_sdk_sts::error::SdkError::TimeoutError(_) => {
+                "Request timed out".to_string()
+            }
+            aws_sdk_sts::error::SdkError::DispatchFailure(_) => {
+                "Failed to connect to AWS".to_string()
+            }
+            _ => "AWS request failed".to_string(),
+        };
+        AwswitError::AwsSdkError { message }
     }
 }
