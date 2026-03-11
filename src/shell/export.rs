@@ -29,16 +29,46 @@ fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<VarBindin
     let expiration_str = creds.expiration.map(|exp| exp.to_rfc3339());
 
     vec![
-        VarBinding { name: "AWS_ACCESS_KEY_ID", value: Some(creds.access_key_id.clone()) },
-        VarBinding { name: "AWS_SECRET_ACCESS_KEY", value: Some(creds.secret_access_key.clone()) },
-        VarBinding { name: "AWS_SESSION_TOKEN", value: creds.session_token.clone() },
-        VarBinding { name: "AWS_SECURITY_TOKEN", value: creds.session_token.clone() },
-        VarBinding { name: "AWS_REGION", value: creds.region.clone() },
-        VarBinding { name: "AWS_DEFAULT_REGION", value: creds.region.clone() },
-        VarBinding { name: "AWS_PROFILE", value: None },
-        VarBinding { name: "AWS_DEFAULT_PROFILE", value: None },
-        VarBinding { name: "AWSWIT_PROFILE", value: Some(profile_name.to_string()) },
-        VarBinding { name: "AWSWIT_EXPIRATION", value: expiration_str },
+        VarBinding {
+            name: "AWS_ACCESS_KEY_ID",
+            value: Some(creds.access_key_id.clone()),
+        },
+        VarBinding {
+            name: "AWS_SECRET_ACCESS_KEY",
+            value: Some(creds.secret_access_key.clone()),
+        },
+        VarBinding {
+            name: "AWS_SESSION_TOKEN",
+            value: creds.session_token.clone(),
+        },
+        VarBinding {
+            name: "AWS_SECURITY_TOKEN",
+            value: creds.session_token.clone(),
+        },
+        VarBinding {
+            name: "AWS_REGION",
+            value: creds.region.clone(),
+        },
+        VarBinding {
+            name: "AWS_DEFAULT_REGION",
+            value: creds.region.clone(),
+        },
+        VarBinding {
+            name: "AWS_PROFILE",
+            value: None,
+        },
+        VarBinding {
+            name: "AWS_DEFAULT_PROFILE",
+            value: None,
+        },
+        VarBinding {
+            name: "AWSWIT_PROFILE",
+            value: Some(profile_name.to_string()),
+        },
+        VarBinding {
+            name: "AWSWIT_EXPIRATION",
+            value: expiration_str,
+        },
     ]
 }
 
@@ -110,14 +140,28 @@ impl ShellExporter {
         }
     }
 
-    /// Generate export commands that can be displayed to the user
-    pub fn generate_export_commands(&self, credentials: &Credentials, profile_name: &str) -> String {
+    /// Generate export commands that can be displayed to the user.
+    ///
+    /// Values containing newlines or carriage returns are skipped with a warning,
+    /// as they could inject additional shell commands.
+    pub fn generate_export_commands(
+        &self,
+        credentials: &Credentials,
+        profile_name: &str,
+    ) -> String {
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
         for binding in &bindings {
             match &binding.value {
                 Some(val) => {
+                    if val.contains('\n') || val.contains('\r') {
+                        tracing::warn!(
+                            "Skipping export of {} — value contains newline characters",
+                            binding.name
+                        );
+                        continue;
+                    }
                     output.push_str(&self.format_set(binding.name, val));
                 }
                 None => {
@@ -134,7 +178,20 @@ impl ShellExporter {
     ///
     /// Values are validated to reject newlines and carriage returns, which could
     /// inject extra KEY=VALUE lines and corrupt the shell wrapper's parsing.
-    pub fn generate_shell_output(&self, credentials: &Credentials, profile_name: &str) -> Result<String, crate::error::AwswitError> {
+    pub fn generate_shell_output(
+        &self,
+        credentials: &Credentials,
+        profile_name: &str,
+    ) -> Result<String, crate::error::AwswitError> {
+        // Validate profile_name for newlines/carriage returns (same check as credential values)
+        if profile_name.contains('\n') || profile_name.contains('\r') {
+            return Err(crate::error::AwswitError::ShellError {
+                message:
+                    "Profile name contains newline characters, which is not allowed in shell output"
+                        .to_string(),
+            });
+        }
+
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
@@ -299,7 +356,12 @@ mod tests {
 
     #[test]
     fn test_unset_commands_all_shells() {
-        for shell in [ShellType::Bash, ShellType::Fish, ShellType::PowerShell, ShellType::Cmd] {
+        for shell in [
+            ShellType::Bash,
+            ShellType::Fish,
+            ShellType::PowerShell,
+            ShellType::Cmd,
+        ] {
             let exporter = ShellExporter::for_shell(shell);
             let output = exporter.generate_unset_commands();
             // All managed vars should appear

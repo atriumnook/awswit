@@ -14,9 +14,7 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
         .unwrap_or(0);
     let tmp_path = parent.join(format!(
         ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file"),
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         std::process::id(),
         nanos
     ));
@@ -44,6 +42,15 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
 
         // Atomic rename
         std::fs::rename(&tmp_path, path)?;
+
+        // Sync parent directory to ensure the rename is durable on Unix
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
         Ok(())
     };
 
