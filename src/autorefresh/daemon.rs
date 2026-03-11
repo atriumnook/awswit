@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -176,6 +177,13 @@ fn get_auto_refresh_dir() -> Result<PathBuf, AwswitError> {
     Ok(home.join(".awswit").join("autorefresh"))
 }
 
+fn get_aws_credentials_path() -> Result<PathBuf, AwswitError> {
+    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
+        message: "Could not determine home directory".to_string(),
+    })?;
+    Ok(home.join(".aws").join("credentials"))
+}
+
 fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
     let dir = get_auto_refresh_dir()?;
     fs::create_dir_all(&dir)?;
@@ -227,41 +235,34 @@ fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
     Ok(profiles)
 }
 
-fn write_auto_refresh_credentials(
-    profile_name: &str,
-    creds: &Credentials,
-) -> Result<(), AwswitError> {
+fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitError> {
     use fs2::FileExt;
-
-    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Could not determine home directory".to_string(),
-    })?;
-    let creds_path = home.join(".aws").join("credentials");
 
     // Lock the credentials file to prevent concurrent corruption
     let lock_file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(creds_path.with_extension("lock"))?;
+        .open({
+            let mut lock_path = creds_path.as_os_str().to_owned();
+            lock_path.push(".lock");
+            PathBuf::from(lock_path)
+        })?;
     lock_file.lock_exclusive()?;
-    // Lock is released on Drop — no manual unlock needed, which also ensures
-    // cleanup on early-return error paths.
+    Ok(lock_file)
+}
 
-    let content = fs::read_to_string(&creds_path).unwrap_or_default();
-
-    // Remove existing section to avoid duplicates
+fn remove_credentials_section(content: &str, profile_name: &str) -> String {
     let section_header = format!("[{}]", profile_name);
-    let lines: Vec<&str> = content.lines().collect();
     let mut new_lines = Vec::new();
     let mut skip = false;
 
-    for line in &lines {
+    for line in content.lines() {
         if line.starts_with('[') {
             skip = line.trim() == section_header;
         }
         if !skip {
-            new_lines.push(*line);
+            new_lines.push(line);
         }
     }
 
@@ -269,6 +270,33 @@ fn write_auto_refresh_credentials(
     if !new_content.ends_with('\n') && !new_content.is_empty() {
         new_content.push('\n');
     }
+
+    new_content
+}
+
+fn write_auto_refresh_credentials(
+    profile_name: &str,
+    creds: &Credentials,
+) -> Result<(), AwswitError> {
+    let creds_path = get_aws_credentials_path()?;
+    write_auto_refresh_credentials_at_path(&creds_path, profile_name, creds)
+}
+
+fn write_auto_refresh_credentials_at_path(
+    creds_path: &Path,
+    profile_name: &str,
+    creds: &Credentials,
+) -> Result<(), AwswitError> {
+    let _lock_file = lock_aws_credentials_file(creds_path)?;
+    // Lock is released on Drop — no manual unlock needed, which also ensures
+    // cleanup on early-return error paths.
+
+    let content = match fs::read_to_string(creds_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let mut new_content = remove_credentials_section(&content, profile_name);
 
     let new_section = format!(
         "[{}]\n\
@@ -286,53 +314,29 @@ fn write_auto_refresh_credentials(
 
     new_content.push_str(&new_section);
 
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&creds_path)?;
-        file.write_all(new_content.as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&creds_path, new_content)?;
-    }
+    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
 
     Ok(())
 }
 
 fn remove_auto_refresh_credentials(profile_name: &str) -> Result<(), AwswitError> {
-    let home = dirs::home_dir().ok_or_else(|| AwswitError::AutoRefreshError {
-        message: "Could not determine home directory".to_string(),
-    })?;
-    let creds_path = home.join(".aws").join("credentials");
+    let creds_path = get_aws_credentials_path()?;
+    remove_auto_refresh_credentials_at_path(&creds_path, profile_name)
+}
 
+fn remove_auto_refresh_credentials_at_path(
+    creds_path: &Path,
+    profile_name: &str,
+) -> Result<(), AwswitError> {
+    let _lock_file = lock_aws_credentials_file(creds_path)?;
     if !creds_path.exists() {
         return Ok(());
     }
 
-    let content = fs::read_to_string(&creds_path)?;
+    let content = fs::read_to_string(creds_path)?;
+    let new_content = remove_credentials_section(&content, profile_name);
 
-    let section_header = format!("[{}]", profile_name);
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines = Vec::new();
-    let mut skip = false;
-
-    for line in lines {
-        if line.starts_with('[') {
-            skip = line.trim() == section_header;
-        }
-        if !skip {
-            new_lines.push(line);
-        }
-    }
-
-    fs::write(&creds_path, new_lines.join("\n"))?;
+    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
 
     Ok(())
 }
@@ -563,5 +567,69 @@ fn is_autoawswit_running() -> Result<bool, AwswitError> {
     {
         let _ = pid_i32;
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use tempfile::TempDir;
+
+    fn create_test_credentials_path() -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().unwrap();
+        let creds_dir = temp_dir.path().join(".aws");
+        fs::create_dir_all(&creds_dir).unwrap();
+        (temp_dir, creds_dir.join("credentials"))
+    }
+
+    fn test_credentials() -> Credentials {
+        Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: Some("token".to_string()),
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            region: Some("us-east-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn write_auto_refresh_credentials_replaces_existing_section_atomically() {
+        let (_temp_dir, creds_path) = create_test_credentials_path();
+        fs::write(
+            &creds_path,
+            "[default]\naws_access_key_id = ORIGINAL\n[autoawswit-test]\naws_access_key_id = OLD\n[other]\naws_access_key_id = OTHER\n",
+        )
+        .unwrap();
+
+        write_auto_refresh_credentials_at_path(&creds_path, "autoawswit-test", &test_credentials())
+            .unwrap();
+
+        let content = fs::read_to_string(&creds_path).unwrap();
+        assert!(content.contains("[default]\naws_access_key_id = ORIGINAL\n"));
+        assert!(content.contains("[other]\naws_access_key_id = OTHER\n"));
+        assert!(content.contains("[autoawswit-test]\n"));
+        assert_eq!(content.matches("[autoawswit-test]").count(), 1);
+        assert!(content.contains("aws_access_key_id = AKIATEST\n"));
+        assert!(content.contains("aws_secret_access_key = secret\n"));
+        assert!(content.contains("aws_session_token = token\n"));
+        assert!(content.contains("autoawswit = true\n"));
+    }
+
+    #[test]
+    fn remove_auto_refresh_credentials_updates_file_without_direct_write() {
+        let (_temp_dir, creds_path) = create_test_credentials_path();
+        fs::write(
+            &creds_path,
+            "[default]\naws_access_key_id = ORIGINAL\n[autoawswit-test]\naws_access_key_id = OLD\n[other]\naws_access_key_id = OTHER\n",
+        )
+        .unwrap();
+
+        remove_auto_refresh_credentials_at_path(&creds_path, "autoawswit-test").unwrap();
+
+        let content = fs::read_to_string(&creds_path).unwrap();
+        assert!(content.contains("[default]\naws_access_key_id = ORIGINAL\n"));
+        assert!(content.contains("[other]\naws_access_key_id = OTHER\n"));
+        assert!(!content.contains("[autoawswit-test]"));
     }
 }

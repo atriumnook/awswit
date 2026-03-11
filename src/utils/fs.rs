@@ -37,7 +37,15 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
 
         #[cfg(not(unix))]
         {
-            std::fs::write(&tmp_path, content)?;
+            use std::io::Write;
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            file.write_all(content)?;
+            file.sync_all()?;
         }
 
         // Atomic rename
