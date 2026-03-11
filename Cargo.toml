@@ -27,11 +27,11 @@ name = "awswit-complete"
 path = "src/bin/autocomplete.rs"
 
 [dependencies]
-# AWS SDK - pinned to compatible versions
-aws-config = { version = "=1.1.1", features = ["behavior-version-latest"] }
-aws-sdk-sts = "=1.9.0"
-aws-credential-types = "=1.1.1"
-aws-types = "=1.1.1"
+# AWS SDK
+aws-config = { version = "^1.1.1", features = ["behavior-version-latest"] }
+aws-sdk-sts = "^1.9.0"
+aws-credential-types = "^1.1.1"
+aws-types = "^1.1.1"
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

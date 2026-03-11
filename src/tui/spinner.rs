@@ -84,47 +84,6 @@ impl Drop for AwswitSpinner {
     }
 }
 
-/// Multi-step progress indicator
-#[allow(dead_code)]
-pub struct MultiStepProgress {
-    steps: Vec<String>,
-    current: usize,
-    progress: ProgressBar,
-}
-
-#[allow(dead_code)]
-impl MultiStepProgress {
-    pub fn new(steps: Vec<&str>) -> Self {
-        let total = steps.len() as u64;
-        let progress = ProgressBar::new(total);
-        progress.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.cyan} [{bar:30.cyan/dim}] {pos}/{len} {msg}")
-                .expect("Invalid progress template")
-                .progress_chars("━━╸"),
-        );
-        progress.enable_steady_tick(Duration::from_millis(100));
-
-        Self {
-            steps: steps.into_iter().map(String::from).collect(),
-            current: 0,
-            progress,
-        }
-    }
-
-    pub fn next_step(&mut self) {
-        if self.current < self.steps.len() {
-            self.progress.set_message(self.steps[self.current].clone());
-            self.progress.inc(1);
-            self.current += 1;
-        }
-    }
-
-    pub fn finish(&self) {
-        self.progress.finish_with_message(format!("{}Done!", CHECK));
-    }
-}
-
 /// Simple status line that updates in place
 pub struct StatusLine;
 

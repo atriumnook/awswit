@@ -36,7 +36,6 @@ struct ProfileEntry {
     profile: Profile,
     is_favorite: bool,
     last_used: Option<chrono::DateTime<chrono::Utc>>,
-    _use_count: u32,
     score: Option<u32>,
 }
 
@@ -121,7 +120,6 @@ impl PickerApp {
                     profile: profile.clone(),
                     is_favorite: history.is_favorite(name),
                     last_used: history_entry.map(|h| h.last_used),
-                    _use_count: history_entry.map(|h| h.use_count).unwrap_or(0),
                     score: None,
                 }
             })

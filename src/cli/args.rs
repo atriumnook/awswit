@@ -72,12 +72,12 @@ pub struct Args {
     #[arg(long = "session-name", value_name = "session_name")]
     pub session_name: Option<String>,
 
-    /// Session policy JSON document
-    #[arg(long = "session-policy", value_name = "session_policy")]
+    /// Session policy JSON document (reserved for future use)
+    #[arg(long = "session-policy", value_name = "session_policy", hide = true)]
     pub session_policy: Option<String>,
 
-    /// Session policy ARNs
-    #[arg(long = "session-policy-arns", value_name = "session_policy_arns", num_args = 1..)]
+    /// Session policy ARNs (reserved for future use)
+    #[arg(long = "session-policy-arns", value_name = "session_policy_arns", num_args = 1.., hide = true)]
     pub session_policy_arns: Option<Vec<String>>,
 
     /// Role duration in seconds

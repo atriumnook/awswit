@@ -51,16 +51,16 @@ impl Default for AwswitConfig {
 
 impl AwswitConfig {
     /// Get the config file path
-    pub fn config_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".awswit")
-            .join("config.yaml")
+    pub fn config_path() -> Result<PathBuf, AwswitError> {
+        let home = dirs::home_dir().ok_or_else(|| AwswitError::ConfigFileError {
+            message: "Could not determine home directory".to_string(),
+        })?;
+        Ok(home.join(".awswit").join("config.yaml"))
     }
 
     /// Load config from file, or return default if not found
     pub fn load() -> Result<Self, AwswitError> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
 
         if !path.exists() {
             tracing::debug!("awswit config not found, using defaults");
@@ -77,7 +77,7 @@ impl AwswitConfig {
 
     /// Save config to file
     pub fn save(&self) -> Result<(), AwswitError> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
