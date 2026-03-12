@@ -6,7 +6,7 @@ use crate::error::AwswitError;
 
 /// awswit configuration stored in ~/.awswit/config.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AwswitConfig {
     /// Enable colored output
     pub colors: bool,
@@ -79,9 +79,14 @@ impl AwswitConfig {
     pub fn save(&self) -> Result<(), AwswitError> {
         let path = Self::config_path()?;
 
-        // Ensure directory exists
+        // Ensure directory exists with restrictive permissions
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
         }
 
         let content = serde_yml::to_string(self)?;
@@ -105,9 +110,18 @@ impl AwswitConfig {
                 })?;
             }
             "role-duration" => {
-                self.role_duration = value.parse().map_err(|_| AwswitError::ValidationError {
+                let duration: i32 = value.parse().map_err(|_| AwswitError::ValidationError {
                     message: format!("Invalid number: {}", value),
                 })?;
+                if duration != 0 && !(900..=43200).contains(&duration) {
+                    return Err(AwswitError::ValidationError {
+                        message: format!(
+                            "role-duration must be between 900 and 43200 seconds, got {}",
+                            duration
+                        ),
+                    });
+                }
+                self.role_duration = duration;
             }
             "region" => {
                 self.region = Some(value.to_string());
@@ -243,10 +257,16 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_yaml_keys_ignored_on_load() {
-        // Existing config files may contain unknown keys from plugins or future versions.
-        // Verify they are silently ignored during deserialization.
+    fn test_unknown_yaml_keys_rejected_on_load() {
+        // Unknown keys should be rejected to catch typos in config files.
         let yaml = "colors: true\nfuzzy-match: false\nunknown-plugin-key: some-value\n";
+        let result = serde_yml::from_str::<AwswitConfig>(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_yaml_keys_accepted_on_load() {
+        let yaml = "colors: true\nfuzzy-match: false\n";
         let config: AwswitConfig = serde_yml::from_str(yaml).unwrap();
         assert!(config.colors);
         assert!(!config.fuzzy_match);

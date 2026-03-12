@@ -270,7 +270,7 @@ mod tests {
             ..Default::default()
         };
         let err = profile.validate().unwrap_err();
-        matches!(err, ProfileValidationError::ConflictingCredentialSource);
+        assert!(matches!(err, ProfileValidationError::ConflictingCredentialSource));
     }
 
     #[test]

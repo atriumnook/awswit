@@ -113,17 +113,19 @@ pub enum Command {
 }
 
 impl Args {
-    /// Parse role ARN from shorthand format (account_id:role_name) if needed
+    /// Parse role ARN from shorthand format (account_id:role_name) if needed.
+    /// Uses the region (if set) to determine the correct AWS partition for
+    /// GovCloud (arn:aws-us-gov) and China (arn:aws-cn) regions.
     pub fn resolve_role_arn(&self) -> Option<String> {
         self.role_arn.as_ref().map(|arn| {
             if arn.starts_with("arn:") {
                 arn.clone()
             } else if arn.contains(':') {
                 // Shorthand format: account_id:role_name
-                // Note: shorthand always uses arn:aws partition. For GovCloud/China, use full ARN.
                 let parts: Vec<&str> = arn.splitn(2, ':').collect();
                 if parts.len() == 2 {
-                    format!("arn:aws:iam::{}:role/{}", parts[0], parts[1])
+                    let partition = partition_for_region(self.region.as_deref());
+                    format!("arn:{}:iam::{}:role/{}", partition, parts[0], parts[1])
                 } else {
                     arn.clone()
                 }
@@ -176,6 +178,17 @@ pub fn sanitize_session_name(name: &str) -> String {
         0 => "__".to_string(),
         1 => format!("{}_", sanitized),
         _ => sanitized,
+    }
+}
+
+/// Determine the AWS partition from an optional region string.
+/// Returns "aws-us-gov" for GovCloud regions, "aws-cn" for China regions,
+/// and "aws" for everything else (including when no region is specified).
+fn partition_for_region(region: Option<&str>) -> &'static str {
+    match region {
+        Some(r) if r.starts_with("us-gov-") => "aws-us-gov",
+        Some(r) if r.starts_with("cn-") => "aws-cn",
+        _ => "aws",
     }
 }
 
@@ -258,6 +271,55 @@ mod tests {
             args.resolve_role_arn(),
             Some("arn:aws:iam::123456789012:role/MyRole".to_string())
         );
+    }
+
+    #[test]
+    fn test_resolve_role_arn_shorthand_govcloud() {
+        let args = Args {
+            role_arn: Some("123456789012:MyRole".to_string()),
+            region: Some("us-gov-west-1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_role_arn(),
+            Some("arn:aws-us-gov:iam::123456789012:role/MyRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_role_arn_shorthand_china() {
+        let args = Args {
+            role_arn: Some("123456789012:MyRole".to_string()),
+            region: Some("cn-north-1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_role_arn(),
+            Some("arn:aws-cn:iam::123456789012:role/MyRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_role_arn_full_arn_not_affected_by_region() {
+        let args = Args {
+            role_arn: Some("arn:aws:iam::123456789012:role/MyRole".to_string()),
+            region: Some("cn-north-1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_role_arn(),
+            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_partition_for_region() {
+        assert_eq!(super::partition_for_region(None), "aws");
+        assert_eq!(super::partition_for_region(Some("us-east-1")), "aws");
+        assert_eq!(super::partition_for_region(Some("us-gov-west-1")), "aws-us-gov");
+        assert_eq!(super::partition_for_region(Some("us-gov-east-1")), "aws-us-gov");
+        assert_eq!(super::partition_for_region(Some("cn-north-1")), "aws-cn");
+        assert_eq!(super::partition_for_region(Some("cn-northwest-1")), "aws-cn");
     }
 
     #[test]
