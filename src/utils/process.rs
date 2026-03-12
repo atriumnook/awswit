@@ -27,7 +27,7 @@ pub fn graceful_kill(pid: i32, grace_period: std::time::Duration) {
 
 /// Attempt to reap a process after SIGKILL to prevent zombies and PID reuse.
 #[cfg(unix)]
-fn reap_process(pid: i32) {
+pub fn reap_process(pid: i32) {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_millis(500);
     loop {

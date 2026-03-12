@@ -60,12 +60,6 @@ impl<'a> ProfilePicker<'a> {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_theme(mut self, theme: Theme) -> Self {
-        self.theme = theme;
-        self
-    }
-
     /// Run the interactive picker
     pub fn run(self) -> io::Result<PickerResult> {
         // Setup terminal

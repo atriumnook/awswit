@@ -8,7 +8,7 @@ awswit() {
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "$output" >&2
+        printf '%s\n' "$output" >&2
         return $exit_code
     fi
 
@@ -30,7 +30,7 @@ awswit() {
                 ;;
             *)
                 # Print non-variable output
-                [ -n "$key" ] && echo "$key${value:+=$value}"
+                [ -n "$key" ] && printf '%s\n' "$key${value:+=$value}"
                 ;;
         esac
     done <<< "$output"

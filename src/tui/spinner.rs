@@ -11,7 +11,6 @@ static CROSS: Emoji<'_, '_> = Emoji("❌ ", "[ERR] ");
 /// Spinner for AWS operations
 pub struct AwswitSpinner {
     progress: ProgressBar,
-    _start_message: String,
 }
 
 impl AwswitSpinner {
@@ -27,10 +26,7 @@ impl AwswitSpinner {
         progress.set_message(message.to_string());
         progress.enable_steady_tick(Duration::from_millis(80));
 
-        Self {
-            progress,
-            _start_message: message.to_string(),
-        }
+        Self { progress }
     }
 
     /// Create spinner for MFA prompt

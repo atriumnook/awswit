@@ -26,11 +26,6 @@ impl<'a> ProfilePreview<'a> {
         }
     }
 
-    pub fn with_history(mut self, history: &'a ProfileHistory) -> Self {
-        self.history = Some(history);
-        self
-    }
-
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
