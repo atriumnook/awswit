@@ -38,26 +38,43 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Run the main application
-    if let Err(e) = run(args).await {
-        if matches!(e, AwswitError::UserCancelled) {
-            std::process::exit(130);
+    match run(args).await {
+        Ok(code) => {
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
-        eprintln!("{}", e);
-        std::process::exit(1);
+        Err(e) => {
+            if matches!(e, AwswitError::UserCancelled) {
+                std::process::exit(130);
+            }
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 }
 
-async fn run(args: Args) -> Result<(), AwswitError> {
+async fn run(args: Args) -> Result<i32, AwswitError> {
     tracing::debug!("Starting awswit with args: {:?}", args);
 
     // Handle subcommands
     if let Some(ref command) = args.command {
         match command {
             Command::Init { shell } => {
-                return handle_init(shell);
+                handle_init(shell)?;
+                return Ok(0);
             }
             Command::Completions { shell } => {
-                return handle_completions(*shell);
+                handle_completions(*shell)?;
+                return Ok(0);
+            }
+            Command::Exec {
+                profile,
+                force_refresh,
+                region,
+                command,
+            } => {
+                return handle_exec(profile, *force_refresh, region.clone(), command).await;
             }
         }
     }
@@ -65,16 +82,18 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     // Handle version flag early (before loading config)
     if args.version {
         println!("awswit {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return Ok(0);
     }
 
     // Early-exit flags that only need config (no profiles)
     if args.unset {
-        return handle_unset(&args);
+        handle_unset(&args)?;
+        return Ok(0);
     }
 
     if args.kill_refresher {
-        return handle_kill_refresher(&args);
+        handle_kill_refresher(&args)?;
+        return Ok(0);
     }
 
     // Build full application context
@@ -82,12 +101,14 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle list profiles
     if ctx.args.list_profiles.is_some() {
-        return handle_list_profiles(&ctx.profiles, &ctx.config);
+        handle_list_profiles(&ctx.profiles, &ctx.config)?;
+        return Ok(0);
     }
 
     // Handle refresh autocomplete
     if ctx.args.refresh_autocomplete {
-        return handle_refresh_autocomplete(&ctx.profiles);
+        handle_refresh_autocomplete(&ctx.profiles)?;
+        return Ok(0);
     }
 
     // Determine target profile
@@ -159,7 +180,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     // Emit credentials
     emit_credentials(&credentials, &target_profile_name, &ctx.args)?;
 
-    Ok(())
+    Ok(0)
 }
 
 /// Check whether the profile's full source_profile chain requires MFA.
@@ -248,7 +269,7 @@ fn handle_list_profiles(
     profiles: &HashMap<String, Profile>,
     config: &AwswitConfig,
 ) -> Result<(), AwswitError> {
-    use colored::Colorize;
+    use crossterm::style::Stylize;
 
     let use_colors = config.colors && !cfg!(windows);
 
@@ -370,6 +391,17 @@ fn handle_completions(shell: clap_complete::Shell) -> Result<(), AwswitError> {
     let mut cmd = Args::command();
     clap_complete::generate(shell, &mut cmd, "awswit", &mut std::io::stdout());
     Ok(())
+}
+
+async fn handle_exec(
+    _profile: &str,
+    _force_refresh: bool,
+    _region: Option<String>,
+    _command: &[String],
+) -> Result<i32, AwswitError> {
+    Err(AwswitError::ShellError {
+        message: "exec subcommand is not yet implemented".to_string(),
+    })
 }
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {

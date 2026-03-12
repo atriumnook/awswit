@@ -57,7 +57,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Acquire an exclusive lock on the credentials file with timeout.
 /// Returns the lock file handle (lock released on Drop).
-pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitError> {
+pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<crate::utils::fs::FileLockGuard, AwswitError> {
     let mut lock_path = creds_path.as_os_str().to_owned();
     lock_path.push(".lock");
     let lock_path = PathBuf::from(lock_path);

@@ -56,8 +56,8 @@ thiserror = "1.0"
 # Async trait support
 async-trait = "0.1"
 
-# Colored output
-colored = "2.0"
+# File locking
+fd-lock = "4.0"
 
 # Directory paths
 dirs = "5.0"
@@ -73,12 +73,6 @@ dialoguer = "0.11"
 ratatui = { version = "0.25", features = ["crossterm"] }
 crossterm = "0.27"
 
-# Spinner and progress
-indicatif = "0.17"
-
-# Better console output
-console = "0.15"
-
 # Time formatting
 humantime = "2.1"
 
@@ -88,8 +82,6 @@ humantime = "2.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# File locking
-fs2 = "0.4"
 
 # Shell detection
 shellexpand = "3.1"

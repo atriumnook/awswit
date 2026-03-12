@@ -268,7 +268,7 @@ fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
 }
 
 /// Acquire the daemon advisory lock with timeout.
-fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
+fn lock_daemon(lock_path: &std::path::Path) -> Result<crate::utils::fs::FileLockGuard, AwswitError> {
     crate::utils::fs::lock_file_with_permissions(lock_path, std::time::Duration::from_secs(30))
         .map_err(|e| AwswitError::AutoRefreshError {
             message: format!("Failed to acquire daemon lock: {}", e),
