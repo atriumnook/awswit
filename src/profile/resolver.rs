@@ -18,7 +18,7 @@ fn mfa_cache_key(access_key_id: &str, mfa_serial: &str) -> String {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect();
-    format!("session-{}-{}", access_key_id, hex)
+    format!("v1-session-{}-{}", access_key_id, hex)
 }
 
 /// Resolves profile credentials, handling role chains and MFA
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn mfa_cache_key_uses_hex_format() {
         let key = mfa_cache_key("AKIAEXAMPLE", "arn:aws:iam::123456789012:mfa/user");
-        assert!(key.starts_with("session-AKIAEXAMPLE-"));
+        assert!(key.starts_with("v1-session-AKIAEXAMPLE-"));
         // Should contain hex-encoded mfa_serial
         assert!(key.contains("61726e3a6177733a69616d"));
     }

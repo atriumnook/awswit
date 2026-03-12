@@ -29,10 +29,6 @@ pub struct AwswitConfig {
     /// Custom session token duration in seconds
     #[serde(rename = "session-token-duration")]
     pub session_token_duration: Option<i32>,
-
-    /// Plugin-specific configurations (preserved as-is)
-    #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, serde_yml::Value>,
 }
 
 impl Default for AwswitConfig {
@@ -44,7 +40,6 @@ impl Default for AwswitConfig {
             region: None,
             role_session_name: None,
             session_token_duration: None,
-            extra: std::collections::HashMap::new(),
         }
     }
 }
@@ -135,9 +130,9 @@ impl AwswitConfig {
                 self.session_token_duration = Some(duration);
             }
             _ => {
-                // Store in extra for plugins
-                self.extra
-                    .insert(key.to_string(), serde_yml::Value::String(value.to_string()));
+                return Err(AwswitError::ValidationError {
+                    message: format!("Unknown config key: {}", key),
+                });
             }
         }
         Ok(())
@@ -152,10 +147,7 @@ impl AwswitConfig {
             "region" => self.region.clone(),
             "role-session-name" => self.role_session_name.clone(),
             "session-token-duration" => self.session_token_duration.map(|d| d.to_string()),
-            _ => self.extra.get(key).map(|v| match v {
-                serde_yml::Value::String(s) => s.clone(),
-                other => format!("{:?}", other),
-            }),
+            _ => None,
         }
     }
 
@@ -170,7 +162,9 @@ impl AwswitConfig {
             "role-session-name" => self.role_session_name = None,
             "session-token-duration" => self.session_token_duration = None,
             _ => {
-                self.extra.remove(key);
+                return Err(AwswitError::ValidationError {
+                    message: format!("Unknown config key: {}", key),
+                });
             }
         }
         Ok(())
