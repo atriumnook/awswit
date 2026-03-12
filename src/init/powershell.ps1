@@ -1,3 +1,4 @@
+$env:AWSWIT_SHELL = 'powershell'
 function awswit {
     param(
         [Parameter(ValueFromRemainingArguments = $true)]

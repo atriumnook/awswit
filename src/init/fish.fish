@@ -1,3 +1,4 @@
+set -gx AWSWIT_SHELL fish
 function awswit
     set -l output (command awswit $argv)
     set -l exit_code $status

@@ -1,3 +1,4 @@
+export AWSWIT_SHELL=bash
 awswit() {
     local output
     local exit_code
