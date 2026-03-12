@@ -362,20 +362,40 @@ impl<'a> ProfileResolver<'a> {
         self.profile_to_credentials(source_profile)
     }
 
-    /// Get MFA serial for a role chain
+    /// Get MFA serial for a role chain.
+    ///
+    /// Checks every profile in the chain, then walks the full source_profile
+    /// ancestry of the chain root so that grandparent (or deeper) MFA serials
+    /// are detected.
     fn get_mfa_serial_for_chain(&self, chain: &[&Profile]) -> Option<String> {
+        // Check each profile already in the chain
         for profile in chain {
             if let Some(ref mfa_serial) = profile.mfa_serial {
                 return Some(mfa_serial.clone());
             }
-            if let Some(ref source_name) = profile.source_profile {
+        }
+
+        // Walk the source_profile ancestry from the chain root (first element,
+        // which is the deepest role profile after reversal) to find MFA in
+        // non-role ancestors that are not part of the chain itself.
+        if let Some(root) = chain.first() {
+            let mut current_source = root.source_profile.as_deref();
+            let mut visited = HashSet::new();
+            while let Some(source_name) = current_source {
+                if !visited.insert(source_name) {
+                    break; // cycle guard
+                }
                 if let Some(source_profile) = self.profiles.get(source_name) {
                     if let Some(ref mfa_serial) = source_profile.mfa_serial {
                         return Some(mfa_serial.clone());
                     }
+                    current_source = source_profile.source_profile.as_deref();
+                } else {
+                    break;
                 }
             }
         }
+
         None
     }
 
@@ -593,15 +613,25 @@ impl<'a> ProfileResolver<'a> {
                     message: "missing credential_process".to_string(),
                 })?;
 
-        // TRUST BOUNDARY: credential_process is executed via `sh -c` exactly as
+        // TRUST BOUNDARY: credential_process is executed via a shell exactly as
         // specified in the user's AWS config file (~/.aws/config). This matches
         // AWS CLI behavior. The config file is trusted user input — if an attacker
         // can modify it, they already have arbitrary code execution.
+        //
+        // On Unix, we use `sh -c`; on Windows, `cmd /c`.
         tracing::info!("Running credential_process for profile '{}'", profile.name);
 
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        #[cfg(windows)]
+        let mut cmd = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        cmd.arg("/c").arg(command);
+
+        #[cfg(not(windows))]
+        let mut cmd = tokio::process::Command::new("sh");
+        #[cfg(not(windows))]
+        cmd.arg("-c").arg(command);
+
+        let child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -639,6 +669,15 @@ impl<'a> ProfileResolver<'a> {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let creds: CredentialProcessOutput = serde_json::from_str(&stdout)?;
+
+        if creds.version != 1 {
+            return Err(AwswitError::CredentialProcessFailed {
+                message: format!(
+                    "credential_process returned unsupported Version {}. Only Version 1 is supported.",
+                    creds.version
+                ),
+            });
+        }
 
         let expiration = match creds.expiration {
             Some(ref e) => Some(
@@ -712,14 +751,16 @@ pub fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct CredentialProcessOutput {
-    #[serde(alias = "AccessKeyId")]
+    #[serde(default = "default_credential_process_version")]
+    version: u32,
     access_key_id: String,
-    #[serde(alias = "SecretAccessKey")]
     secret_access_key: String,
-    #[serde(alias = "SessionToken")]
     session_token: Option<String>,
-    #[serde(alias = "Expiration")]
     expiration: Option<String>,
+}
+
+fn default_credential_process_version() -> u32 {
+    1
 }
 
 #[cfg(test)]
@@ -886,6 +927,35 @@ mod tests {
     }
 
     #[test]
+    fn get_mfa_serial_from_grandparent_profile() {
+        // grandparent -> parent (user, has MFA) -> child (role)
+        // The chain for "child" is just [child], and child.source_profile = "parent".
+        // parent is a user profile with MFA, whose source_profile = "grandparent".
+        // grandparent has the MFA serial.
+        let mut profiles = HashMap::new();
+        let mut grandparent = make_user_profile("grandparent");
+        grandparent.mfa_serial = Some("arn:aws:iam::111:mfa/gp".to_string());
+        profiles.insert("grandparent".to_string(), grandparent);
+
+        // parent is a user profile that chains to grandparent
+        let mut parent = make_user_profile("parent");
+        parent.source_profile = Some("grandparent".to_string());
+        profiles.insert("parent".to_string(), parent);
+
+        // child is a role profile that chains to parent
+        profiles.insert(
+            "child".to_string(),
+            make_role_profile("child", "arn:aws:iam::111:role/C", "parent"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let chain = resolver.get_role_chain("child").unwrap();
+        let mfa = resolver.get_mfa_serial_for_chain(&chain);
+        assert_eq!(mfa, Some("arn:aws:iam::111:mfa/gp".to_string()));
+    }
+
+    #[test]
     fn validate_mfa_token_rejects_spaces() {
         assert!(validate_mfa_token("12 345").is_err());
     }
@@ -913,6 +983,29 @@ mod tests {
         assert_eq!(output.access_key_id, "AKIA");
         assert!(output.session_token.is_none());
         assert!(output.expiration.is_none());
+    }
+
+    #[test]
+    fn credential_process_output_parses_with_version_1() {
+        let json = r#"{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#;
+        let output: super::CredentialProcessOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.version, 1);
+        assert_eq!(output.access_key_id, "AKIA");
+    }
+
+    #[test]
+    fn credential_process_output_defaults_version_to_1() {
+        let json = r#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#;
+        let output: super::CredentialProcessOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.version, 1);
+    }
+
+    #[test]
+    fn credential_process_output_parses_version_2() {
+        // Version 2 should parse but be rejected at validation time, not parse time
+        let json = r#"{"Version":2,"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#;
+        let output: super::CredentialProcessOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.version, 2);
     }
 
     #[test]

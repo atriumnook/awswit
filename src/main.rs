@@ -77,7 +77,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle kill refresher
     if args.kill_refresher {
-        return handle_kill_refresher(&args).await;
+        return handle_kill_refresher(&args);
     }
 
     // Handle --role-arn early - no need to load profiles if just assuming a direct role ARN
@@ -135,6 +135,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     // Load history once and reuse
     let mut profile_history = history::ProfileHistory::load().unwrap_or_else(|e| {
         tracing::warn!("Failed to load profile history: {}", e);
+        eprintln!("Warning: Failed to load profile history: {}. Favorites and recent profiles may be missing.", e);
         history::ProfileHistory::default()
     });
 
@@ -198,17 +199,28 @@ async fn run(args: Args) -> Result<(), AwswitError> {
 
     // Handle auto-refresh
     if args.auto_refresh {
-        // Determine if the profile chain requires MFA
+        // Determine if the profile chain requires MFA by walking the full
+        // source_profile ancestry, not just one level.
         let requires_mfa = profiles
             .get(&target_profile_name)
             .map(|p| {
                 if p.requires_mfa() {
                     return true;
                 }
-                // Check source profile chain for MFA
-                if let Some(ref src) = p.source_profile {
-                    if let Some(src_p) = profiles.get(src) {
-                        return src_p.requires_mfa();
+                // Walk the full source_profile chain for MFA
+                let mut current_source = p.source_profile.as_deref();
+                let mut visited = std::collections::HashSet::new();
+                while let Some(src_name) = current_source {
+                    if !visited.insert(src_name) {
+                        break; // cycle guard
+                    }
+                    if let Some(src_p) = profiles.get(src_name) {
+                        if src_p.requires_mfa() {
+                            return true;
+                        }
+                        current_source = src_p.source_profile.as_deref();
+                    } else {
+                        break;
                     }
                 }
                 false
@@ -267,12 +279,12 @@ fn handle_unset(args: &Args) -> Result<(), AwswitError> {
     Ok(())
 }
 
-async fn handle_kill_refresher(args: &Args) -> Result<(), AwswitError> {
+fn handle_kill_refresher(args: &Args) -> Result<(), AwswitError> {
     if let Some(ref profile_name) = args.profile_name {
-        autorefresh::stop_auto_refresh(profile_name).await?;
+        autorefresh::stop_auto_refresh(profile_name)?;
         println!("Stopped auto-refresh for profile: {}", profile_name);
     } else {
-        autorefresh::stop_all_auto_refresh().await?;
+        autorefresh::stop_all_auto_refresh()?;
         println!("Stopped all auto-refresh processes");
     }
     Ok(())

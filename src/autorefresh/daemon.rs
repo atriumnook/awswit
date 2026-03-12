@@ -31,6 +31,11 @@ pub struct AutoRefreshProfile {
     pub version: u32,
     #[serde(default)]
     pub awswit_binary_version: Option<String>,
+    /// Path to the AWS credentials file to write to.
+    /// Captured at registration time so the daemon writes to the correct file
+    /// even when `AWS_SHARED_CREDENTIALS_FILE` is not set in the daemon's environment.
+    #[serde(default)]
+    pub credentials_file_path: Option<String>,
 }
 
 fn default_profile_version() -> u32 {
@@ -94,6 +99,10 @@ pub async fn start_auto_refresh(
         command_parts.push(role_duration.to_string());
     }
 
+    // Capture the credentials file path so the daemon writes to the correct location,
+    // even if AWS_SHARED_CREDENTIALS_FILE is not set in the daemon's environment.
+    let creds_path = credentials_file::get_aws_credentials_path()?;
+
     let auto_profile = AutoRefreshProfile {
         profile_name: auto_profile_name.clone(),
         awswit_command: command_parts,
@@ -103,17 +112,26 @@ pub async fn start_auto_refresh(
         region: credentials.region.clone(),
         version: default_profile_version(),
         awswit_binary_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        credentials_file_path: Some(creds_path.to_string_lossy().to_string()),
     };
 
     // Save auto-refresh profile metadata
     save_auto_refresh_profile(&auto_profile)?;
 
-    // Write credentials to credentials file with auto-refresh prefix (validated)
+    // Write credentials and spawn daemon off the async runtime to avoid
+    // blocking the tokio executor with file-lock backoff sleeps.
     let creds_path = credentials_file::get_aws_credentials_path()?;
-    credentials_file::write_credentials(&creds_path, &auto_profile_name, credentials)?;
-
-    // Spawn the autoawswit daemon if not already running
-    spawn_autoawswit_daemon()?;
+    let write_profile_name = auto_profile_name.clone();
+    let write_creds = credentials.clone();
+    tokio::task::spawn_blocking(move || {
+        credentials_file::write_credentials(&creds_path, &write_profile_name, &write_creds)?;
+        spawn_autoawswit_daemon()?;
+        Ok::<(), AwswitError>(())
+    })
+    .await
+    .map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Blocking task panicked: {}", e),
+    })??;
 
     eprintln!(
         "Started auto-refresh for '{}'. Credentials will be refreshed automatically.",
@@ -124,7 +142,7 @@ pub async fn start_auto_refresh(
 }
 
 /// Stop auto-refresh for a specific profile
-pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
+pub fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
     tracing::info!("Stopping auto-refresh for profile: {}", profile_name);
 
     let auto_profile_name = format!("autoawswit-{}", profile_name);
@@ -150,7 +168,7 @@ pub async fn stop_auto_refresh(profile_name: &str) -> Result<(), AwswitError> {
 }
 
 /// Stop all auto-refresh processes
-pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
+pub fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     tracing::info!("Stopping all auto-refresh processes");
 
     let profiles = list_auto_refresh_profiles()?;
@@ -169,7 +187,27 @@ pub async fn stop_all_auto_refresh() -> Result<(), AwswitError> {
     Ok(())
 }
 
+/// Sanitize a profile name to prevent path traversal attacks.
+/// Rejects names containing path separators or parent directory references.
+fn sanitize_profile_name(name: &str) -> Result<&str, AwswitError> {
+    if name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+        || name.is_empty()
+    {
+        return Err(AwswitError::ValidationError {
+            message: format!(
+                "Invalid profile name '{}': must not contain path separators, '..', or null bytes",
+                name
+            ),
+        });
+    }
+    Ok(name)
+}
+
 fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
+    let safe_name = sanitize_profile_name(&profile.profile_name)?;
     let dir = super::get_auto_refresh_dir()?;
     fs::create_dir_all(&dir)?;
 
@@ -180,7 +218,7 @@ fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitE
         fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let path = dir.join(format!("{}.json", profile.profile_name));
+    let path = dir.join(format!("{}.json", safe_name));
     let content = serde_json::to_string_pretty(profile)?;
 
     crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
@@ -189,7 +227,8 @@ fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitE
 }
 
 fn remove_auto_refresh_profile(profile_name: &str) -> Result<(), AwswitError> {
-    let path = super::get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
+    let safe_name = sanitize_profile_name(profile_name)?;
+    let path = super::get_auto_refresh_dir()?.join(format!("{}.json", safe_name));
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -495,7 +534,7 @@ fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
                                 unsafe { libc::kill(pid_i32, libc::SIGKILL) };
                                 // Reap the process to prevent zombie and PID reuse.
                                 // Use WNOHANG loop since we may not be the direct parent.
-                                reap_process(pid_i32);
+                                crate::utils::process::reap_process(pid_i32);
                                 break;
                             }
                             std::thread::sleep(poll_interval);
@@ -534,27 +573,6 @@ fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
     }
 
     Ok(())
-}
-
-/// Attempt to reap a process after SIGKILL to prevent zombies and PID reuse.
-/// Uses waitpid(WNOHANG) in a brief poll loop. If we are not the direct parent,
-/// waitpid will return ECHILD which is harmless — the init process will reap it.
-#[cfg(unix)]
-fn reap_process(pid: i32) {
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_millis(500);
-    loop {
-        let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
-        if ret == pid || ret == -1 {
-            // Reaped successfully, or ECHILD (not our child — init will reap)
-            break;
-        }
-        if start.elapsed() >= timeout {
-            tracing::debug!("waitpid for {} did not complete within {:?}", pid, timeout);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
 }
 
 /// Read PID from a PID file, returning None if missing or unparseable
@@ -681,6 +699,7 @@ mod tests {
             region: None,
             version: default_profile_version(),
             awswit_binary_version: Some("0.1.0".to_string()),
+            credentials_file_path: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         assert!(!json.contains("secret_access_key"));

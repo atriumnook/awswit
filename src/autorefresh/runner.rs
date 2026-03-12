@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -14,6 +14,17 @@ use tokio::time::sleep;
 use super::credentials_file;
 use super::daemon::AutoRefreshProfile;
 use crate::error::AwswitError;
+
+/// Get the credentials file path for a profile, using the stored path if available,
+/// otherwise falling back to the default.
+fn credentials_path_for_profile(profile: &AutoRefreshProfile) -> Result<PathBuf, AwswitError> {
+    if let Some(ref path) = profile.credentials_file_path {
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    credentials_file::get_aws_credentials_path()
+}
 
 /// Maximum age of expired credentials before we skip refresh entirely.
 const MAX_EXPIRED_HOURS: i64 = 1;
@@ -275,13 +286,38 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
                 );
             }
         }
-        // Remove expired credential sections in batch
+        // Remove expired credential sections, grouped by credentials file path
         if !confirmed_expired.is_empty() {
-            let creds_path = crate::utils::paths::aws_credentials_path()?;
-            if let Err(e) =
-                credentials_file::remove_credentials_batch(&creds_path, &confirmed_expired)
-            {
-                tracing::warn!("Failed to remove expired credential sections: {}", e);
+            // Group expired profiles by their credentials file path
+            let mut by_creds_path: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            for name in &confirmed_expired {
+                let path = if let Some(profile) = profiles.get(name) {
+                    credentials_path_for_profile(profile)
+                        .unwrap_or_else(|_| PathBuf::from(""))
+                } else {
+                    crate::utils::paths::aws_credentials_path()
+                        .unwrap_or_else(|_| PathBuf::from(""))
+                };
+                if !path.as_os_str().is_empty() {
+                    by_creds_path.entry(path).or_default().push(name.clone());
+                }
+            }
+            for (creds_path, names) in by_creds_path {
+                // Run blocking file I/O (includes file lock with sleep-based
+                // backoff) off the async runtime.
+                let result = tokio::task::spawn_blocking(move || {
+                    credentials_file::remove_credentials_batch(&creds_path, &names)
+                })
+                .await;
+                match result {
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to remove expired credential sections: {}", e);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Blocking task panicked during credential cleanup: {}", e);
+                    }
+                    Ok(Ok(())) => {}
+                }
             }
         }
     }
@@ -526,15 +562,25 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    update_credentials_file(&profile.profile_name, &stdout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let creds_path = credentials_path_for_profile(profile)?;
+    let profile_name = profile.profile_name.clone();
+    // Run blocking file I/O (includes file lock with sleep-based backoff)
+    // off the async runtime to avoid blocking the tokio executor.
+    tokio::task::spawn_blocking(move || {
+        update_credentials_file(&profile_name, &stdout, &creds_path)
+    })
+    .await
+    .map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Blocking task panicked: {}", e),
+    })??;
 
     tracing::info!("Successfully refreshed {}", profile.profile_name);
 
     Ok(())
 }
 
-fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), AwswitError> {
+fn update_credentials_file(profile_name: &str, output: &str, creds_path: &Path) -> Result<(), AwswitError> {
     let mut creds: HashMap<String, String> = HashMap::new();
 
     for line in output.lines() {
@@ -620,9 +666,8 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
     // stale but self-correcting: next refresh cycle sees the old (earlier)
     // expiration, triggers another refresh, which is idempotent since
     // atomic_write_restricted overwrites the file completely.
-    let creds_path = crate::utils::paths::aws_credentials_path()?;
     credentials_file::write_credentials_from_output(
-        &creds_path,
+        creds_path,
         profile_name,
         access_key,
         secret_key,
@@ -658,6 +703,7 @@ mod tests {
             region: None,
             version: 1,
             awswit_binary_version: None,
+            credentials_file_path: None,
         }
     }
 
@@ -744,6 +790,7 @@ mod tests {
             region: None,
             version: 1,
             awswit_binary_version: None,
+            credentials_file_path: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(super::refresh_profile(&profile));
@@ -763,6 +810,7 @@ mod tests {
             region: None,
             version: 1,
             awswit_binary_version: None,
+            credentials_file_path: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(super::refresh_profile(&profile));
@@ -782,6 +830,7 @@ mod tests {
             region: None,
             version: 1,
             awswit_binary_version: None,
+            credentials_file_path: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(super::refresh_profile(&profile));
