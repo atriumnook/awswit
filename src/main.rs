@@ -39,7 +39,9 @@ async fn main() {
     // Run the main application
     if let Err(e) = run(args).await {
         if matches!(e, AwswitError::UserCancelled) {
-            std::process::exit(0);
+            // Exit code 130 follows the SIGINT convention (128 + signal number 2).
+            // This allows scripts to distinguish cancellation from success (0) or error (1).
+            std::process::exit(130);
         }
         eprintln!("{}", e);
         std::process::exit(1);

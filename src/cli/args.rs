@@ -133,21 +133,63 @@ impl Args {
         })
     }
 
-    /// Get session name with fallback
+    /// Get session name with fallback.
+    /// The returned name is sanitized to meet AWS STS constraints (2-64 chars,
+    /// `[a-zA-Z0-9_=,.@-]`).
     pub fn get_session_name(&self, profile_name: &str) -> String {
-        self.session_name.clone().unwrap_or_else(|| {
+        let raw = self.session_name.clone().unwrap_or_else(|| {
             if profile_name.len() < 2 {
                 format!("_{}_", profile_name)
             } else {
                 profile_name.to_string()
             }
-        })
+        });
+        sanitize_session_name(&raw)
     }
 
     /// Check if interactive mode is disabled
     pub fn interactive_disabled(&self) -> bool {
         self.no_interactive
     }
+}
+
+/// Sanitize a session name to meet AWS STS RoleSessionName constraints:
+/// - 2-64 characters
+/// - Only `[a-zA-Z0-9_=,.@-]` allowed
+///   Invalid characters are replaced with `_`, and the result is truncated to 64 chars.
+///   If the result is shorter than 2 chars, it is padded with `_`.
+pub fn sanitize_session_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '=' | ',' | '.' | '@' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+
+    // Ensure minimum length of 2
+    match sanitized.len() {
+        0 => "__".to_string(),
+        1 => format!("{}_", sanitized),
+        _ => sanitized,
+    }
+}
+
+/// Validate that a role duration is within AWS STS limits (900-43200 seconds).
+pub fn validate_role_duration(duration: i32) -> Result<(), crate::error::AwswitError> {
+    if !(900..=43200).contains(&duration) {
+        return Err(crate::error::AwswitError::ValidationError {
+            message: format!(
+                "Role duration {} is out of range. Must be between 900 and 43200 seconds (15 minutes to 12 hours).",
+                duration
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for Args {
@@ -228,6 +270,46 @@ mod tests {
     fn test_get_session_name_short_profile() {
         let args = Args::default();
         assert_eq!(args.get_session_name("x"), "_x_");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_valid() {
+        assert_eq!(super::sanitize_session_name("my-session"), "my-session");
+        assert_eq!(super::sanitize_session_name("test_123"), "test_123");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_invalid_chars() {
+        assert_eq!(super::sanitize_session_name("hello world"), "hello_world");
+        assert_eq!(super::sanitize_session_name("a/b:c"), "a_b_c");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_short() {
+        assert_eq!(super::sanitize_session_name(""), "__");
+        assert_eq!(super::sanitize_session_name("x"), "x_");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_long() {
+        let long = "a".repeat(100);
+        let result = super::sanitize_session_name(&long);
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn test_validate_role_duration_valid() {
+        assert!(super::validate_role_duration(900).is_ok());
+        assert!(super::validate_role_duration(3600).is_ok());
+        assert!(super::validate_role_duration(43200).is_ok());
+    }
+
+    #[test]
+    fn test_validate_role_duration_invalid() {
+        assert!(super::validate_role_duration(899).is_err());
+        assert!(super::validate_role_duration(43201).is_err());
+        assert!(super::validate_role_duration(0).is_err());
+        assert!(super::validate_role_duration(-1).is_err());
     }
 
     #[test]

@@ -39,7 +39,8 @@ fn credential_bindings(
         ),
         ("AWS_SESSION_TOKEN", creds.session_token.clone()),
         // AWS_SECURITY_TOKEN is the legacy name for AWS_SESSION_TOKEN.
-        // Some older AWS SDKs and tools (e.g., boto2) only read this variable.
+        // Some older AWS SDKs and tools (e.g., boto2, legacy Java SDK) only read
+        // this variable. This can be removed once boto2 usage is negligible.
         ("AWS_SECURITY_TOKEN", creds.session_token.clone()),
         ("AWS_REGION", creds.region.clone()),
         ("AWS_DEFAULT_REGION", creds.region.clone()),
@@ -177,6 +178,9 @@ impl ShellExporter {
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
+        // Version header for shell wrapper compatibility checking
+        output.push_str(&format!("AWSWIT_VERSION={}\n", env!("CARGO_PKG_VERSION")));
+
         for (name, value) in &bindings {
             match value {
                 Some(val) => {
@@ -211,7 +215,7 @@ impl ShellExporter {
 
     /// Generate unset output for shell wrapper
     pub fn generate_unset_output(&self) -> String {
-        "AWSWIT_UNSET=1\n".to_string()
+        "AWSWIT_VERSION=".to_string() + env!("CARGO_PKG_VERSION") + "\nAWSWIT_UNSET=1\n"
     }
 
     /// Format a set/export command for the detected shell
@@ -430,5 +434,78 @@ mod tests {
         let output = exporter.generate_export_commands(&creds, "test");
         // Should skip the injected value, not include it
         assert!(!output.contains("injected"));
+    }
+
+    #[test]
+    fn test_shell_output_handles_utf8_profile_name() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output(&creds, "test-\u{65E5}\u{672C}\u{8A9E}");
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("AWSWIT_PROFILE=test-\u{65E5}\u{672C}\u{8A9E}"));
+    }
+
+    #[test]
+    fn test_shell_output_handles_long_session_token() {
+        let long_token = "A".repeat(1000);
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: Some(long_token.clone()),
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output(&creds, "test");
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains(&format!("AWS_SESSION_TOKEN={}", long_token)));
+    }
+
+    #[test]
+    fn test_shell_output_rejects_carriage_return_in_profile() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output(&creds, "test\rinjected");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shell_output_version_header() {
+        let creds = Credentials {
+            access_key_id: "AKIATEST".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+            expiration: None,
+            region: None,
+        };
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_shell_output(&creds, "test").unwrap();
+        assert!(
+            output.starts_with("AWSWIT_VERSION="),
+            "Shell output should start with version header, got: {}",
+            &output[..output.find('\n').unwrap_or(50).min(50)]
+        );
+    }
+
+    #[test]
+    fn test_unset_output_includes_version() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_unset_output();
+        assert!(output.contains("AWSWIT_VERSION="));
+        assert!(output.contains("AWSWIT_UNSET=1"));
     }
 }

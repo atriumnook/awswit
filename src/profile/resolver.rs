@@ -80,6 +80,29 @@ impl<'a> ProfileResolver<'a> {
         self.profile_to_credentials(target_profile)
     }
 
+    /// Resolve role duration from args → profile → config, with validation.
+    fn resolve_role_duration(
+        &self,
+        args: &Args,
+        profile: Option<&Profile>,
+    ) -> Result<Option<i32>, AwswitError> {
+        let duration = args
+            .role_duration
+            .or_else(|| profile.and_then(|p| p.duration_seconds))
+            .or_else(|| {
+                let rd = self.config.role_duration;
+                if rd > 0 {
+                    Some(rd)
+                } else {
+                    None
+                }
+            });
+        if let Some(d) = duration {
+            crate::cli::validate_role_duration(d)?;
+        }
+        Ok(duration)
+    }
+
     /// Assume role directly from CLI arguments
     async fn assume_role_from_cli(
         &self,
@@ -113,14 +136,7 @@ impl<'a> ProfileResolver<'a> {
         };
 
         let session_name = args.get_session_name("awswit-cli-role");
-        let role_duration = args.role_duration.or_else(|| {
-            let rd = self.config.role_duration;
-            if rd > 0 {
-                Some(rd)
-            } else {
-                None
-            }
-        });
+        let role_duration = self.resolve_role_duration(args, None)?;
         let region = args.region.clone().or_else(|| self.config.region.clone());
 
         sts_client
@@ -164,18 +180,8 @@ impl<'a> ProfileResolver<'a> {
             .get_source_credentials(&chain, args, sts_client, cache_manager)
             .await?;
 
-        // Determine role duration
-        let role_duration = args
-            .role_duration
-            .or(target_profile.duration_seconds)
-            .or_else(|| {
-                let rd = self.config.role_duration;
-                if rd > 0 {
-                    Some(rd)
-                } else {
-                    None
-                }
-            });
+        // Determine role duration and validate against AWS STS limits
+        let role_duration = self.resolve_role_duration(args, Some(target_profile))?;
 
         // Check for MFA requirement
         let mfa_serial = self.get_mfa_serial_for_chain(&chain);
@@ -230,12 +236,14 @@ impl<'a> ProfileResolver<'a> {
 
             let (session_name, region, external_id, hop_duration) = if is_final_hop {
                 // Final hop: apply CLI args overrides
-                let session_name = args
-                    .session_name
-                    .clone()
-                    .or(role_profile.role_session_name.clone())
-                    .or(self.config.role_session_name.clone())
-                    .unwrap_or_else(|| profile_name.to_string());
+                let session_name = crate::cli::sanitize_session_name(
+                    &args
+                        .session_name
+                        .clone()
+                        .or(role_profile.role_session_name.clone())
+                        .or(self.config.role_session_name.clone())
+                        .unwrap_or_else(|| profile_name.to_string()),
+                );
                 let region = args
                     .region
                     .clone()
@@ -248,10 +256,12 @@ impl<'a> ProfileResolver<'a> {
                 (session_name, region, external_id, role_duration)
             } else {
                 // Intermediate hop: use profile settings only
-                let session_name = role_profile
-                    .role_session_name
-                    .clone()
-                    .unwrap_or_else(|| role_profile.name.clone());
+                let session_name = crate::cli::sanitize_session_name(
+                    &role_profile
+                        .role_session_name
+                        .clone()
+                        .unwrap_or_else(|| role_profile.name.clone()),
+                );
                 let region = role_profile.region.clone();
                 let external_id = role_profile.external_id.clone();
                 let hop_duration = role_profile.duration_seconds;
@@ -488,12 +498,14 @@ impl<'a> ProfileResolver<'a> {
                 message: "missing role_arn".to_string(),
             })?;
 
-        let session_name = args
-            .session_name
-            .clone()
-            .or(profile.role_session_name.clone())
-            .or(self.config.role_session_name.clone())
-            .unwrap_or_else(|| profile.name.clone());
+        let session_name = crate::cli::sanitize_session_name(
+            &args
+                .session_name
+                .clone()
+                .or(profile.role_session_name.clone())
+                .or(self.config.role_session_name.clone())
+                .unwrap_or_else(|| profile.name.clone()),
+        );
 
         let region = args
             .region
@@ -625,23 +637,7 @@ impl<'a> ProfileResolver<'a> {
                 #[cfg(unix)]
                 {
                     let pid = child_id as i32;
-                    // Try graceful termination first
-                    unsafe { libc::kill(pid, libc::SIGTERM) };
-
-                    // Give the process 1 second to exit gracefully
-                    let grace = std::time::Duration::from_secs(1);
-                    let grace_start = std::time::Instant::now();
-                    loop {
-                        if unsafe { libc::kill(pid, 0) } != 0 {
-                            break; // Process exited
-                        }
-                        if grace_start.elapsed() >= grace {
-                            // Force kill and reap
-                            unsafe { libc::kill(pid, libc::SIGKILL) };
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
+                    crate::utils::process::graceful_kill(pid, std::time::Duration::from_secs(1));
                 }
                 #[cfg(not(unix))]
                 {
@@ -717,7 +713,10 @@ impl<'a> ProfileResolver<'a> {
     }
 }
 
-/// Validate MFA token: must be 6-8 ASCII digits
+/// Validate MFA token: must be 6-8 ASCII digits.
+///
+/// Standard TOTP tokens are 6 digits (RFC 6238). AWS also accepts 8-digit
+/// tokens from certain hardware MFA devices (e.g., Gemalto tokens).
 pub fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
     if token.len() < 6 || token.len() > 8 {
         return Err(AwswitError::InvalidMfaToken {
@@ -729,7 +728,7 @@ pub fn validate_mfa_token(token: &str) -> Result<(), AwswitError> {
     }
     if !token.chars().all(|c| c.is_ascii_digit()) {
         return Err(AwswitError::InvalidMfaToken {
-            message: "MFA token must contain only digits".to_string(),
+            message: "MFA token must contain only ASCII digits (0-9)".to_string(),
         });
     }
     Ok(())
@@ -921,5 +920,62 @@ mod tests {
     fn validate_mfa_token_rejects_fullwidth_digits() {
         // Full-width digits (U+FF10-FF19) should be rejected
         assert!(validate_mfa_token("\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}").is_err());
+    }
+
+    #[test]
+    fn credential_process_output_parses_full() {
+        let json = r#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret","SessionToken":"tok","Expiration":"2099-01-01T00:00:00Z"}"#;
+        let output: super::CredentialProcessOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.access_key_id, "AKIA");
+        assert_eq!(output.secret_access_key, "secret");
+        assert_eq!(output.session_token, Some("tok".to_string()));
+        assert_eq!(output.expiration, Some("2099-01-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn credential_process_output_parses_minimal() {
+        let json = r#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#;
+        let output: super::CredentialProcessOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.access_key_id, "AKIA");
+        assert!(output.session_token.is_none());
+        assert!(output.expiration.is_none());
+    }
+
+    #[test]
+    fn credential_process_output_rejects_missing_access_key() {
+        let json = r#"{"SecretAccessKey":"secret"}"#;
+        let result = serde_json::from_str::<super::CredentialProcessOutput>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn credential_process_output_rejects_invalid_json() {
+        let result = serde_json::from_str::<super::CredentialProcessOutput>("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_mfa_token_accepts_6_digits() {
+        assert!(validate_mfa_token("123456").is_ok());
+    }
+
+    #[test]
+    fn validate_mfa_token_accepts_8_digits() {
+        assert!(validate_mfa_token("12345678").is_ok());
+    }
+
+    #[test]
+    fn validate_mfa_token_rejects_5_digits() {
+        assert!(validate_mfa_token("12345").is_err());
+    }
+
+    #[test]
+    fn validate_mfa_token_rejects_9_digits() {
+        assert!(validate_mfa_token("123456789").is_err());
+    }
+
+    #[test]
+    fn validate_mfa_token_rejects_letters() {
+        assert!(validate_mfa_token("abc456").is_err());
     }
 }

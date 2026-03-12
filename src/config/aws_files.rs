@@ -90,6 +90,29 @@ impl AwsFiles {
             return Ok(HashMap::new());
         }
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = fs::metadata(&path) {
+                let mode = meta.mode() & 0o777;
+                if mode & 0o002 != 0 {
+                    tracing::warn!(
+                        "AWS credentials file {} is world-writable (mode {:o}). This is a security risk.",
+                        path,
+                        mode
+                    );
+                }
+                if mode & 0o044 != 0 {
+                    tracing::warn!(
+                        "AWS credentials file {} is readable by group/others (mode {:o}). \
+                         Recommended permissions are 0600.",
+                        path,
+                        mode
+                    );
+                }
+            }
+        }
+
         let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
             message: format!("Failed to read {}: {}", path, e),
         })?;
