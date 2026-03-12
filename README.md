@@ -54,11 +54,10 @@ sudo cp target/release/awswit /usr/local/bin/
 
 ### Shell Setup
 
-Add to your `~/.bashrc` or `~/.zshrc`:
+Initialize shell integration with:
 
 ```bash
-# awswit shell integration
-alias awswit='source <(awswit --shell-init bash)'
+eval "$(awswit init bash)"
 ```
 
 Or use the provided shell wrapper:
@@ -118,6 +117,42 @@ awswit -l
 awswit -l more
 ```
 
+### Run Commands with Assumed Credentials
+
+```bash
+# Run a command with the assumed role's credentials
+awswit exec my-profile -- aws s3 ls
+
+# With forced refresh
+awswit exec my-profile -r -- terraform plan
+```
+
+### External fzf Picker
+
+```bash
+# Use fzf instead of the built-in picker
+awswit --fzf
+
+# Or set via environment variable
+export AWSWIT_USE_FZF=1
+awswit
+
+# Customize fzf options
+export AWSWIT_FZF_OPTS="--height 80% --border"
+```
+
+### Shell Completions
+
+```bash
+# Generate shell completions for your shell
+awswit completions bash > /etc/bash_completion.d/awswit
+awswit completions zsh > ~/.zfunc/_awswit
+awswit completions fish > ~/.config/fish/completions/awswit.fish
+```
+
+`awswit completions` generates static shell completions. It is separate from
+`--refresh-autocomplete`, which refreshes awswit's dynamic profile-name cache.
+
 ### Auto-refresh
 
 ```bash
@@ -147,18 +182,21 @@ awswit uses the standard AWS configuration files:
 
 ### awswit-specific Configuration
 
-Create `~/.awswit/config.yaml`:
+Create `~/.awswit/config.toml`:
 
-```yaml
+```toml
 # Enable fuzzy matching for profile names
-fuzzy-match: true
+fuzzy-match = true
 
 # Enable colored output
-colors: true
+colors = true
 
 # Default session duration (seconds)
-role-duration: 3600
+role-duration = 3600
 ```
+
+> **Note:** If you have an existing `config.yaml`, it will be loaded automatically with a deprecation warning:
+> `Warning: ~/.awswit/config.yaml is deprecated. Rename to config.toml.`
 
 ## AWS Profile Examples
 

@@ -55,18 +55,40 @@ pub fn get_aws_credentials_path() -> Result<PathBuf, AwswitError> {
 /// Lock timeout for credential file operations.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Acquire an exclusive lock on the credentials file with timeout.
-/// Returns the lock file handle (lock released on Drop).
-pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<crate::utils::fs::FileLockGuard, AwswitError> {
+/// Open the credentials lock file with restrictive permissions.
+pub fn open_aws_credentials_lock(
+    creds_path: &Path,
+) -> Result<fd_lock::RwLock<fs::File>, AwswitError> {
     let mut lock_path = creds_path.as_os_str().to_owned();
     lock_path.push(".lock");
     let lock_path = PathBuf::from(lock_path);
 
-    crate::utils::fs::lock_file_with_permissions(&lock_path, LOCK_TIMEOUT).map_err(|e| {
+    crate::utils::fs::lock_file_with_permissions(&lock_path).map_err(|e| {
         AwswitError::AutoRefreshError {
-            message: format!("Failed to acquire credentials lock: {}", e),
+            message: format!("Failed to open credentials lock: {}", e),
         }
     })
+}
+
+fn with_aws_credentials_lock<T, F>(creds_path: &Path, operation: F) -> Result<T, AwswitError>
+where
+    F: FnOnce() -> Result<T, AwswitError>,
+{
+    let mut lock_file = open_aws_credentials_lock(creds_path)?;
+    let mut result = None;
+    crate::utils::fs::lock_exclusive_with_timeout(&mut lock_file, LOCK_TIMEOUT, |_lock_guard| {
+        result = Some(operation());
+    })
+    .map_err(|e| AwswitError::AutoRefreshError {
+        message: format!("Failed to acquire credentials lock: {}", e),
+    })?;
+
+    match result {
+        Some(result) => result,
+        None => Err(AwswitError::AutoRefreshError {
+            message: "Credentials lock callback did not execute".to_string(),
+        }),
+    }
 }
 
 /// Remove an INI section from credential file content.
@@ -139,42 +161,42 @@ pub fn write_credentials_from_output(
         validate_credential_value("awswit_expiration", exp)?;
     }
 
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
+    with_aws_credentials_lock(creds_path, || {
+        let content = match fs::read_to_string(creds_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(AwswitError::AutoRefreshError {
+                    message: format!(
+                        "Failed to read credentials file {}: {}",
+                        creds_path.display(),
+                        e
+                    ),
+                });
+            }
+        };
+        let mut new_content = remove_credentials_section(&content, profile_name);
 
-    let content = match fs::read_to_string(creds_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(AwswitError::AutoRefreshError {
-                message: format!(
-                    "Failed to read credentials file {}: {}",
-                    creds_path.display(),
-                    e
-                ),
-            });
+        let mut new_section = format!(
+            "[{}]\n\
+            aws_access_key_id = {}\n\
+            aws_secret_access_key = {}\n",
+            profile_name, access_key, secret_key,
+        );
+        if let Some(token) = session_token {
+            new_section.push_str(&format!("aws_session_token = {}\n", token));
         }
-    };
-    let mut new_content = remove_credentials_section(&content, profile_name);
+        new_section.push_str("autoawswit = true\n");
+        if let Some(exp) = expiration {
+            new_section.push_str(&format!("awswit_expiration = {}\n", exp));
+        }
 
-    let mut new_section = format!(
-        "[{}]\n\
-        aws_access_key_id = {}\n\
-        aws_secret_access_key = {}\n",
-        profile_name, access_key, secret_key,
-    );
-    if let Some(token) = session_token {
-        new_section.push_str(&format!("aws_session_token = {}\n", token));
-    }
-    new_section.push_str("autoawswit = true\n");
-    if let Some(exp) = expiration {
-        new_section.push_str(&format!("awswit_expiration = {}\n", exp));
-    }
+        new_content.push_str(&new_section);
 
-    new_content.push_str(&new_section);
+        crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
 
-    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Remove multiple profile sections from the credentials file in a single lock-read-write cycle.
@@ -186,35 +208,35 @@ pub fn remove_credentials_batch(
         return Ok(());
     }
 
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
+    with_aws_credentials_lock(creds_path, || {
+        let mut content = match fs::read_to_string(creds_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        for name in profile_names {
+            content = remove_credentials_section(&content, name);
+        }
 
-    let mut content = match fs::read_to_string(creds_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    for name in profile_names {
-        content = remove_credentials_section(&content, name);
-    }
-
-    crate::utils::fs::atomic_write_restricted(creds_path, content.as_bytes())?;
-    Ok(())
+        crate::utils::fs::atomic_write_restricted(creds_path, content.as_bytes())?;
+        Ok(())
+    })
 }
 
 /// Remove a profile section from the credentials file.
 pub fn remove_credentials(creds_path: &Path, profile_name: &str) -> Result<(), AwswitError> {
-    let _lock_file = lock_aws_credentials_file(creds_path)?;
+    with_aws_credentials_lock(creds_path, || {
+        let content = match fs::read_to_string(creds_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let new_content = remove_credentials_section(&content, profile_name);
 
-    let content = match fs::read_to_string(creds_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let new_content = remove_credentials_section(&content, profile_name);
+        crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
 
-    crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]

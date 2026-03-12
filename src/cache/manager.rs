@@ -205,6 +205,27 @@ mod tests {
     }
 
     #[test]
+    fn test_credential_store_trait_roundtrip() {
+        let (manager, _temp) = create_test_manager();
+        let store: &dyn CredentialStore = &manager;
+
+        let creds = Credentials {
+            access_key_id: "AKIATRAIT".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: Some("token".to_string()),
+            expiration: Some(Utc::now() + Duration::hours(1)),
+            region: Some("us-west-2".to_string()),
+        };
+
+        store.set("trait-key", &creds).unwrap();
+        let retrieved = store.get("trait-key").unwrap().unwrap();
+        assert_eq!(retrieved.access_key_id, "AKIATRAIT");
+
+        store.remove("trait-key").unwrap();
+        assert!(store.get("trait-key").unwrap().is_none());
+    }
+
+    #[test]
     fn test_corrupt_json_returns_cache_miss() {
         let (manager, _temp) = create_test_manager();
 
