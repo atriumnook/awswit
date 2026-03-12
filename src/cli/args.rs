@@ -95,6 +95,10 @@ pub struct Args {
     /// Disable interactive mode (use when piping or scripting)
     #[arg(long = "no-interactive", short = 'n')]
     pub no_interactive: bool,
+
+    /// Use external fzf for profile selection
+    #[arg(long = "fzf")]
+    pub use_fzf: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -124,6 +128,27 @@ pub enum Command {
     Completions {
         /// Shell type
         shell: clap_complete::Shell,
+    },
+
+    /// Run a command with assumed role credentials
+    ///
+    /// Usage:
+    ///   awswit exec <profile> -- <command> [args...]
+    Exec {
+        /// Profile to assume
+        profile: String,
+
+        /// Force refresh credentials
+        #[arg(short = 'r', long = "refresh")]
+        force_refresh: bool,
+
+        /// AWS region
+        #[arg(long = "region")]
+        region: Option<String>,
+
+        /// Command and arguments to execute
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 }
 
@@ -245,6 +270,7 @@ impl std::fmt::Debug for Args {
             .field("info", &self.info)
             .field("debug", &self.debug)
             .field("no_interactive", &self.no_interactive)
+            .field("use_fzf", &self.use_fzf)
             .finish()
     }
 }

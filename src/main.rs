@@ -112,22 +112,31 @@ async fn run(args: Args) -> Result<i32, AwswitError> {
     }
 
     // Determine target profile
+    let use_fzf = ctx.args.use_fzf
+        || std::env::var("AWSWIT_USE_FZF")
+            .map(|v| tui::fzf::is_truthy(&v))
+            .unwrap_or(false);
+
     let target_profile_name = if ctx.args.profile_name.is_none()
         && ctx.args.role_arn.is_none()
         && !ctx.args.interactive_disabled()
         && std::io::stdout().is_terminal()
     {
-        let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
+        if use_fzf {
+            tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history)?
+        } else {
+            let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
 
-        match picker.run() {
-            Ok(tui::picker::PickerResult::Selected(name)) => name,
-            Ok(tui::picker::PickerResult::Cancelled) => {
-                return Err(AwswitError::UserCancelled);
-            }
-            Err(e) => {
-                return Err(AwswitError::ShellError {
-                    message: format!("Picker error: {}", e),
-                });
+            match picker.run() {
+                Ok(tui::picker::PickerResult::Selected(name)) => name,
+                Ok(tui::picker::PickerResult::Cancelled) => {
+                    return Err(AwswitError::UserCancelled);
+                }
+                Err(e) => {
+                    return Err(AwswitError::ShellError {
+                        message: format!("Picker error: {}", e),
+                    });
+                }
             }
         }
     } else {
@@ -394,14 +403,57 @@ fn handle_completions(shell: clap_complete::Shell) -> Result<(), AwswitError> {
 }
 
 async fn handle_exec(
-    _profile: &str,
-    _force_refresh: bool,
-    _region: Option<String>,
-    _command: &[String],
+    profile: &str,
+    force_refresh: bool,
+    region: Option<String>,
+    command: &[String],
 ) -> Result<i32, AwswitError> {
-    Err(AwswitError::ShellError {
-        message: "exec subcommand is not yet implemented".to_string(),
-    })
+    let args = Args {
+        profile_name: Some(profile.to_string()),
+        force_refresh,
+        region: region.clone(),
+        ..Default::default()
+    };
+    let ctx = AppContext::build(args)?;
+    let resolver = ProfileResolver::new(&ctx.profiles, &ctx.config);
+    let sts_client = StsClient::new().await;
+
+    let credentials = resolver
+        .resolve_credentials(profile, &ctx.args, &sts_client, &ctx.cache)
+        .await?;
+
+    let (program, cmd_args) = command
+        .split_first()
+        .ok_or_else(|| AwswitError::ShellError {
+            message: "No command specified".to_string(),
+        })?;
+
+    let status = std::process::Command::new(program)
+        .args(cmd_args)
+        .env("AWS_ACCESS_KEY_ID", &credentials.access_key_id)
+        .env("AWS_SECRET_ACCESS_KEY", &credentials.secret_access_key)
+        .env(
+            "AWS_SESSION_TOKEN",
+            credentials.session_token.as_deref().unwrap_or(""),
+        )
+        .env(
+            "AWS_DEFAULT_REGION",
+            credentials
+                .region
+                .as_deref()
+                .or(region.as_deref())
+                .unwrap_or(""),
+        )
+        .env("AWSWIT_PROFILE", profile)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| AwswitError::ShellError {
+            message: format!("Failed to execute command '{}': {}", program, e),
+        })?;
+
+    Ok(status.code().unwrap_or(1))
 }
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {
