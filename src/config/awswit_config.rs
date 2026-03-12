@@ -241,4 +241,26 @@ mod tests {
         let mut config = AwswitConfig::default();
         assert!(config.set_value("session-token-duration", "abc").is_err());
     }
+
+    #[test]
+    fn test_unknown_yaml_keys_ignored_on_load() {
+        // Existing config files may contain unknown keys from plugins or future versions.
+        // Verify they are silently ignored during deserialization.
+        let yaml = "colors: true\nfuzzy-match: false\nunknown-plugin-key: some-value\n";
+        let config: AwswitConfig = serde_yml::from_str(yaml).unwrap();
+        assert!(config.colors);
+        assert!(!config.fuzzy_match);
+    }
+
+    #[test]
+    fn test_set_unknown_key_returns_error() {
+        let mut config = AwswitConfig::default();
+        assert!(config.set_value("nonexistent-key", "value").is_err());
+    }
+
+    #[test]
+    fn test_reset_unknown_key_returns_error() {
+        let mut config = AwswitConfig::default();
+        assert!(config.reset_value("nonexistent-key").is_err());
+    }
 }

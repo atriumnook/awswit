@@ -253,7 +253,10 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
                             false // no expiration means it was updated
                         }
                     }
-                    Err(_) => true, // unparseable JSON, remove
+                    Err(e) => {
+                        tracing::warn!("Corrupt profile JSON for '{}': {}", name, e);
+                        true // unparseable JSON, remove
+                    }
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => true, // read error, attempt removal

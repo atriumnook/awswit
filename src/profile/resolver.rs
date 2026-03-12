@@ -326,10 +326,7 @@ impl<'a> ProfileResolver<'a> {
     }
 
     /// Get source credentials for a role chain
-    async fn get_source_credentials(
-        &self,
-        chain: &[&Profile],
-    ) -> Result<Credentials, AwswitError> {
+    async fn get_source_credentials(&self, chain: &[&Profile]) -> Result<Credentials, AwswitError> {
         // Get the first profile in the chain (source)
         let source_profile = chain.first().ok_or_else(|| AwswitError::ValidationError {
             message: "Empty role chain".to_string(),
@@ -612,18 +609,19 @@ impl<'a> ProfileResolver<'a> {
                 message: e.to_string(),
             })?;
 
-        let child_id = child.id();
         let timeout_duration = std::time::Duration::from_secs(30);
-        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
-            Ok(result) => result.map_err(|e| AwswitError::CredentialProcessFailed {
-                message: format!("Failed to wait on credential_process: {}", e),
-            })?,
-            Err(_) => {
-                // Timed out — kill the child process
-                #[cfg(unix)]
-                if let Some(pid) = child_id {
-                    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                }
+        let wait_future = child.wait_with_output();
+        tokio::pin!(wait_future);
+
+        let output = tokio::select! {
+            result = &mut wait_future => {
+                result.map_err(|e| AwswitError::CredentialProcessFailed {
+                    message: format!("Failed to wait on credential_process: {}", e),
+                })?
+            }
+            _ = tokio::time::sleep(timeout_duration) => {
+                // Timed out — wait_future (owning the child) is dropped here,
+                // which kills the child process via tokio::process::Child's Drop impl.
                 return Err(AwswitError::CredentialProcessFailed {
                     message: "credential_process timed out after 30 seconds".to_string(),
                 });

@@ -292,8 +292,7 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
                             if flags < 0 {
                                 return Err(std::io::Error::last_os_error());
                             }
-                            if libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                            {
+                            if libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                                 return Err(std::io::Error::last_os_error());
                             }
                             Ok(())
