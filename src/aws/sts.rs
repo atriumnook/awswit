@@ -1,9 +1,11 @@
 use std::time::Duration;
 
+use async_trait::async_trait;
 use aws_sdk_sts::Client;
 use chrono::{DateTime, Utc};
 use tokio::time::timeout;
 
+use crate::aws::traits::StsOperations;
 use crate::aws::Credentials;
 use crate::error::AwswitError;
 
@@ -59,10 +61,12 @@ impl StsClient {
         let config = config_builder.load().await;
         Ok(Client::new(&config))
     }
+}
 
-    /// Assume a role
+#[async_trait]
+impl StsOperations for StsClient {
     #[allow(clippy::too_many_arguments)]
-    pub async fn assume_role(
+    async fn assume_role(
         &self,
         source_credentials: Option<&Credentials>,
         role_arn: &str,
@@ -132,8 +136,7 @@ impl StsClient {
         })
     }
 
-    /// Get session token (with optional MFA)
-    pub async fn get_session_token(
+    async fn get_session_token(
         &self,
         source_credentials: &Credentials,
         mfa_serial: Option<&str>,

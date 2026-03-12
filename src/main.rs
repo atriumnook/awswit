@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::IsTerminal;
 
 use clap::Parser;
@@ -5,13 +6,13 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use awswit::aws::StsClient;
-use awswit::cache::CacheManager;
 use awswit::cli::{Args, Command};
-use awswit::config::{AwsFiles, AwswitConfig};
+use awswit::config::AwswitConfig;
+use awswit::context::AppContext;
 use awswit::error::AwswitError;
-use awswit::profile::ProfileResolver;
+use awswit::profile::{Profile, ProfileResolver};
 use awswit::shell::ShellExporter;
-use awswit::{autorefresh, aws, history, profile, tui, utils};
+use awswit::{autorefresh, aws, tui, utils};
 
 #[tokio::main]
 async fn main() {
@@ -39,8 +40,6 @@ async fn main() {
     // Run the main application
     if let Err(e) = run(args).await {
         if matches!(e, AwswitError::UserCancelled) {
-            // Exit code 130 follows the SIGINT convention (128 + signal number 2).
-            // This allows scripts to distinguish cancellation from success (0) or error (1).
             std::process::exit(130);
         }
         eprintln!("{}", e);
@@ -66,87 +65,35 @@ async fn run(args: Args) -> Result<(), AwswitError> {
         return Ok(());
     }
 
-    // Load awswit configuration
-    let awswit_config = AwswitConfig::load()?;
-    tracing::debug!("Loaded awswit config: {:?}", awswit_config);
-
-    // Handle unset flag
+    // Early-exit flags that only need config (no profiles)
     if args.unset {
         return handle_unset(&args);
     }
 
-    // Handle kill refresher
     if args.kill_refresher {
         return handle_kill_refresher(&args);
     }
 
-    // Handle --role-arn early - no need to load profiles if just assuming a direct role ARN
-    // (moved below profile loading since we may still need profiles for --source-profile)
-
-    // Load AWS config and credentials files
-    let credentials_file = match args
-        .credentials_file
-        .clone()
-        .or_else(|| std::env::var("AWS_SHARED_CREDENTIALS_FILE").ok())
-    {
-        Some(path) => path,
-        None => {
-            let home = dirs::home_dir().ok_or_else(|| AwswitError::ShellError {
-                message: "Could not determine home directory".to_string(),
-            })?;
-            home.join(".aws")
-                .join("credentials")
-                .to_string_lossy()
-                .to_string()
-        }
-    };
-
-    let config_file = match args
-        .config_file
-        .clone()
-        .or_else(|| std::env::var("AWS_CONFIG_FILE").ok())
-    {
-        Some(path) => path,
-        None => {
-            let home = dirs::home_dir().ok_or_else(|| AwswitError::ShellError {
-                message: "Could not determine home directory".to_string(),
-            })?;
-            home.join(".aws")
-                .join("config")
-                .to_string_lossy()
-                .to_string()
-        }
-    };
-
-    let aws_files = AwsFiles::load(&config_file, &credentials_file)?;
-    let profiles = aws_files.merge_profiles();
-    tracing::debug!("Loaded {} profiles", profiles.len());
+    // Build full application context
+    let mut ctx = AppContext::build(args)?;
 
     // Handle list profiles
-    if args.list_profiles.is_some() {
-        return handle_list_profiles(&profiles, &awswit_config);
+    if ctx.args.list_profiles.is_some() {
+        return handle_list_profiles(&ctx.profiles, &ctx.config);
     }
 
     // Handle refresh autocomplete
-    if args.refresh_autocomplete {
-        return handle_refresh_autocomplete(&profiles);
+    if ctx.args.refresh_autocomplete {
+        return handle_refresh_autocomplete(&ctx.profiles);
     }
 
-    // Load history once and reuse
-    let mut profile_history = history::ProfileHistory::load().unwrap_or_else(|e| {
-        tracing::warn!("Failed to load profile history: {}", e);
-        eprintln!("Warning: Failed to load profile history: {}. Favorites and recent profiles may be missing.", e);
-        history::ProfileHistory::default()
-    });
-
-    // Determine target profile - use interactive mode if no profile specified
-    let target_profile_name = if args.profile_name.is_none()
-        && args.role_arn.is_none()
-        && !args.interactive_disabled()
+    // Determine target profile
+    let target_profile_name = if ctx.args.profile_name.is_none()
+        && ctx.args.role_arn.is_none()
+        && !ctx.args.interactive_disabled()
         && std::io::stdout().is_terminal()
     {
-        // Launch interactive picker - pass reference, not clone
-        let picker = tui::ProfilePicker::new(&profiles).with_history(profile_history.clone());
+        let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
 
         match picker.run() {
             Ok(tui::picker::PickerResult::Selected(name)) => name,
@@ -160,7 +107,7 @@ async fn run(args: Args) -> Result<(), AwswitError> {
             }
         }
     } else {
-        determine_target_profile(&args, &profiles, &awswit_config)?
+        determine_target_profile(&ctx.args, &ctx.profiles, &ctx.config)?
     };
 
     tracing::info!("Target profile: {}", target_profile_name);
@@ -168,15 +115,12 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     // Show spinner while resolving credentials
     let spinner = tui::AwswitSpinner::assuming_role(&target_profile_name);
 
-    // Resolve the profile chain and get credentials
-    // StsClient is initialized lazily here, just before it's needed, to avoid
-    // unnecessary AWS SDK initialization when operations don't require STS.
-    let resolver = ProfileResolver::new(&profiles, &awswit_config);
-    let cache_manager = CacheManager::new()?;
+    // Resolve credentials (STS initialized lazily here)
+    let resolver = ProfileResolver::new(&ctx.profiles, &ctx.config);
     let sts_client = StsClient::new().await;
 
     let credentials = match resolver
-        .resolve_credentials(&target_profile_name, &args, &sts_client, &cache_manager)
+        .resolve_credentials(&target_profile_name, &ctx.args, &sts_client, &ctx.cache)
         .await
     {
         Ok(creds) => {
@@ -192,48 +136,58 @@ async fn run(args: Args) -> Result<(), AwswitError> {
     tracing::debug!("Got credentials, expiration: {:?}", credentials.expiration);
 
     // Record usage in history
-    profile_history.record_use(&target_profile_name);
-    if let Err(e) = profile_history.save() {
+    ctx.history.record_use(&target_profile_name);
+    if let Err(e) = ctx.history.save() {
         tracing::warn!("Failed to save profile history: {}", e);
     }
 
     // Handle auto-refresh
-    if args.auto_refresh {
-        // Determine if the profile chain requires MFA by walking the full
-        // source_profile ancestry, not just one level.
-        let requires_mfa = profiles
-            .get(&target_profile_name)
-            .map(|p| {
-                if p.requires_mfa() {
-                    return true;
-                }
-                // Walk the full source_profile chain for MFA
-                let mut current_source = p.source_profile.as_deref();
-                let mut visited = std::collections::HashSet::new();
-                while let Some(src_name) = current_source {
-                    if !visited.insert(src_name) {
-                        break; // cycle guard
-                    }
-                    if let Some(src_p) = profiles.get(src_name) {
-                        if src_p.requires_mfa() {
-                            return true;
-                        }
-                        current_source = src_p.source_profile.as_deref();
-                    } else {
-                        break;
-                    }
-                }
-                false
-            })
-            .unwrap_or(false);
-        autorefresh::start_auto_refresh(&target_profile_name, &args, &credentials, requires_mfa)
-            .await?;
+    if ctx.args.auto_refresh {
+        let requires_mfa = check_chain_requires_mfa(&ctx.profiles, &target_profile_name);
+        autorefresh::start_auto_refresh(
+            &target_profile_name,
+            &ctx.args,
+            &credentials,
+            requires_mfa,
+        )
+        .await?;
     }
 
     // Emit credentials
-    emit_credentials(&credentials, &target_profile_name, &args)?;
+    emit_credentials(&credentials, &target_profile_name, &ctx.args)?;
 
     Ok(())
+}
+
+/// Check whether the profile's full source_profile chain requires MFA.
+fn check_chain_requires_mfa(
+    profiles: &HashMap<String, Profile>,
+    target_profile_name: &str,
+) -> bool {
+    profiles
+        .get(target_profile_name)
+        .map(|p| {
+            if p.requires_mfa() {
+                return true;
+            }
+            let mut current_source = p.source_profile.as_deref();
+            let mut visited = std::collections::HashSet::new();
+            while let Some(src_name) = current_source {
+                if !visited.insert(src_name) {
+                    break;
+                }
+                if let Some(src_p) = profiles.get(src_name) {
+                    if src_p.requires_mfa() {
+                        return true;
+                    }
+                    current_source = src_p.source_profile.as_deref();
+                } else {
+                    break;
+                }
+            }
+            false
+        })
+        .unwrap_or(false)
 }
 
 /// Emit credentials as shell output or export commands
@@ -244,13 +198,11 @@ fn emit_credentials(
 ) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
     if args.show_commands {
-        // Print export commands to stdout (not stderr) so `> file` works
         print!(
             "{}",
             exporter.generate_export_commands(credentials, profile_name)
         );
     } else {
-        // Show nice status message on stderr
         tui::StatusLine::profile_assumed(
             profile_name,
             credentials
@@ -259,7 +211,6 @@ fn emit_credentials(
                 .as_deref(),
         );
 
-        // Output in a format the shell wrapper can eval
         print!(
             "{}",
             exporter.generate_shell_output(credentials, profile_name)?
@@ -291,14 +242,13 @@ fn handle_kill_refresher(args: &Args) -> Result<(), AwswitError> {
 }
 
 fn handle_list_profiles(
-    profiles: &std::collections::HashMap<String, profile::Profile>,
+    profiles: &HashMap<String, Profile>,
     config: &AwswitConfig,
 ) -> Result<(), AwswitError> {
     use colored::Colorize;
 
     let use_colors = config.colors && !cfg!(windows);
 
-    // Print to stdout so `| less` and `> file` work
     println!();
     let header = "========================AWS Profiles==========================";
     if use_colors {
@@ -365,9 +315,7 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-fn handle_refresh_autocomplete(
-    profiles: &std::collections::HashMap<String, profile::Profile>,
-) -> Result<(), AwswitError> {
+fn handle_refresh_autocomplete(profiles: &HashMap<String, Profile>) -> Result<(), AwswitError> {
     let mut names: Vec<_> = profiles.keys().collect();
     names.sort();
     for name in names {
@@ -378,10 +326,9 @@ fn handle_refresh_autocomplete(
 
 fn determine_target_profile(
     args: &Args,
-    profiles: &std::collections::HashMap<String, profile::Profile>,
+    profiles: &HashMap<String, Profile>,
     config: &AwswitConfig,
 ) -> Result<String, AwswitError> {
-    // Early guard: --role-arn doesn't need a profile name
     if args.role_arn.is_some() {
         let name = args
             .session_name
@@ -394,7 +341,6 @@ fn determine_target_profile(
         return Ok(name);
     }
 
-    // Get profile name from args or default
     let profile_name = args
         .profile_name
         .clone()
@@ -402,12 +348,10 @@ fn determine_target_profile(
         .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
 
-    // Check if profile exists
     if profiles.contains_key(&profile_name) {
         return Ok(profile_name);
     }
 
-    // Try fuzzy matching if enabled
     if config.fuzzy_match {
         if let Some(matched) = utils::fuzzy::find_closest_profile(&profile_name, profiles) {
             tracing::info!("Fuzzy matched '{}' to '{}'", profile_name, matched);

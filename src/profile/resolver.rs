@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
-use crate::aws::{Credentials, StsClient};
+use crate::aws::{Credentials, StsOperations};
 use crate::cache::CacheManager;
 use crate::cli::Args;
 use crate::config::AwswitConfig;
@@ -37,7 +37,7 @@ impl<'a> ProfileResolver<'a> {
         &self,
         profile_name: &str,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
         cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         tracing::info!("Resolving credentials for profile: {}", profile_name);
@@ -108,7 +108,7 @@ impl<'a> ProfileResolver<'a> {
         &self,
         role_arn: &str,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
     ) -> Result<Credentials, AwswitError> {
         tracing::info!("Assuming role from CLI: {}", role_arn);
 
@@ -158,7 +158,7 @@ impl<'a> ProfileResolver<'a> {
         &self,
         profile_name: &str,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
         cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         // Get the role chain (with cycle detection via visited set)
@@ -405,7 +405,7 @@ impl<'a> ProfileResolver<'a> {
         source_credentials: &Credentials,
         mfa_serial: &str,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
         cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         // Check cache first (unless force refresh)
@@ -461,7 +461,7 @@ impl<'a> ProfileResolver<'a> {
         &self,
         profile: &Profile,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
         cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         let source_credentials = self.profile_to_credentials(profile)?;
@@ -486,7 +486,7 @@ impl<'a> ProfileResolver<'a> {
         profile: &Profile,
         source_credentials: &Credentials,
         args: &Args,
-        sts_client: &StsClient,
+        sts_client: &dyn StsOperations,
         role_duration: Option<i32>,
         mfa_serial: &Option<String>,
     ) -> Result<Credentials, AwswitError> {
@@ -1044,5 +1044,105 @@ mod tests {
     #[test]
     fn validate_mfa_token_rejects_letters() {
         assert!(validate_mfa_token("abc456").is_err());
+    }
+
+    // --- MockStsClient for trait-based testing ---
+
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    struct AssumeRoleCall {
+        role_arn: String,
+        session_name: String,
+        external_id: Option<String>,
+        region: Option<String>,
+        duration_seconds: Option<i32>,
+    }
+
+    struct MockStsClient {
+        assume_role_calls: Mutex<Vec<AssumeRoleCall>>,
+    }
+
+    impl MockStsClient {
+        fn new() -> Self {
+            Self {
+                assume_role_calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StsOperations for MockStsClient {
+        async fn assume_role(
+            &self,
+            _source_credentials: Option<&Credentials>,
+            role_arn: &str,
+            session_name: &str,
+            external_id: Option<&str>,
+            region: Option<&str>,
+            duration_seconds: Option<i32>,
+            _mfa_serial: Option<&str>,
+            _mfa_token: Option<&str>,
+        ) -> Result<Credentials, AwswitError> {
+            self.assume_role_calls.lock().unwrap().push(AssumeRoleCall {
+                role_arn: role_arn.to_string(),
+                session_name: session_name.to_string(),
+                external_id: external_id.map(String::from),
+                region: region.map(String::from),
+                duration_seconds,
+            });
+            Ok(Credentials {
+                access_key_id: "AKIAMOCK".to_string(),
+                secret_access_key: "mock_secret".to_string(),
+                session_token: Some("mock_token".to_string()),
+                expiration: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                region: region.map(String::from),
+            })
+        }
+
+        async fn get_session_token(
+            &self,
+            _source_credentials: &Credentials,
+            _mfa_serial: Option<&str>,
+            _mfa_token: Option<&str>,
+            _duration_seconds: Option<i32>,
+        ) -> Result<Credentials, AwswitError> {
+            Ok(Credentials {
+                access_key_id: "AKIAMOCK_SESSION".to_string(),
+                secret_access_key: "mock_session_secret".to_string(),
+                session_token: Some("mock_session_token".to_string()),
+                expiration: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                region: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_single_hop_role_chain() {
+        let mut profiles = HashMap::new();
+        profiles.insert("base".to_string(), make_user_profile("base"));
+        profiles.insert(
+            "dev".to_string(),
+            make_role_profile("dev", "arn:aws:iam::111:role/Dev", "base"),
+        );
+
+        let config = default_config();
+        let resolver = ProfileResolver::new(&profiles, &config);
+        let mock_sts = MockStsClient::new();
+        let cache_manager = CacheManager::new().unwrap();
+        let args = Args::default();
+
+        let creds = resolver
+            .resolve_credentials("dev", &args, &mock_sts, &cache_manager)
+            .await
+            .unwrap();
+
+        assert_eq!(creds.access_key_id, "AKIAMOCK");
+
+        let calls = mock_sts.assume_role_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].role_arn, "arn:aws:iam::111:role/Dev");
+        assert_eq!(calls[0].session_name, "dev");
     }
 }
