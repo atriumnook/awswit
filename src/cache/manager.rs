@@ -51,8 +51,21 @@ impl CacheManager {
         Ok(Self { cache_dir })
     }
 
-    /// Get cached credentials by key
-    pub fn get(&self, key: &str) -> Result<Option<Credentials>, AwswitError> {
+    /// Get the cache file path for a key.
+    /// Uses hex encoding to avoid collisions from character sanitization
+    /// (e.g., "role/dev" and "role_dev" would collide with simple replacement).
+    fn cache_file_path(&self, key: &str) -> PathBuf {
+        let hex_key: String = key
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        self.cache_dir.join(format!("{}.json", hex_key))
+    }
+}
+
+impl super::traits::CredentialStore for CacheManager {
+    fn get(&self, key: &str) -> Result<Option<Credentials>, AwswitError> {
         let path = self.cache_file_path(key);
 
         // Read directly — handle NotFound as cache miss (no TOCTOU)
@@ -98,8 +111,7 @@ impl CacheManager {
         Ok(Some(entry.credentials))
     }
 
-    /// Set cached credentials
-    pub fn set(&self, key: &str, credentials: &Credentials) -> Result<(), AwswitError> {
+    fn set(&self, key: &str, credentials: &Credentials) -> Result<(), AwswitError> {
         let path = self.cache_file_path(key);
         let entry = CacheEntry {
             cache_key: key.to_string(),
@@ -113,8 +125,7 @@ impl CacheManager {
         Ok(())
     }
 
-    /// Remove cached credentials
-    pub fn remove(&self, key: &str) -> Result<(), AwswitError> {
+    fn remove(&self, key: &str) -> Result<(), AwswitError> {
         let path = self.cache_file_path(key);
 
         match fs::remove_file(&path) {
@@ -125,23 +136,12 @@ impl CacheManager {
 
         Ok(())
     }
-
-    /// Get the cache file path for a key.
-    /// Uses hex encoding to avoid collisions from character sanitization
-    /// (e.g., "role/dev" and "role_dev" would collide with simple replacement).
-    fn cache_file_path(&self, key: &str) -> PathBuf {
-        let hex_key: String = key
-            .as_bytes()
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        self.cache_dir.join(format!("{}.json", hex_key))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::CredentialStore;
     use chrono::{Duration, Utc};
     use tempfile::TempDir;
 

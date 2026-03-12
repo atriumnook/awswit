@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use crate::aws::{Credentials, StsOperations};
-use crate::cache::CacheManager;
+use crate::cache::CredentialStore;
 use crate::cli::Args;
 use crate::config::AwswitConfig;
 use crate::error::AwswitError;
@@ -38,7 +38,7 @@ impl<'a> ProfileResolver<'a> {
         profile_name: &str,
         args: &Args,
         sts_client: &dyn StsOperations,
-        cache_manager: &CacheManager,
+        cache_manager: &dyn CredentialStore,
     ) -> Result<Credentials, AwswitError> {
         tracing::info!("Resolving credentials for profile: {}", profile_name);
 
@@ -159,7 +159,7 @@ impl<'a> ProfileResolver<'a> {
         profile_name: &str,
         args: &Args,
         sts_client: &dyn StsOperations,
-        cache_manager: &CacheManager,
+        cache_manager: &dyn CredentialStore,
     ) -> Result<Credentials, AwswitError> {
         // Get the role chain (with cycle detection via visited set)
         let chain = self.get_role_chain(profile_name)?;
@@ -406,7 +406,7 @@ impl<'a> ProfileResolver<'a> {
         mfa_serial: &str,
         args: &Args,
         sts_client: &dyn StsOperations,
-        cache_manager: &CacheManager,
+        cache_manager: &dyn CredentialStore,
     ) -> Result<Credentials, AwswitError> {
         // Check cache first (unless force refresh)
         if !args.force_refresh {
@@ -462,7 +462,7 @@ impl<'a> ProfileResolver<'a> {
         profile: &Profile,
         args: &Args,
         sts_client: &dyn StsOperations,
-        cache_manager: &CacheManager,
+        cache_manager: &dyn CredentialStore,
     ) -> Result<Credentials, AwswitError> {
         let source_credentials = self.profile_to_credentials(profile)?;
         let mfa_serial = profile
@@ -766,6 +766,7 @@ fn default_credential_process_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::CacheManager;
 
     #[test]
     fn mfa_cache_key_is_consistent() {

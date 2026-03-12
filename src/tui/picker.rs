@@ -7,6 +7,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -15,7 +17,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
-use strsim::jaro_winkler;
 
 use super::preview::compact_preview_line;
 use super::theme::Theme;
@@ -117,16 +118,25 @@ impl PickerApp {
             })
             .collect();
 
-        // Sort: favorites first, then by recent use, then alphabetically
-        entries.sort_by(|a, b| match (a.is_favorite, b.is_favorite) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => match (&a.last_used, &b.last_used) {
-                (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            },
+        // Sort: favorites first, then by frecency descending, then alphabetically
+        let now = chrono::Utc::now();
+        entries.sort_by(|a, b| {
+            b.is_favorite
+                .cmp(&a.is_favorite)
+                .then_with(|| {
+                    let a_frecency = history
+                        .get(&a.name)
+                        .map(|h| h.frecency_score(now))
+                        .unwrap_or(0.0);
+                    let b_frecency = history
+                        .get(&b.name)
+                        .map(|h| h.frecency_score(now))
+                        .unwrap_or(0.0);
+                    b_frecency
+                        .partial_cmp(&a_frecency)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.name.cmp(&b.name))
         });
 
         let filtered: Vec<usize> = (0..entries.len()).collect();
@@ -429,41 +439,53 @@ impl PickerApp {
                 entry.score = None;
             }
         } else {
-            let query_lower = self.query.to_lowercase();
+            let mut matcher = Matcher::new(Config::DEFAULT);
+            let pattern = Pattern::new(
+                &self.query,
+                CaseMatching::Ignore,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+            );
 
-            // Use pre-computed name_lower for matching
             let mut scored: Vec<(usize, u32)> = self
                 .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, entry)| {
-                    // Check for exact prefix match (highest priority)
-                    if entry.name_lower.starts_with(&query_lower) {
-                        return Some((idx, 1100));
-                    }
-
-                    // Check for substring match (high priority)
-                    if entry.name_lower.contains(&query_lower) {
-                        return Some((idx, 1000));
-                    }
-
-                    // Fuzzy match using Jaro-Winkler
-                    let similarity = jaro_winkler(&entry.name_lower, &query_lower);
-                    if similarity > 0.6 {
-                        Some((idx, (similarity * 100.0) as u32))
-                    } else {
-                        None
-                    }
+                    let mut buf = Vec::new();
+                    let haystack = nucleo_matcher::Utf32Str::new(&entry.name_lower, &mut buf);
+                    pattern.score(haystack, &mut matcher).map(|s| (idx, s))
                 })
                 .collect();
 
-            // Sort by score descending
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            // Sort: fuzzy score desc, then favorite, then history, then name asc
+            scored.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| {
+                        let ea = &self.entries[a.0];
+                        let eb = &self.entries[b.0];
+                        eb.is_favorite.cmp(&ea.is_favorite)
+                    })
+                    .then_with(|| {
+                        let ea = &self.entries[a.0];
+                        let eb = &self.entries[b.0];
+                        match (&ea.last_used, &eb.last_used) {
+                            (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    })
+                    .then_with(|| self.entries[a.0].name.cmp(&self.entries[b.0].name))
+            });
 
             self.filtered = scored.iter().map(|(idx, _)| *idx).collect();
 
             // Update scores in entries
-            for (idx, score) in scored {
+            for entry in &mut self.entries {
+                entry.score = None;
+            }
+            for &(idx, score) in &scored {
                 self.entries[idx].score = Some(score);
             }
         }

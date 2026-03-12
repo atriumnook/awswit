@@ -23,6 +23,24 @@ pub struct HistoryEntry {
     pub is_favorite: bool,
 }
 
+impl HistoryEntry {
+    /// Calculate a frecency score based on recency and frequency.
+    /// More recent and more frequently used profiles score higher.
+    pub fn frecency_score(&self, now: DateTime<Utc>) -> f64 {
+        let hours = (now - self.last_used).num_seconds().max(0) as f64 / 3600.0;
+        let weight = if hours < 1.0 {
+            4.0
+        } else if hours < 24.0 {
+            2.0
+        } else if hours < 168.0 {
+            1.0
+        } else {
+            0.5
+        };
+        self.use_count as f64 * weight
+    }
+}
+
 /// Profile usage history storage
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileHistory {
@@ -158,6 +176,58 @@ mod tests {
 
         history.record_use("test-profile");
         assert_eq!(history.get("test-profile").unwrap().use_count, 2);
+    }
+
+    #[test]
+    fn test_frecency_within_one_hour() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::minutes(30),
+            use_count: 5,
+            is_favorite: false,
+        };
+        let score = entry.frecency_score(now);
+        assert!((score - 20.0).abs() < f64::EPSILON); // 5 * 4.0
+    }
+
+    #[test]
+    fn test_frecency_within_one_day() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::hours(12),
+            use_count: 3,
+            is_favorite: false,
+        };
+        let score = entry.frecency_score(now);
+        assert!((score - 6.0).abs() < f64::EPSILON); // 3 * 2.0
+    }
+
+    #[test]
+    fn test_frecency_within_one_week() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::days(3),
+            use_count: 10,
+            is_favorite: false,
+        };
+        let score = entry.frecency_score(now);
+        assert!((score - 10.0).abs() < f64::EPSILON); // 10 * 1.0
+    }
+
+    #[test]
+    fn test_frecency_older_than_one_week() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::days(30),
+            use_count: 8,
+            is_favorite: false,
+        };
+        let score = entry.frecency_score(now);
+        assert!((score - 4.0).abs() < f64::EPSILON); // 8 * 0.5
     }
 
     #[test]
