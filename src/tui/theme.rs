@@ -125,28 +125,6 @@ impl Theme {
 }
 
 impl Icons {
-    /// ASCII fallback for terminals without special font support
-    pub fn ascii() -> Self {
-        Self {
-            role: "[R]",
-            user: "[U]",
-            favorite: "*",
-            favorite_empty: "-",
-            mfa: "[M]",
-            region: "@",
-            account: "#",
-            arrow_right: "->",
-            arrow_down: "v",
-            check: "[x]",
-            cross: "[ ]",
-            clock: "T:",
-            lock: "[L]",
-            key: "[K]",
-            chain: ">>",
-            search: ">",
-            spinner: &["|", "/", "-", "\\"],
-        }
-    }
 }
 
 /// Profile type indicator with color

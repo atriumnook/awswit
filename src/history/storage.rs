@@ -153,14 +153,6 @@ impl ProfileHistory {
         }
     }
 
-    /// Get favorite profiles
-    pub fn favorite_profiles(&self) -> Vec<&str> {
-        self.entries
-            .values()
-            .filter(|e| e.is_favorite)
-            .map(|e| e.name.as_str())
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -228,6 +220,66 @@ mod tests {
         };
         let score = entry.frecency_score(now);
         assert!((score - 4.0).abs() < f64::EPSILON); // 8 * 0.5
+    }
+
+    #[test]
+    fn test_frecency_at_zero_hours_boundary() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now,
+            use_count: 2,
+            is_favorite: false,
+        };
+        assert!((entry.frecency_score(now) - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_frecency_at_one_hour_boundary() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::hours(1),
+            use_count: 2,
+            is_favorite: false,
+        };
+        assert!((entry.frecency_score(now) - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_frecency_at_twenty_four_hour_boundary() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::hours(24),
+            use_count: 2,
+            is_favorite: false,
+        };
+        assert!((entry.frecency_score(now) - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_frecency_at_one_week_boundary() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::hours(168),
+            use_count: 2,
+            is_favorite: false,
+        };
+        assert!((entry.frecency_score(now) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_frecency_far_past_boundary() {
+        let now = Utc::now();
+        let entry = HistoryEntry {
+            name: "test".to_string(),
+            last_used: now - chrono::Duration::hours(1000),
+            use_count: 2,
+            is_favorite: false,
+        };
+        assert!((entry.frecency_score(now) - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
