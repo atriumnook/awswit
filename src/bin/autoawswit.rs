@@ -40,10 +40,14 @@ fn main() {
         .join("autoawswit.lock");
     let _daemon_lock = {
         use fs2::FileExt;
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let lock_file = opts
             .open(&lock_path)
             .expect("Failed to open daemon lock file");
         lock_file
