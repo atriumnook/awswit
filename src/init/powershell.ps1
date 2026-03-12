@@ -10,6 +10,7 @@ function awswit {
 
     if ($exitCode -ne 0) {
         Write-Error $output
+        $global:LASTEXITCODE = $exitCode
         return
     }
 

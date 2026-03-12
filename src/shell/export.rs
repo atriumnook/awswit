@@ -178,9 +178,6 @@ impl ShellExporter {
         let bindings = credential_bindings(credentials, profile_name);
         let mut output = String::new();
 
-        // Version header for shell wrapper compatibility checking
-        output.push_str(&format!("AWSWIT_VERSION={}\n", env!("CARGO_PKG_VERSION")));
-
         for (name, value) in &bindings {
             match value {
                 Some(val) => {
@@ -215,7 +212,7 @@ impl ShellExporter {
 
     /// Generate unset output for shell wrapper
     pub fn generate_unset_output(&self) -> String {
-        "AWSWIT_VERSION=".to_string() + env!("CARGO_PKG_VERSION") + "\nAWSWIT_UNSET=1\n"
+        "AWSWIT_UNSET=1\n".to_string()
     }
 
     /// Format a set/export command for the detected shell
@@ -484,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_output_version_header() {
+    fn test_shell_output_no_version_header() {
         let creds = Credentials {
             access_key_id: "AKIATEST".to_string(),
             secret_access_key: "secret".to_string(),
@@ -495,17 +492,16 @@ mod tests {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
         let output = exporter.generate_shell_output(&creds, "test").unwrap();
         assert!(
-            output.starts_with("AWSWIT_VERSION="),
-            "Shell output should start with version header, got: {}",
-            &output[..output.find('\n').unwrap_or(50).min(50)]
+            !output.contains("AWSWIT_VERSION="),
+            "Shell output should not contain version header"
         );
     }
 
     #[test]
-    fn test_unset_output_includes_version() {
+    fn test_unset_output() {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
         let output = exporter.generate_unset_output();
-        assert!(output.contains("AWSWIT_VERSION="));
+        assert!(!output.contains("AWSWIT_VERSION="));
         assert!(output.contains("AWSWIT_UNSET=1"));
     }
 }

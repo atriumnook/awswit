@@ -12,20 +12,21 @@ use crate::aws::Credentials;
 use crate::error::AwswitError;
 
 /// Validate that a profile name is safe for use in INI section headers.
-/// Allowed characters: alphanumeric, `_`, `-`, `.`.
+/// Rejects only characters that would break INI format: `[`, `]`, `=`, and control characters.
+/// This allows AWS CLI compatible names containing `/`, `:`, spaces, etc.
 pub fn validate_profile_name(name: &str) -> Result<(), AwswitError> {
     if name.is_empty() {
         return Err(AwswitError::ValidationError {
             message: "Profile name cannot be empty".to_string(),
         });
     }
-    if !name
+    if name
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+        .any(|c| c == '[' || c == ']' || c == '=' || c == '\n' || c == '\r' || c.is_control())
     {
         return Err(AwswitError::ValidationError {
             message: format!(
-                "Profile name '{}' contains invalid characters (allowed: alphanumeric, _, -, .)",
+                "Profile name '{}' contains invalid characters (not allowed: [, ], =, control chars)",
                 name
             ),
         });
