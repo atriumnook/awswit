@@ -232,21 +232,54 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
     }
 
     if !expired_profiles.is_empty() {
-        // Remove expired profile JSON files
+        // Remove expired profile JSON files, re-verifying each before deletion
+        // to avoid removing profiles that were refreshed between check and delete.
         let dir = super::get_auto_refresh_dir()?;
+        let mut confirmed_expired: Vec<String> = Vec::new();
         for name in &expired_profiles {
             let json_path = dir.join(format!("{}.json", name));
-            if let Err(e) = fs::remove_file(&json_path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("Failed to remove expired profile {}: {}", name, e);
+            // Re-read and re-check expiration to avoid TOCTOU race
+            let still_expired = match fs::read_to_string(&json_path) {
+                Ok(content) => match serde_json::from_str::<AutoRefreshProfile>(&content) {
+                    Ok(profile) => {
+                        if let Some(ref exp_str) = profile.awswit_role_expiration {
+                            if let Ok(exp_time) = DateTime::parse_from_rfc3339(exp_str) {
+                                let exp_utc = exp_time.with_timezone(&Utc);
+                                exp_utc + chrono::Duration::hours(MAX_EXPIRED_HOURS) < Utc::now()
+                            } else {
+                                true // unparseable expiration, still remove
+                            }
+                        } else {
+                            false // no expiration means it was updated
+                        }
+                    }
+                    Err(_) => true, // unparseable JSON, remove
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => true, // read error, attempt removal
+            };
+            if still_expired {
+                if let Err(e) = fs::remove_file(&json_path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!("Failed to remove expired profile {}: {}", name, e);
+                    }
                 }
+                confirmed_expired.push(name.clone());
+            } else {
+                tracing::debug!(
+                    "Profile '{}' was refreshed between check and cleanup, skipping",
+                    name
+                );
             }
         }
         // Remove expired credential sections in batch
-        let creds_path = crate::utils::paths::aws_credentials_path()?;
-        let expired_list: Vec<String> = expired_profiles.iter().cloned().collect();
-        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_list) {
-            tracing::warn!("Failed to remove expired credential sections: {}", e);
+        if !confirmed_expired.is_empty() {
+            let creds_path = crate::utils::paths::aws_credentials_path()?;
+            if let Err(e) =
+                credentials_file::remove_credentials_batch(&creds_path, &confirmed_expired)
+            {
+                tracing::warn!("Failed to remove expired credential sections: {}", e);
+            }
         }
     }
 
@@ -560,7 +593,14 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
     // a previous partial run already wrote the credentials successfully.
     if let (Some(new_exp), Some(ref profile)) = (expiration, &existing_profile) {
         if let Some(ref existing_exp) = profile.awswit_role_expiration {
-            if existing_exp >= new_exp {
+            let should_skip = match (
+                DateTime::parse_from_rfc3339(existing_exp),
+                DateTime::parse_from_rfc3339(new_exp),
+            ) {
+                (Ok(existing_dt), Ok(new_dt)) => existing_dt >= new_dt,
+                _ => existing_exp >= new_exp, // fallback to string comparison
+            };
+            if should_skip {
                 tracing::debug!(
                     "Skipping redundant refresh for {} (existing expiration {} >= new {})",
                     profile_name,

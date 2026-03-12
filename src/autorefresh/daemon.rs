@@ -411,10 +411,25 @@ fn verify_process_identity(pid: u32) -> Option<bool> {
             Err(_) => None, // cannot verify (EPERM, etc.)
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        match std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let comm = String::from_utf8_lossy(&output.stdout);
+                let name = comm.trim().rsplit('/').next().unwrap_or("");
+                Some(name == "autoawswit")
+            }
+            Ok(_) => Some(false),
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
-        None // cannot verify on non-Linux
+        None // cannot verify on this platform
     }
 }
 
