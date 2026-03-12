@@ -43,3 +43,26 @@ fn test_fuzzy_completely_different() {
     let p = profiles(&["dev-admin", "staging"]);
     assert_eq!(find_closest_profile("zzzzzzzzzzzzz", &p), None);
 }
+
+#[test]
+fn test_fuzzy_ambiguous_prefix_returns_none() {
+    let p = profiles(&["dev-admin", "dev-readonly"]);
+    // "dev" is ambiguous prefix - should return None
+    assert_eq!(find_closest_profile("dev", &p), None);
+}
+
+#[test]
+fn test_fuzzy_equal_levenshtein_returns_none() {
+    let p = profiles(&["cat", "bat"]);
+    // "hat" has distance 1 from both "cat" and "bat" — tie
+    assert_eq!(find_closest_profile("hat", &p), None);
+}
+
+#[test]
+fn test_fuzzy_lcs_tiebreak_returns_none() {
+    // Two profiles where LCS with input is the same length, and no prefix match
+    // "axbxc" has LCS 3 with both "aZbZc-one" and "aYbYc-two" (a, b, c)
+    // Neither is a prefix of "axbxc"
+    let p = profiles(&["aZbZc-one", "aYbYc-two"]);
+    assert_eq!(find_closest_profile("axbxc", &p), None);
+}
