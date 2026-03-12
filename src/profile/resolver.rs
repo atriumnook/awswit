@@ -66,7 +66,7 @@ impl<'a> ProfileResolver<'a> {
 
         // Handle credential_process for non-role profiles
         if target_profile.uses_credential_process() {
-            return self.get_credentials_from_process(target_profile);
+            return self.get_credentials_from_process(target_profile).await;
         }
 
         // User profile - get session token if MFA required
@@ -122,7 +122,7 @@ impl<'a> ProfileResolver<'a> {
 
             // Handle credential_process on the source profile
             if source_profile.uses_credential_process() {
-                Some(self.get_credentials_from_process(source_profile)?)
+                Some(self.get_credentials_from_process(source_profile).await?)
             } else if source_profile.requires_mfa() {
                 tracing::warn!(
                     "Source profile requires MFA — MFA prompts are not supported with --role-arn"
@@ -176,9 +176,7 @@ impl<'a> ProfileResolver<'a> {
                 })?;
 
         // Get source credentials
-        let source_credentials = self
-            .get_source_credentials(&chain, args, sts_client, cache_manager)
-            .await?;
+        let source_credentials = self.get_source_credentials(&chain).await?;
 
         // Determine role duration and validate against AWS STS limits
         let role_duration = self.resolve_role_duration(args, Some(target_profile))?;
@@ -331,9 +329,6 @@ impl<'a> ProfileResolver<'a> {
     async fn get_source_credentials(
         &self,
         chain: &[&Profile],
-        _args: &Args,
-        _sts_client: &StsClient,
-        _cache_manager: &CacheManager,
     ) -> Result<Credentials, AwswitError> {
         // Get the first profile in the chain (source)
         let source_profile = chain.first().ok_or_else(|| AwswitError::ValidationError {
@@ -355,7 +350,7 @@ impl<'a> ProfileResolver<'a> {
 
             // Handle credential_process on the user profile
             if user_profile.uses_credential_process() {
-                return self.get_credentials_from_process(user_profile);
+                return self.get_credentials_from_process(user_profile).await;
             }
 
             return self.profile_to_credentials(user_profile);
@@ -363,7 +358,7 @@ impl<'a> ProfileResolver<'a> {
 
         // Check if the source profile itself uses credential_process
         if source_profile.uses_credential_process() {
-            return self.get_credentials_from_process(source_profile);
+            return self.get_credentials_from_process(source_profile).await;
         }
 
         // Use the profile's own credentials
@@ -587,8 +582,11 @@ impl<'a> ProfileResolver<'a> {
         }
     }
 
-    /// Get credentials from credential_process (sync - no async needed)
-    fn get_credentials_from_process(&self, profile: &Profile) -> Result<Credentials, AwswitError> {
+    /// Get credentials from credential_process
+    async fn get_credentials_from_process(
+        &self,
+        profile: &Profile,
+    ) -> Result<Credentials, AwswitError> {
         let command =
             profile
                 .credential_process
@@ -604,9 +602,7 @@ impl<'a> ProfileResolver<'a> {
         // can modify it, they already have arbitrary code execution.
         tracing::info!("Running credential_process for profile '{}'", profile.name);
 
-        // Spawn with a 30-second timeout to match STS timeout behavior.
-        // Uses a thread to wait on the child process so we can enforce the timeout.
-        let child = std::process::Command::new("sh")
+        let child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .stdout(std::process::Stdio::piped())
@@ -616,38 +612,18 @@ impl<'a> ProfileResolver<'a> {
                 message: e.to_string(),
             })?;
 
-        let timeout = std::time::Duration::from_secs(30);
-        let (tx, rx) = std::sync::mpsc::channel();
         let child_id = child.id();
-        let handle = std::thread::spawn(move || {
-            let result = child.wait_with_output();
-            let _ = tx.send(());
-            result
-        });
-
-        let output = match rx.recv_timeout(timeout) {
-            Ok(()) => handle
-                .join()
-                .unwrap()
-                .map_err(|e| AwswitError::CredentialProcessFailed {
-                    message: format!("Failed to wait on credential_process: {}", e),
-                })?,
+        let timeout_duration = std::time::Duration::from_secs(30);
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| AwswitError::CredentialProcessFailed {
+                message: format!("Failed to wait on credential_process: {}", e),
+            })?,
             Err(_) => {
-                // Timed out — gracefully terminate: SIGTERM → wait → SIGKILL
+                // Timed out — kill the child process
                 #[cfg(unix)]
-                {
-                    let pid = child_id as i32;
-                    crate::utils::process::graceful_kill(pid, std::time::Duration::from_secs(1));
+                if let Some(pid) = child_id {
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
                 }
-                #[cfg(not(unix))]
-                {
-                    tracing::warn!(
-                        "credential_process timed out; process kill is not supported on this platform (pid={})",
-                        child_id
-                    );
-                }
-                // Wait for the thread to finish to reap the process (avoid zombie)
-                let _ = handle.join();
                 return Err(AwswitError::CredentialProcessFailed {
                     message: "credential_process timed out after 30 seconds".to_string(),
                 });
