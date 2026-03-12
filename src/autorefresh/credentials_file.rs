@@ -191,11 +191,12 @@ pub fn remove_credentials_batch(
     }
 
     let _lock_file = lock_aws_credentials_file(creds_path)?;
-    if !creds_path.exists() {
-        return Ok(());
-    }
 
-    let mut content = fs::read_to_string(creds_path)?;
+    let mut content = match fs::read_to_string(creds_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     for name in profile_names {
         content = remove_credentials_section(&content, name);
     }
@@ -207,11 +208,12 @@ pub fn remove_credentials_batch(
 /// Remove a profile section from the credentials file.
 pub fn remove_credentials(creds_path: &Path, profile_name: &str) -> Result<(), AwswitError> {
     let _lock_file = lock_aws_credentials_file(creds_path)?;
-    if !creds_path.exists() {
-        return Ok(());
-    }
 
-    let content = fs::read_to_string(creds_path)?;
+    let content = match fs::read_to_string(creds_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let new_content = remove_credentials_section(&content, profile_name);
 
     crate::utils::fs::atomic_write_restricted(creds_path, new_content.as_bytes())?;
