@@ -2,6 +2,9 @@
 //   1. daemon lock   (autoawswit.lock)
 //   2. credentials lock (credentials.lock)
 // Always acquire daemon lock first if both are needed.
+// Exception: refresh_profile() (runner.rs) acquires only credentials lock
+// without daemon lock, as it runs within the daemon process which inherently
+// owns the daemon lifecycle.
 // kill_autoawswit_daemon: releases daemon lock BEFORE credentials cleanup.
 
 use std::fs;
@@ -24,6 +27,14 @@ pub struct AutoRefreshProfile {
     pub awswit_cache_name: Option<String>,
     pub aws_role_arn: Option<String>,
     pub region: Option<String>,
+    #[serde(default = "default_profile_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub awswit_binary_version: Option<String>,
+}
+
+fn default_profile_version() -> u32 {
+    1
 }
 
 /// Start auto-refresh for a profile
@@ -90,6 +101,8 @@ pub async fn start_auto_refresh(
         awswit_cache_name: Some(format!("session-{}", profile_name)),
         aws_role_arn: args.role_arn.clone(),
         region: credentials.region.clone(),
+        version: default_profile_version(),
+        awswit_binary_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
 
     // Save auto-refresh profile metadata
@@ -217,25 +230,10 @@ fn get_daemon_lock_path() -> Result<PathBuf, AwswitError> {
 
 /// Acquire the daemon advisory lock with timeout.
 fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let lock_file = opts
-        .open(lock_path)
+    crate::utils::fs::lock_file_with_permissions(lock_path, std::time::Duration::from_secs(30))
         .map_err(|e| AwswitError::AutoRefreshError {
-            message: format!("Failed to open lock: {}", e),
-        })?;
-
-    crate::utils::fs::lock_exclusive_with_timeout(&lock_file, std::time::Duration::from_secs(30))
-        .map_err(|e| AwswitError::AutoRefreshError {
-        message: format!("Failed to acquire daemon lock: {}", e),
-    })?;
-
-    Ok(lock_file)
+            message: format!("Failed to acquire daemon lock: {}", e),
+        })
 }
 
 fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
@@ -262,49 +260,157 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 
     match autoawswit_path {
         Some(path) => {
-            let mut child =
-                Command::new(path)
-                    .spawn()
-                    .map_err(|e| AwswitError::AutoRefreshError {
-                        message: format!("Failed to spawn daemon: {}", e),
-                    })?;
-
-            // Wait for daemon to write its PID file before releasing lock.
-            // This prevents a race where another caller checks is_running()
-            // before the daemon has finished init.
-            let pid_path = super::get_pid_file_path()?;
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
-            let poll_interval = std::time::Duration::from_millis(100);
-
-            while start.elapsed() < timeout {
-                if pid_path.exists() {
-                    tracing::info!("Spawned autoawswit daemon process (PID file confirmed)");
-                    // Lock released on Drop when _lock_file goes out of scope
-                    return Ok(());
+            // Create a pipe for the daemon child to signal successful initialization.
+            // This replaces PID-file polling which is timing-dependent and unreliable.
+            #[cfg(unix)]
+            let (read_fd, write_fd) = {
+                let mut fds = [0i32; 2];
+                if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                    return Err(AwswitError::AutoRefreshError {
+                        message: format!(
+                            "Failed to create notification pipe: {}",
+                            std::io::Error::last_os_error()
+                        ),
+                    });
                 }
-                std::thread::sleep(poll_interval);
+                (fds[0], fds[1])
+            };
+
+            let spawn_result = {
+                let mut cmd = Command::new(&path);
+                #[cfg(unix)]
+                {
+                    // Pass write fd to child via env var; the child will write a
+                    // success/failure byte after init completes.
+                    cmd.env("AWSWIT_NOTIFY_FD", write_fd.to_string());
+                    // Ensure the write fd is inherited (not close-on-exec)
+                    use std::os::unix::process::CommandExt;
+                    unsafe {
+                        cmd.pre_exec(move || {
+                            // Clear FD_CLOEXEC on the write fd so it survives exec
+                            let flags = libc::fcntl(write_fd, libc::F_GETFD);
+                            if flags >= 0 {
+                                libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+                cmd.spawn()
+            };
+
+            let mut child = spawn_result.map_err(|e| {
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::close(read_fd);
+                        libc::close(write_fd);
+                    }
+                }
+                AwswitError::AutoRefreshError {
+                    message: format!("Failed to spawn daemon: {}", e),
+                }
+            })?;
+
+            #[cfg(unix)]
+            {
+                // Close write end in parent so we get EOF if child dies without writing
+                unsafe { libc::close(write_fd) };
+
+                // Read from pipe with timeout — the child writes 1 byte:
+                //   0x01 = success, 0x00 = failure, EOF = crashed
+                use std::os::unix::io::FromRawFd;
+                let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+
+                let (tx, rx) = std::sync::mpsc::channel();
+                let handle = std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut buf = [0u8; 1];
+                    let mut f = read_file;
+                    let result = f.read_exact(&mut buf);
+                    let _ = tx.send(result.map(|()| buf[0]));
+                });
+
+                let timeout = std::time::Duration::from_secs(10);
+                match rx.recv_timeout(timeout) {
+                    Ok(Ok(1)) => {
+                        let _ = handle.join();
+                        tracing::info!("Spawned autoawswit daemon (pipe handshake confirmed)");
+                        Ok(())
+                    }
+                    Ok(Ok(_)) => {
+                        // Child reported failure
+                        let _ = handle.join();
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        Err(AwswitError::AutoRefreshError {
+                            message: "Daemon reported initialization failure".to_string(),
+                        })
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        // EOF (child died) or timeout
+                        let _ = handle.join();
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        Err(AwswitError::AutoRefreshError {
+                            message: "Daemon process failed to initialize (pipe handshake failed)"
+                                .to_string(),
+                        })
+                    }
+                }
             }
 
-            // PID file didn't appear — kill the spawned process and return error
-            // to prevent orphan processes and duplicate daemon spawns.
-            tracing::error!(
-                "Spawned autoawswit daemon but PID file not written within {:?}, killing process",
-                timeout
-            );
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(AwswitError::AutoRefreshError {
-                message: format!(
-                    "Daemon process failed to initialize within {:?} (PID file not written)",
-                    timeout
-                ),
-            })
+            // Non-unix fallback: poll for PID file
+            #[cfg(not(unix))]
+            {
+                let pid_path = super::get_pid_file_path()?;
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(5);
+                let poll_interval = std::time::Duration::from_millis(100);
+
+                while start.elapsed() < timeout {
+                    if pid_path.exists() {
+                        tracing::info!("Spawned autoawswit daemon process (PID file confirmed)");
+                        return Ok(());
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(AwswitError::AutoRefreshError {
+                    message: format!(
+                        "Daemon process failed to initialize within {:?} (PID file not written)",
+                        timeout
+                    ),
+                })
+            }
         }
         None => Err(AwswitError::AutoRefreshError {
             message: "autoawswit binary not found in the same directory as the current executable"
                 .to_string(),
         }),
+    }
+}
+
+/// Verify that a PID belongs to the autoawswit process.
+/// Returns `Some(true)` if verified, `Some(false)` if different process, `None` if cannot determine.
+#[cfg(unix)]
+fn verify_process_identity(pid: u32) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let comm_path = format!("/proc/{}/comm", pid);
+        match std::fs::read_to_string(&comm_path) {
+            Ok(comm) if comm.trim() == "autoawswit" => Some(true),
+            Ok(_) => Some(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false), // process gone
+            Err(_) => None, // cannot verify (EPERM, etc.)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None // cannot verify on non-Linux
     }
 }
 
@@ -322,78 +428,81 @@ fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
         #[cfg(unix)]
         {
             if let Ok(pid_i32) = i32::try_from(pid) {
-                // Verify the process is actually autoawswit before sending signal
-                let mut verified = false;
-                let mut process_gone = false;
-
                 // Check if process exists at all
-                if unsafe { libc::kill(pid_i32, 0) } != 0 {
-                    process_gone = true;
+                let process_gone = if unsafe { libc::kill(pid_i32, 0) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::ESRCH) {
+                        // No such process — it's gone
+                        true
+                    } else {
+                        // EPERM or other error — process exists but we can't signal it;
+                        // conservatively assume it's alive, leave PID file alone
+                        tracing::warn!(
+                            "kill(0) for PID {} returned {}: assuming process is alive",
+                            pid,
+                            err
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    false
+                };
+
+                if process_gone {
+                    remove_stale_pid_file(&pid_path);
+                    return Ok(());
                 }
 
-                #[cfg(target_os = "linux")]
-                if !process_gone {
-                    let comm_path = format!("/proc/{}/comm", pid);
-                    match fs::read_to_string(&comm_path) {
-                        Ok(comm) if comm.trim() == "autoawswit" => {
-                            verified = true;
+                // Verify process identity using platform-specific helper
+                match verify_process_identity(pid) {
+                    Some(true) => {
+                        // Verified as autoawswit — send SIGTERM
+                        unsafe { libc::kill(pid_i32, libc::SIGTERM) };
+                        tracing::info!("Sent SIGTERM to autoawswit daemon (pid={})", pid);
+
+                        // Wait for the process to actually exit before removing PID file
+                        let start = std::time::Instant::now();
+                        let wait_timeout = std::time::Duration::from_secs(5);
+                        let poll_interval = std::time::Duration::from_millis(100);
+                        loop {
+                            if unsafe { libc::kill(pid_i32, 0) } != 0 {
+                                break;
+                            }
+                            if start.elapsed() >= wait_timeout {
+                                tracing::warn!(
+                                    "Daemon (pid={}) did not exit within {:?} after SIGTERM, sending SIGKILL",
+                                    pid,
+                                    wait_timeout
+                                );
+                                unsafe { libc::kill(pid_i32, libc::SIGKILL) };
+                                // Reap the process to prevent zombie and PID reuse.
+                                // Use WNOHANG loop since we may not be the direct parent.
+                                reap_process(pid_i32);
+                                break;
+                            }
+                            std::thread::sleep(poll_interval);
                         }
-                        Ok(comm) => {
-                            tracing::warn!(
-                                "PID {} is '{}', not autoawswit — refusing to kill",
-                                pid,
-                                comm.trim()
-                            );
-                        }
-                        Err(_) => {
-                            tracing::warn!("Cannot read /proc/{}/comm — process may be gone", pid);
-                            process_gone = true;
-                        }
+
+                        remove_stale_pid_file(&pid_path);
+                    }
+                    Some(false) => {
+                        // Different process occupies this PID — clean up stale PID file
+                        tracing::warn!(
+                            "PID {} is not autoawswit — refusing to kill, removing stale PID file",
+                            pid
+                        );
+                        remove_stale_pid_file(&pid_path);
+                    }
+                    None => {
+                        // Cannot verify (non-Linux or EPERM on /proc) — refuse to kill
+                        tracing::warn!(
+                            "Cannot verify PID {} identity — refusing to send signal. \
+                             Manually stop the daemon or remove the PID file at: {}",
+                            pid,
+                            pid_path.display()
+                        );
                     }
                 }
-
-                #[cfg(not(target_os = "linux"))]
-                if !process_gone {
-                    // TODO: macOS could use sysctl(KERN_PROCARGS2) for process identity verification.
-                    // Current fallback: trust PID file without verification on non-Linux Unix.
-                    tracing::debug!(
-                        "Non-Linux platform: no /proc verification available for PID {}",
-                        pid
-                    );
-                    verified = true;
-                }
-
-                if verified {
-                    unsafe { libc::kill(pid_i32, libc::SIGTERM) };
-                    tracing::info!("Sent SIGTERM to autoawswit daemon (pid={})", pid);
-
-                    // Wait for the process to actually exit before removing PID file
-                    let start = std::time::Instant::now();
-                    let wait_timeout = std::time::Duration::from_secs(5);
-                    let poll_interval = std::time::Duration::from_millis(100);
-                    loop {
-                        if unsafe { libc::kill(pid_i32, 0) } != 0 {
-                            break;
-                        }
-                        if start.elapsed() >= wait_timeout {
-                            tracing::warn!(
-                                "Daemon (pid={}) did not exit within {:?} after SIGTERM, sending SIGKILL",
-                                pid,
-                                wait_timeout
-                            );
-                            unsafe { libc::kill(pid_i32, libc::SIGKILL) };
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            break;
-                        }
-                        std::thread::sleep(poll_interval);
-                    }
-
-                    remove_stale_pid_file(&pid_path);
-                } else if process_gone {
-                    // Process is confirmed gone, safe to clean up PID file
-                    remove_stale_pid_file(&pid_path);
-                }
-                // If not verified and not gone, leave PID file intact
             } else {
                 tracing::warn!("PID {} exceeds i32::MAX, cannot signal", pid);
             }
@@ -407,6 +516,27 @@ fn kill_autoawswit_daemon_inner() -> Result<(), AwswitError> {
     }
 
     Ok(())
+}
+
+/// Attempt to reap a process after SIGKILL to prevent zombies and PID reuse.
+/// Uses waitpid(WNOHANG) in a brief poll loop. If we are not the direct parent,
+/// waitpid will return ECHILD which is harmless — the init process will reap it.
+#[cfg(unix)]
+fn reap_process(pid: i32) {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(500);
+    loop {
+        let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        if ret == pid || ret == -1 {
+            // Reaped successfully, or ECHILD (not our child — init will reap)
+            break;
+        }
+        if start.elapsed() >= timeout {
+            tracing::debug!("waitpid for {} did not complete within {:?}", pid, timeout);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Read PID from a PID file, returning None if missing or unparseable
@@ -448,45 +578,45 @@ fn is_autoawswit_running() -> Result<bool, AwswitError> {
 
     #[cfg(unix)]
     {
-        // On Linux, verify process identity via /proc/{pid}/comm FIRST to avoid
-        // TOCTOU with PID recycling (a different process could claim the PID
-        // between kill(0) and /proc read).
-        #[cfg(target_os = "linux")]
-        {
-            let comm_path = format!("/proc/{}/comm", pid);
-            match fs::read_to_string(&comm_path) {
-                Ok(comm) => {
-                    if comm.trim() != "autoawswit" {
-                        tracing::warn!(
-                            "PID {} is '{}', not autoawswit — stale PID file",
-                            pid,
-                            comm.trim()
-                        );
-                        remove_stale_pid_file(&pid_path);
-                        return Ok(false);
-                    }
-                }
-                Err(_) => {
-                    // /proc not available or process gone
-                    remove_stale_pid_file(&pid_path);
-                    return Ok(false);
-                }
+        // Verify process identity first (on platforms that support it)
+        match verify_process_identity(pid) {
+            Some(true) => {
+                // Confirmed as autoawswit — check if still alive
+            }
+            Some(false) => {
+                // Different process or process gone — stale PID file
+                tracing::warn!("PID {} is not autoawswit — stale PID file", pid);
+                remove_stale_pid_file(&pid_path);
+                return Ok(false);
+            }
+            None => {
+                // Cannot verify identity (non-Linux or EPERM on /proc).
+                // Fall through to kill(0) check below. On non-Linux unix,
+                // we can only confirm a process exists at this PID but cannot
+                // verify it is autoawswit (PID recycling risk).
+                tracing::debug!(
+                    "Cannot verify process identity for PID {} — falling back to kill(0)",
+                    pid
+                );
             }
         }
 
-        // Confirm the (verified) process is still alive
+        // Confirm the process is still alive
         if unsafe { libc::kill(pid_i32, 0) } != 0 {
-            remove_stale_pid_file(&pid_path);
-            return Ok(false);
-        }
-
-        // On non-Linux unix, we only have kill(0) — no /proc verification available
-        #[cfg(not(target_os = "linux"))]
-        {
-            tracing::debug!(
-                "Non-Linux platform: no /proc verification available for PID {}",
-                pid
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                // No such process — remove stale PID file
+                remove_stale_pid_file(&pid_path);
+                return Ok(false);
+            }
+            // EPERM or other error — process exists but we can't signal it;
+            // conservatively assume daemon is alive
+            tracing::warn!(
+                "kill(0) for PID {} returned {}: conservatively assuming daemon is alive",
+                pid,
+                err
             );
+            return Ok(true);
         }
 
         Ok(true)
@@ -531,6 +661,8 @@ mod tests {
             awswit_cache_name: None,
             aws_role_arn: None,
             region: None,
+            version: default_profile_version(),
+            awswit_binary_version: Some("0.1.0".to_string()),
         };
         let json = serde_json::to_string(&profile).unwrap();
         assert!(!json.contains("secret_access_key"));

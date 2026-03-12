@@ -5,7 +5,6 @@
 //! a single, validated code path.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -62,45 +61,40 @@ pub fn lock_aws_credentials_file(creds_path: &Path) -> Result<fs::File, AwswitEr
     lock_path.push(".lock");
     let lock_path = PathBuf::from(lock_path);
 
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let lock_file = opts.open(&lock_path)?;
-
-    lock_with_timeout(&lock_file, LOCK_TIMEOUT).map_err(|e| AwswitError::AutoRefreshError {
-        message: format!("Failed to acquire credentials lock: {}", e),
-    })?;
-
-    Ok(lock_file)
-}
-
-/// Try to acquire an exclusive lock with exponential backoff and timeout.
-fn lock_with_timeout(file: &fs::File, timeout: Duration) -> io::Result<()> {
-    crate::utils::fs::lock_exclusive_with_timeout(file, timeout)
+    crate::utils::fs::lock_file_with_permissions(&lock_path, LOCK_TIMEOUT).map_err(|e| {
+        AwswitError::AutoRefreshError {
+            message: format!("Failed to acquire credentials lock: {}", e),
+        }
+    })
 }
 
 /// Remove an INI section from credential file content.
+/// Preserves the original line ending style (CRLF vs LF).
 fn remove_credentials_section(content: &str, profile_name: &str) -> String {
     let section_header = format!("[{}]", profile_name);
+    // Detect the dominant line ending in the file
+    let line_ending = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
     let mut new_lines = Vec::new();
     let mut skip = false;
 
     for line in content.lines() {
-        if line.starts_with('[') {
-            skip = line.trim() == section_header;
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            skip = trimmed == section_header;
         }
         if !skip {
             new_lines.push(line);
         }
     }
 
-    let mut new_content = new_lines.join("\n");
+    let mut new_content = new_lines.join(line_ending);
     if !new_content.ends_with('\n') && !new_content.is_empty() {
-        new_content.push('\n');
+        new_content.push_str(line_ending);
     }
 
     new_content
@@ -392,6 +386,39 @@ mod tests {
         // Don't create the file
         let result = remove_credentials(&creds_path, "anything");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remove_section_preserves_crlf_line_endings() {
+        let content =
+            "[before]\r\nkey1 = val1\r\n[target]\r\nkey2 = val2\r\n[after]\r\nkey3 = val3\r\n";
+        let result = remove_credentials_section(content, "target");
+        // Should preserve CRLF
+        assert!(result.contains("\r\n"));
+        assert!(result.contains("[before]\r\n"));
+        assert!(result.contains("[after]\r\n"));
+        assert!(!result.contains("[target]"));
+    }
+
+    #[test]
+    fn remove_section_preserves_lf_line_endings() {
+        let content = "[before]\nkey1 = val1\n[target]\nkey2 = val2\n[after]\nkey3 = val3\n";
+        let result = remove_credentials_section(content, "target");
+        // Should not introduce CRLF
+        assert!(!result.contains("\r\n"));
+        assert!(result.contains("[before]\n"));
+    }
+
+    #[test]
+    fn remove_section_handles_whitespace_around_header() {
+        let content = "[before]\nkey1 = val1\n  [target]  \nkey2 = val2\n[after]\nkey3 = val3\n";
+        let result = remove_credentials_section(content, "target");
+        assert!(result.contains("[before]"));
+        assert!(result.contains("key1 = val1"));
+        assert!(!result.contains("[target]"));
+        assert!(!result.contains("key2 = val2"));
+        assert!(result.contains("[after]"));
+        assert!(result.contains("key3 = val3"));
     }
 
     #[test]

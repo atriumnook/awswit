@@ -3,7 +3,7 @@
 //! Extracted from `src/bin/autoawswit.rs` so the binary is a thin wrapper
 //! that only handles daemonization (fork/setsid) and delegates here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -134,7 +134,22 @@ async fn run_daemon_loop_inner(#[cfg(unix)] mut sigterm: Option<&mut tokio::sign
                     break;
                 }
 
-                backoff_secs = (backoff_secs.saturating_mul(2)).min(MAX_BACKOFF_SECS);
+                // Add jitter to prevent thundering herd when multiple daemons retry
+                let jitter = {
+                    // Simple deterministic jitter using process ID and elapsed time
+                    // to avoid pulling in a random number generator dependency.
+                    let seed = (std::process::id() as u64)
+                        .wrapping_mul(backoff_secs)
+                        .wrapping_add(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.subsec_nanos() as u64)
+                                .unwrap_or(0),
+                        );
+                    seed % (backoff_secs / 2 + 1)
+                };
+                backoff_secs =
+                    (backoff_secs.saturating_mul(2).saturating_add(jitter)).min(MAX_BACKOFF_SECS);
                 continue;
             }
         }
@@ -199,7 +214,7 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
     tracing::info!("Checking {} auto-refresh profiles", profiles.len());
 
     // Clean up profiles that have been expired for too long
-    let mut expired_profiles = Vec::new();
+    let mut expired_profiles = HashSet::new();
     for (name, profile) in &profiles {
         if let Some(ref exp_str) = profile.awswit_role_expiration {
             if let Ok(exp_time) = DateTime::parse_from_rfc3339(exp_str) {
@@ -210,7 +225,7 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
                         name,
                         exp_str
                     );
-                    expired_profiles.push(name.clone());
+                    expired_profiles.insert(name.clone());
                 }
             }
         }
@@ -229,7 +244,8 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
         }
         // Remove expired credential sections in batch
         let creds_path = crate::utils::paths::aws_credentials_path()?;
-        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles) {
+        let expired_list: Vec<String> = expired_profiles.iter().cloned().collect();
+        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_list) {
             tracing::warn!("Failed to remove expired credential sections: {}", e);
         }
     }
@@ -266,7 +282,7 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
             message: format!(
                 "All {} refresh attempts failed. Last error: {}",
                 failures,
-                last_error.unwrap_or_default()
+                last_error.unwrap_or_else(|| "Unknown error".to_string())
             ),
         });
     }
@@ -299,7 +315,13 @@ fn load_auto_refresh_profiles() -> Result<HashMap<String, AutoRefreshProfile>, A
                     profiles.insert(profile.profile_name.clone(), profile);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to parse {}: {}", path.display(), e);
+                    tracing::error!(
+                        "Failed to parse profile metadata {}: {}. \
+                         This file may be corrupted. Remove it to resolve: {}",
+                        path.display(),
+                        e,
+                        path.display()
+                    );
                 }
             }
         }
@@ -346,7 +368,7 @@ fn should_refresh(profile: &AutoRefreshProfile) -> bool {
 async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError> {
     if profile.awswit_command.is_empty() {
         return Err(AwswitError::AutoRefreshError {
-            message: "Empty command".to_string(),
+            message: format!("Empty command for profile '{}'", profile.profile_name),
         });
     }
 
@@ -449,10 +471,16 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError
     )
     .await
     .map_err(|_| AwswitError::AutoRefreshError {
-        message: "refresh_profile timed out after 60 seconds".to_string(),
+        message: format!(
+            "Refresh of profile '{}' timed out after 60 seconds",
+            profile.profile_name
+        ),
     })?
     .map_err(|e| AwswitError::AutoRefreshError {
-        message: format!("Failed to execute command: {}", e),
+        message: format!(
+            "Failed to execute command for profile '{}': {}",
+            profile.profile_name, e
+        ),
     })?;
 
     if !output.status.success() {
@@ -483,21 +511,72 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
         creds
             .get("AWS_ACCESS_KEY_ID")
             .ok_or_else(|| AwswitError::AutoRefreshError {
-                message: "Missing access key".to_string(),
+                message: format!(
+                    "Missing access key in refresh output for profile '{}'",
+                    profile_name
+                ),
             })?;
     let secret_key =
         creds
             .get("AWS_SECRET_ACCESS_KEY")
             .ok_or_else(|| AwswitError::AutoRefreshError {
-                message: "Missing secret key".to_string(),
+                message: format!(
+                    "Missing secret key in refresh output for profile '{}'",
+                    profile_name
+                ),
             })?;
     let session_token = creds.get("AWS_SESSION_TOKEN");
     let expiration = creds.get("AWSWIT_EXPIRATION");
 
+    // Read profile metadata once for both idempotency check and later update
+    let profile_path = super::get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
+    let existing_profile = if profile_path.exists() {
+        match fs::read_to_string(&profile_path) {
+            Ok(meta_content) => match serde_json::from_str::<AutoRefreshProfile>(&meta_content) {
+                Ok(profile) => Some(profile),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse profile metadata {}: {}, skipping metadata operations",
+                        profile_path.display(),
+                        e
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read profile metadata {}: {}",
+                    profile_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Idempotency check: if metadata already has a newer or equal expiration,
+    // a previous partial run already wrote the credentials successfully.
+    if let (Some(new_exp), Some(ref profile)) = (expiration, &existing_profile) {
+        if let Some(ref existing_exp) = profile.awswit_role_expiration {
+            if existing_exp >= new_exp {
+                tracing::debug!(
+                    "Skipping redundant refresh for {} (existing expiration {} >= new {})",
+                    profile_name,
+                    existing_exp,
+                    new_exp
+                );
+                return Ok(());
+            }
+        }
+    }
+
     // Write credentials first — this is the critical path. If we crash after
     // writing credentials but before updating metadata, the metadata will be
-    // stale but self-correcting (next refresh cycle will fix it). The reverse
-    // (metadata updated but credentials stale) would leave users with expired creds.
+    // stale but self-correcting: next refresh cycle sees the old (earlier)
+    // expiration, triggers another refresh, which is idempotent since
+    // atomic_write_restricted overwrites the file completely.
     let creds_path = crate::utils::paths::aws_credentials_path()?;
     credentials_file::write_credentials_from_output(
         &creds_path,
@@ -508,28 +587,15 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
         expiration.map(|s| s.as_str()),
     )?;
 
-    // Update profile metadata after credentials are written
-    let profile_path = super::get_auto_refresh_dir()?.join(format!("{}.json", profile_name));
-    if profile_path.exists() {
-        let meta_content = fs::read_to_string(&profile_path)?;
-        match serde_json::from_str::<AutoRefreshProfile>(&meta_content) {
-            Ok(mut profile) => {
-                profile.awswit_role_expiration = expiration.cloned();
-
-                let updated = serde_json::to_string_pretty(&profile)?;
-                crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes())
-                    .map_err(|e| AwswitError::AutoRefreshError {
-                        message: format!("Failed to write profile metadata: {}", e),
-                    })?;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse profile metadata {}: {}, skipping metadata update",
-                    profile_path.display(),
-                    e
-                );
-            }
-        }
+    // Update profile metadata after credentials are written (reuse the read above)
+    if let Some(mut profile) = existing_profile {
+        profile.awswit_role_expiration = expiration.cloned();
+        let updated = serde_json::to_string_pretty(&profile)?;
+        crate::utils::fs::atomic_write_restricted(&profile_path, updated.as_bytes()).map_err(
+            |e| AwswitError::AutoRefreshError {
+                message: format!("Failed to write profile metadata: {}", e),
+            },
+        )?;
     }
 
     Ok(())
@@ -547,6 +613,8 @@ mod tests {
             awswit_cache_name: None,
             aws_role_arn: None,
             region: None,
+            version: 1,
+            awswit_binary_version: None,
         }
     }
 
@@ -620,5 +688,60 @@ mod tests {
             creds.get("AWS_SECRET_ACCESS_KEY").unwrap(),
             "secret+with=equals"
         );
+    }
+
+    #[test]
+    fn refresh_profile_rejects_empty_command() {
+        let profile = AutoRefreshProfile {
+            profile_name: "test".to_string(),
+            awswit_command: vec![],
+            awswit_role_expiration: None,
+            awswit_cache_name: None,
+            aws_role_arn: None,
+            region: None,
+            version: 1,
+            awswit_binary_version: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::refresh_profile(&profile));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Empty command"), "got: {}", err);
+    }
+
+    #[test]
+    fn refresh_profile_rejects_disallowed_command() {
+        let profile = AutoRefreshProfile {
+            profile_name: "test".to_string(),
+            awswit_command: vec!["malicious-binary".to_string(), "test".to_string()],
+            awswit_role_expiration: None,
+            awswit_cache_name: None,
+            aws_role_arn: None,
+            region: None,
+            version: 1,
+            awswit_binary_version: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::refresh_profile(&profile));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not an allowed command"), "got: {}", err);
+    }
+
+    #[test]
+    fn refresh_profile_rejects_path_traversal() {
+        let profile = AutoRefreshProfile {
+            profile_name: "test".to_string(),
+            awswit_command: vec!["../../../tmp/evil".to_string()],
+            awswit_role_expiration: None,
+            awswit_cache_name: None,
+            aws_role_arn: None,
+            region: None,
+            version: 1,
+            awswit_binary_version: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::refresh_profile(&profile));
+        assert!(result.is_err());
     }
 }
