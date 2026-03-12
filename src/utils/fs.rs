@@ -33,9 +33,9 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(&tmp_path)?;
             file.write_all(content)?;
             file.sync_all()?;

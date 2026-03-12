@@ -289,8 +289,12 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
                         cmd.pre_exec(move || {
                             // Clear FD_CLOEXEC on the write fd so it survives exec
                             let flags = libc::fcntl(write_fd, libc::F_GETFD);
-                            if flags >= 0 {
-                                libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                            if flags < 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                            {
+                                return Err(std::io::Error::last_os_error());
                             }
                             Ok(())
                         });

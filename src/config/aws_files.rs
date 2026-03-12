@@ -96,11 +96,13 @@ impl AwsFiles {
             if let Ok(meta) = fs::metadata(&path) {
                 let mode = meta.mode() & 0o777;
                 if mode & 0o002 != 0 {
-                    tracing::warn!(
-                        "AWS credentials file {} is world-writable (mode {:o}). This is a security risk.",
-                        path,
-                        mode
-                    );
+                    return Err(AwswitError::ConfigFileError {
+                        message: format!(
+                            "AWS credentials file {} is world-writable (mode {:o}). \
+                             Fix with: chmod 600 {}",
+                            path, mode, path
+                        ),
+                    });
                 }
                 if mode & 0o044 != 0 {
                     tracing::warn!(
