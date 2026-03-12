@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::error::AwswitError;
 
-/// awswit configuration stored in ~/.awswit/config.yaml
+/// awswit configuration stored in ~/.awswit/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AwswitConfig {
@@ -45,8 +45,17 @@ impl Default for AwswitConfig {
 }
 
 impl AwswitConfig {
-    /// Get the config file path
+    /// Get the config file path (TOML)
     pub fn config_path() -> Result<PathBuf, AwswitError> {
+        crate::utils::paths::awswit_home_dir()
+            .map(|p| p.join("config.toml"))
+            .map_err(|e| AwswitError::ConfigFileError {
+                message: e.to_string(),
+            })
+    }
+
+    /// Get the legacy YAML config file path
+    fn legacy_yaml_path() -> Result<PathBuf, AwswitError> {
         crate::utils::paths::awswit_home_dir()
             .map(|p| p.join("config.yaml"))
             .map_err(|e| AwswitError::ConfigFileError {
@@ -54,25 +63,47 @@ impl AwswitConfig {
             })
     }
 
-    /// Load config from file, or return default if not found
+    /// Load config from file, or return default if not found.
+    /// Prefers config.toml; falls back to config.yaml with a deprecation warning.
     pub fn load() -> Result<Self, AwswitError> {
-        let path = Self::config_path()?;
+        let toml_path = Self::config_path()?;
 
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        // Try TOML first
+        match fs::read_to_string(&toml_path) {
+            Ok(content) => {
+                let config: Self = toml::from_str(&content)?;
+                return Ok(config);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!("awswit config not found, using defaults");
-                return Ok(Self::default());
+                // Fall through to YAML fallback
             }
             Err(e) => {
                 return Err(AwswitError::ConfigFileError {
                     message: format!("Failed to read config: {}", e),
                 });
             }
-        };
+        }
 
-        let config: Self = serde_yml::from_str(&content)?;
-        Ok(config)
+        // Try legacy YAML fallback
+        let yaml_path = Self::legacy_yaml_path()?;
+        match fs::read_to_string(&yaml_path) {
+            Ok(content) => {
+                eprintln!("Warning: ~/.awswit/config.yaml is deprecated. Rename to config.toml.");
+                let config: Self = toml::from_str(&content).map_err(|_| {
+                    AwswitError::ConfigFileError {
+                        message: "Failed to parse config.yaml. Please convert to TOML format and rename to config.toml.".to_string(),
+                    }
+                })?;
+                Ok(config)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("awswit config not found, using defaults");
+                Ok(Self::default())
+            }
+            Err(e) => Err(AwswitError::ConfigFileError {
+                message: format!("Failed to read config: {}", e),
+            }),
+        }
     }
 
     /// Save config to file
@@ -89,7 +120,7 @@ impl AwswitConfig {
             }
         }
 
-        let content = serde_yml::to_string(self)?;
+        let content = toml::to_string_pretty(self)?;
         crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
 
         tracing::debug!("Saved config to {:?}", path);
@@ -215,11 +246,19 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_serialization() {
+    fn test_toml_serialization() {
         let config = AwswitConfig::default();
-        let yaml = serde_yml::to_string(&config).unwrap();
-        assert!(yaml.contains("colors"));
-        assert!(yaml.contains("fuzzy-match"));
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(toml_str.contains("colors"));
+        assert!(toml_str.contains("fuzzy-match"));
+    }
+
+    #[test]
+    fn test_toml_deserialization() {
+        let toml_str = "colors = true\n\"fuzzy-match\" = false\n";
+        let config: AwswitConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.colors);
+        assert!(!config.fuzzy_match);
     }
 
     #[test]
@@ -257,17 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_yaml_keys_rejected_on_load() {
-        // Unknown keys should be rejected to catch typos in config files.
-        let yaml = "colors: true\nfuzzy-match: false\nunknown-plugin-key: some-value\n";
-        let result = serde_yml::from_str::<AwswitConfig>(yaml);
+    fn test_unknown_toml_keys_rejected_on_load() {
+        let toml_str =
+            "colors = true\n\"fuzzy-match\" = false\nunknown-plugin-key = \"some-value\"\n";
+        let result = toml::from_str::<AwswitConfig>(toml_str);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_valid_yaml_keys_accepted_on_load() {
-        let yaml = "colors: true\nfuzzy-match: false\n";
-        let config: AwswitConfig = serde_yml::from_str(yaml).unwrap();
+    fn test_valid_toml_keys_accepted_on_load() {
+        let toml_str = "colors = true\n\"fuzzy-match\" = false\n";
+        let config: AwswitConfig = toml::from_str(toml_str).unwrap();
         assert!(config.colors);
         assert!(!config.fuzzy_match);
     }

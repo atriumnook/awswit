@@ -110,6 +110,21 @@ pub enum Command {
         /// Shell type (bash, zsh, fish, powershell)
         shell: String,
     },
+
+    /// Generate static shell completions
+    ///
+    /// This generates tab-completion scripts for your shell.
+    /// Unlike --refresh-autocomplete (which lists dynamic profile names),
+    /// this provides static completion of awswit's own flags and subcommands.
+    ///
+    /// Usage:
+    ///   awswit completions bash > /etc/bash_completion.d/awswit
+    ///   awswit completions zsh > ~/.zfunc/_awswit
+    ///   awswit completions fish > ~/.config/fish/completions/awswit.fish
+    Completions {
+        /// Shell type
+        shell: clap_complete::Shell,
+    },
 }
 
 impl Args {
@@ -316,10 +331,19 @@ mod tests {
     fn test_partition_for_region() {
         assert_eq!(super::partition_for_region(None), "aws");
         assert_eq!(super::partition_for_region(Some("us-east-1")), "aws");
-        assert_eq!(super::partition_for_region(Some("us-gov-west-1")), "aws-us-gov");
-        assert_eq!(super::partition_for_region(Some("us-gov-east-1")), "aws-us-gov");
+        assert_eq!(
+            super::partition_for_region(Some("us-gov-west-1")),
+            "aws-us-gov"
+        );
+        assert_eq!(
+            super::partition_for_region(Some("us-gov-east-1")),
+            "aws-us-gov"
+        );
         assert_eq!(super::partition_for_region(Some("cn-north-1")), "aws-cn");
-        assert_eq!(super::partition_for_region(Some("cn-northwest-1")), "aws-cn");
+        assert_eq!(
+            super::partition_for_region(Some("cn-northwest-1")),
+            "aws-cn"
+        );
     }
 
     #[test]

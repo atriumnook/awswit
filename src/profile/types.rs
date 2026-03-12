@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::AwswitError;
+
 /// Valid credential sources
 pub const VALID_CREDENTIAL_SOURCES: &[&str] =
     &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
@@ -67,7 +69,7 @@ impl Profile {
     }
 
     /// Validate the profile configuration
-    pub fn validate(&self) -> Result<(), ProfileValidationError> {
+    pub fn validate(&self) -> Result<(), AwswitError> {
         // Role profiles must have source_profile OR credential_source OR credential_process
         if self.is_role_profile() {
             let has_source = self.source_profile.is_some();
@@ -75,20 +77,27 @@ impl Profile {
             let has_cred_process = self.credential_process.is_some();
 
             if !has_source && !has_cred_source && !has_cred_process {
-                return Err(ProfileValidationError::MissingSourceForRole);
+                return Err(AwswitError::InvalidProfile {
+                    profile_name: self.name.clone(),
+                    message: "role profiles must contain one of credential_source, source_profile, or credential_process".to_string(),
+                });
             }
 
             // source_profile and credential_source are mutually exclusive
             if has_source && has_cred_source {
-                return Err(ProfileValidationError::ConflictingCredentialSource);
+                return Err(AwswitError::InvalidProfile {
+                    profile_name: self.name.clone(),
+                    message: "credential_source and source_profile are mutually exclusive"
+                        .to_string(),
+                });
             }
 
             // Validate credential_source value
             if has_cred_source && !self.has_valid_credential_source() {
                 let cs = self.credential_source.as_deref().unwrap_or_default();
-                return Err(ProfileValidationError::InvalidCredentialSource(
-                    cs.to_string(),
-                ));
+                return Err(AwswitError::InvalidCredentialSource {
+                    name: cs.to_string(),
+                });
             }
         }
 
@@ -99,7 +108,10 @@ impl Profile {
         {
             // Allow if using credential_source
             if !self.has_valid_credential_source() {
-                return Err(ProfileValidationError::MissingAccessKeys);
+                return Err(AwswitError::InvalidProfile {
+                    profile_name: self.name.clone(),
+                    message: "missing aws_access_key_id or aws_secret_access_key".to_string(),
+                });
             }
         }
 
@@ -143,45 +155,6 @@ impl Profile {
                     }
                 })
             })
-    }
-}
-
-/// Profile validation errors
-#[derive(Debug, Clone)]
-pub enum ProfileValidationError {
-    MissingSourceForRole,
-    ConflictingCredentialSource,
-    InvalidCredentialSource(String),
-    UnsupportedCredentialSource(String),
-    MissingAccessKeys,
-}
-
-impl std::fmt::Display for ProfileValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingSourceForRole => {
-                write!(f, "role profiles must contain one of credential_source, source_profile, or credential_process")
-            }
-            Self::ConflictingCredentialSource => {
-                write!(
-                    f,
-                    "credential_source and source_profile are mutually exclusive"
-                )
-            }
-            Self::InvalidCredentialSource(cs) => {
-                write!(f, "unsupported credential_source: {}", cs)
-            }
-            Self::UnsupportedCredentialSource(cs) => {
-                write!(
-                    f,
-                    "credential_source '{}' is not supported by awswit. Use the AWS CLI default credential chain instead.",
-                    cs
-                )
-            }
-            Self::MissingAccessKeys => {
-                write!(f, "missing aws_access_key_id or aws_secret_access_key")
-            }
-        }
     }
 }
 
@@ -270,7 +243,13 @@ mod tests {
             ..Default::default()
         };
         let err = profile.validate().unwrap_err();
-        assert!(matches!(err, ProfileValidationError::ConflictingCredentialSource));
+        assert!(matches!(
+            err,
+            AwswitError::InvalidProfile {
+                message,
+                ..
+            } if message.contains("mutually exclusive")
+        ));
     }
 
     #[test]
@@ -287,7 +266,13 @@ mod tests {
     fn test_validate_user_profile_missing_keys() {
         let profile = Profile::default();
         let err = profile.validate().unwrap_err();
-        matches!(err, ProfileValidationError::MissingAccessKeys);
+        assert!(matches!(
+            err,
+            AwswitError::InvalidProfile {
+                message,
+                ..
+            } if message.contains("missing aws_access_key_id")
+        ));
     }
 
     #[test]

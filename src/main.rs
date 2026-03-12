@@ -56,6 +56,9 @@ async fn run(args: Args) -> Result<(), AwswitError> {
             Command::Init { shell } => {
                 return handle_init(shell);
             }
+            Command::Completions { shell } => {
+                return handle_completions(*shell);
+            }
         }
     }
 
@@ -360,6 +363,13 @@ fn determine_target_profile(
     }
 
     Err(AwswitError::ProfileNotFound { name: profile_name })
+}
+
+fn handle_completions(shell: clap_complete::Shell) -> Result<(), AwswitError> {
+    use clap::CommandFactory;
+    let mut cmd = Args::command();
+    clap_complete::generate(shell, &mut cmd, "awswit", &mut std::io::stdout());
+    Ok(())
 }
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {
