@@ -77,6 +77,23 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Open (or create) a lock file with restrictive permissions and acquire an exclusive lock.
+///
+/// On Unix, the file is created with mode 0o600 and `O_NOFOLLOW` to prevent
+/// symlink attacks. Returns the locked file handle; the lock is released on drop.
+pub fn lock_file_with_permissions(path: &Path, timeout: Duration) -> io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let lock_file = opts.open(path)?;
+    lock_exclusive_with_timeout(&lock_file, timeout)?;
+    Ok(lock_file)
+}
+
 /// Try to acquire an exclusive file lock with exponential backoff and timeout.
 ///
 /// Uses `thread::sleep` for backoff intentionally — this is called from both
