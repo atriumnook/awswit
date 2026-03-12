@@ -203,6 +203,7 @@ pub fn write_own_pid_file() -> Result<(), AwswitError> {
             .create(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&pid_path)?;
         file.write_all(std::process::id().to_string().as_bytes())?;
     }
@@ -292,11 +293,15 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
             let mut by_creds_path: HashMap<PathBuf, Vec<String>> = HashMap::new();
             for name in &confirmed_expired {
                 let path = if let Some(profile) = profiles.get(name) {
-                    credentials_path_for_profile(profile)
-                        .unwrap_or_else(|_| PathBuf::from(""))
+                    credentials_path_for_profile(profile).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to resolve credentials path for '{}': {}", name, e);
+                        PathBuf::from("")
+                    })
                 } else {
-                    crate::utils::paths::aws_credentials_path()
-                        .unwrap_or_else(|_| PathBuf::from(""))
+                    crate::utils::paths::aws_credentials_path().unwrap_or_else(|e| {
+                        tracing::warn!("Failed to resolve default credentials path: {}", e);
+                        PathBuf::from("")
+                    })
                 };
                 if !path.as_os_str().is_empty() {
                     by_creds_path.entry(path).or_default().push(name.clone());
@@ -580,7 +585,11 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError
     Ok(())
 }
 
-fn update_credentials_file(profile_name: &str, output: &str, creds_path: &Path) -> Result<(), AwswitError> {
+fn update_credentials_file(
+    profile_name: &str,
+    output: &str,
+    creds_path: &Path,
+) -> Result<(), AwswitError> {
     let mut creds: HashMap<String, String> = HashMap::new();
 
     for line in output.lines() {
