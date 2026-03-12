@@ -8,7 +8,28 @@ use crate::profile::Profile;
 
 /// Check if a string value is "truthy" (1, true, yes, on — case insensitive).
 pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    ["1", "true", "yes", "on"]
+        .iter()
+        .any(|candidate| val.eq_ignore_ascii_case(candidate))
+}
+
+fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--prompt".to_string(),
+        "AWS Profile> ".to_string(),
+        "--height".to_string(),
+        "40%".to_string(),
+        "--reverse".to_string(),
+        "--no-sort".to_string(),
+    ];
+
+    if let Some(opts) = extra_opts {
+        for token in opts.split_whitespace() {
+            args.push(token.to_string());
+        }
+    }
+
+    args
 }
 
 /// Select a profile using external fzf.
@@ -40,20 +61,7 @@ pub fn select_with_fzf(
 
     let input: String = names.iter().map(|n| format!("{}\n", n)).collect();
 
-    let mut fzf_args = vec![
-        "--prompt".to_string(),
-        "AWS Profile> ".to_string(),
-        "--height".to_string(),
-        "40%".to_string(),
-        "--reverse".to_string(),
-        "--no-sort".to_string(),
-    ];
-
-    if let Ok(opts) = std::env::var("AWSWIT_FZF_OPTS") {
-        for token in opts.split_whitespace() {
-            fzf_args.push(token.to_string());
-        }
-    }
+    let fzf_args = build_fzf_args(std::env::var("AWSWIT_FZF_OPTS").ok().as_deref());
 
     let mut child = Command::new("fzf")
         .args(&fzf_args)
@@ -75,7 +83,9 @@ pub fn select_with_fzf(
         })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
+        if let Err(e) = stdin.write_all(input.as_bytes()) {
+            tracing::warn!("Failed to write to fzf stdin: {}", e);
+        }
     }
 
     let output = child
@@ -128,5 +138,37 @@ mod tests {
         assert!(!is_truthy(""));
         assert!(!is_truthy("maybe"));
         assert!(!is_truthy("2"));
+    }
+
+    #[test]
+    fn build_fzf_args_without_extra_opts() {
+        assert_eq!(
+            build_fzf_args(None),
+            vec![
+                "--prompt",
+                "AWS Profile> ",
+                "--height",
+                "40%",
+                "--reverse",
+                "--no-sort",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_fzf_args_with_extra_opts() {
+        assert_eq!(
+            build_fzf_args(Some("--ansi --cycle")),
+            vec![
+                "--prompt",
+                "AWS Profile> ",
+                "--height",
+                "40%",
+                "--reverse",
+                "--no-sort",
+                "--ansi",
+                "--cycle",
+            ]
+        );
     }
 }

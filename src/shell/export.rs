@@ -16,7 +16,6 @@ const MANAGED_VARS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
-    "AWS_SECURITY_TOKEN",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
     "AWS_PROFILE",
@@ -38,10 +37,6 @@ fn credential_bindings(
             Some(creds.secret_access_key.clone()),
         ),
         ("AWS_SESSION_TOKEN", creds.session_token.clone()),
-        // AWS_SECURITY_TOKEN is the legacy name for AWS_SESSION_TOKEN.
-        // Some older AWS SDKs and tools (e.g., boto2, legacy Java SDK) only read
-        // this variable. This can be removed once boto2 usage is negligible.
-        ("AWS_SECURITY_TOKEN", creds.session_token.clone()),
         ("AWS_REGION", creds.region.clone()),
         ("AWS_DEFAULT_REGION", creds.region.clone()),
         // Unset AWS_PROFILE and AWS_DEFAULT_PROFILE to prevent conflict with the
@@ -326,7 +321,6 @@ mod tests {
         assert!(output.contains("unset AWS_REGION"));
         assert!(output.contains("unset AWS_DEFAULT_REGION"));
         assert!(output.contains("unset AWS_SESSION_TOKEN"));
-        assert!(output.contains("unset AWS_SECURITY_TOKEN"));
 
         let exporter = ShellExporter::for_shell(ShellType::Fish);
         let output = exporter.generate_export_commands(&creds, "test");

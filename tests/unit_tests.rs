@@ -80,7 +80,6 @@ mod shell_export {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
         let output = exporter.generate_export_commands(&creds, "test");
         assert!(output.contains("unset AWS_SESSION_TOKEN"));
-        assert!(output.contains("unset AWS_SECURITY_TOKEN"));
     }
 
     #[test]
