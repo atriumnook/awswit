@@ -541,19 +541,19 @@ impl<'a> ProfileResolver<'a> {
             }
             "Ec2InstanceMetadata" | "EcsContainer" => {
                 tracing::info!("Using AWS SDK default credential chain for {}", source);
-                let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-                let provider = sdk_config
-                    .credentials_provider()
-                    .ok_or_else(|| AwswitError::InvalidCredentialSource {
+                let sdk_config =
+                    aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+                let provider = sdk_config.credentials_provider().ok_or_else(|| {
+                    AwswitError::InvalidCredentialSource {
                         name: format!("No credentials provider available for {}", source),
-                    })?;
+                    }
+                })?;
                 use aws_credential_types::provider::ProvideCredentials;
-                let creds = provider
-                    .provide_credentials()
-                    .await
-                    .map_err(|e| AwswitError::InvalidCredentialSource {
+                let creds = provider.provide_credentials().await.map_err(|e| {
+                    AwswitError::InvalidCredentialSource {
                         name: format!("Failed to get credentials from {}: {}", source, e),
-                    })?;
+                    }
+                })?;
                 Ok(Credentials {
                     access_key_id: creds.access_key_id().to_string(),
                     secret_access_key: creds.secret_access_key().to_string(),
@@ -909,10 +909,7 @@ mod tests {
         let resolver = ProfileResolver::new(&profiles, &config);
         let chain = resolver.get_role_chain("role").unwrap();
         let mfa = resolver.get_mfa_serial_for_chain(&chain);
-        assert_eq!(
-            mfa,
-            Some("arn:aws:iam::111:mfa/user".to_string())
-        );
+        assert_eq!(mfa, Some("arn:aws:iam::111:mfa/user".to_string()));
     }
 
     #[test]

@@ -224,15 +224,14 @@ fn lock_daemon(lock_path: &std::path::Path) -> Result<fs::File, AwswitError> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let lock_file = opts.open(lock_path).map_err(|e| AwswitError::AutoRefreshError {
-        message: format!("Failed to open lock: {}", e),
-    })?;
+    let lock_file = opts
+        .open(lock_path)
+        .map_err(|e| AwswitError::AutoRefreshError {
+            message: format!("Failed to open lock: {}", e),
+        })?;
 
-    crate::utils::fs::lock_exclusive_with_timeout(
-        &lock_file,
-        std::time::Duration::from_secs(30),
-    )
-    .map_err(|e| AwswitError::AutoRefreshError {
+    crate::utils::fs::lock_exclusive_with_timeout(&lock_file, std::time::Duration::from_secs(30))
+        .map_err(|e| AwswitError::AutoRefreshError {
         message: format!("Failed to acquire daemon lock: {}", e),
     })?;
 
@@ -263,11 +262,12 @@ fn spawn_autoawswit_daemon() -> Result<(), AwswitError> {
 
     match autoawswit_path {
         Some(path) => {
-            let mut child = Command::new(path)
-                .spawn()
-                .map_err(|e| AwswitError::AutoRefreshError {
-                    message: format!("Failed to spawn daemon: {}", e),
-                })?;
+            let mut child =
+                Command::new(path)
+                    .spawn()
+                    .map_err(|e| AwswitError::AutoRefreshError {
+                        message: format!("Failed to spawn daemon: {}", e),
+                    })?;
 
             // Wait for daemon to write its PID file before releasing lock.
             // This prevents a race where another caller checks is_running()
@@ -419,7 +419,11 @@ fn read_pid(pid_path: &std::path::Path) -> Option<u32> {
 fn remove_stale_pid_file(pid_path: &std::path::Path) {
     if let Err(e) = fs::remove_file(pid_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("Failed to remove stale PID file {}: {}", pid_path.display(), e);
+            tracing::warn!(
+                "Failed to remove stale PID file {}: {}",
+                pid_path.display(),
+                e
+            );
         }
     }
 }

@@ -51,11 +51,8 @@ fn test_load_and_parse_config_profiles() {
     let config_path = temp_dir.path().join("config");
     let creds_path = temp_dir.path().join("credentials");
 
-    let aws_files = AwsFiles::load(
-        config_path.to_str().unwrap(),
-        creds_path.to_str().unwrap(),
-    )
-    .unwrap();
+    let aws_files =
+        AwsFiles::load(config_path.to_str().unwrap(), creds_path.to_str().unwrap()).unwrap();
 
     assert!(aws_files.config_profiles.contains_key("dev"));
     assert!(aws_files.config_profiles.contains_key("prod"));
@@ -76,11 +73,8 @@ fn test_merge_profiles_credentials_override() {
     let config_path = temp_dir.path().join("config");
     let creds_path = temp_dir.path().join("credentials");
 
-    let aws_files = AwsFiles::load(
-        config_path.to_str().unwrap(),
-        creds_path.to_str().unwrap(),
-    )
-    .unwrap();
+    let aws_files =
+        AwsFiles::load(config_path.to_str().unwrap(), creds_path.to_str().unwrap()).unwrap();
 
     let merged = aws_files.merge_profiles();
 
@@ -98,11 +92,8 @@ fn test_account_id_extraction_via_profile() {
     let config_path = temp_dir.path().join("config");
     let creds_path = temp_dir.path().join("credentials");
 
-    let aws_files = AwsFiles::load(
-        config_path.to_str().unwrap(),
-        creds_path.to_str().unwrap(),
-    )
-    .unwrap();
+    let aws_files =
+        AwsFiles::load(config_path.to_str().unwrap(), creds_path.to_str().unwrap()).unwrap();
 
     let dev = &aws_files.config_profiles["dev"];
     assert_eq!(dev.get_account_id(), Some("123456789012".to_string()));

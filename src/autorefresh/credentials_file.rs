@@ -39,10 +39,7 @@ pub fn validate_profile_name(name: &str) -> Result<(), AwswitError> {
 pub fn validate_credential_value(key: &str, value: &str) -> Result<(), AwswitError> {
     if value.starts_with('[') || value.chars().any(|c| c.is_control()) {
         return Err(AwswitError::ValidationError {
-            message: format!(
-                "Credential value for '{}' contains invalid characters",
-                key
-            ),
+            message: format!("Credential value for '{}' contains invalid characters", key),
         });
     }
     Ok(())
@@ -154,7 +151,11 @@ pub fn write_credentials_from_output(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             return Err(AwswitError::AutoRefreshError {
-                message: format!("Failed to read credentials file {}: {}", creds_path.display(), e),
+                message: format!(
+                    "Failed to read credentials file {}: {}",
+                    creds_path.display(),
+                    e
+                ),
             });
         }
     };
@@ -273,11 +274,7 @@ mod tests {
     #[test]
     fn write_and_remove_credentials() {
         let (_temp, creds_path) = create_test_credentials_path();
-        fs::write(
-            &creds_path,
-            "[default]\naws_access_key_id = ORIGINAL\n",
-        )
-        .unwrap();
+        fs::write(&creds_path, "[default]\naws_access_key_id = ORIGINAL\n").unwrap();
 
         let creds = Credentials {
             access_key_id: "AKIATEST".to_string(),
@@ -342,11 +339,7 @@ mod tests {
     fn write_credentials_handles_crlf_input() {
         let (_temp, creds_path) = create_test_credentials_path();
         // Write content with CRLF line endings
-        fs::write(
-            &creds_path,
-            "[default]\r\naws_access_key_id = ORIGINAL\r\n",
-        )
-        .unwrap();
+        fs::write(&creds_path, "[default]\r\naws_access_key_id = ORIGINAL\r\n").unwrap();
 
         let creds = Credentials {
             access_key_id: "AKIATEST".to_string(),

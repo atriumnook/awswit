@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Valid credential sources
-pub const VALID_CREDENTIAL_SOURCES: &[&str] = &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
+pub const VALID_CREDENTIAL_SOURCES: &[&str] =
+    &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
 
 /// Represents an AWS profile from config/credentials files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

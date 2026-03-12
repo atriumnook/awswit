@@ -84,10 +84,7 @@ pub fn atomic_write_restricted(path: &Path, content: &[u8]) -> io::Result<()> {
 /// the executor thread but the max sleep is 1s with exponential backoff, and
 /// lock contention is rare. If this becomes problematic, wrap call sites in
 /// `tokio::task::spawn_blocking`.
-pub fn lock_exclusive_with_timeout(
-    file: &std::fs::File,
-    timeout: Duration,
-) -> io::Result<()> {
+pub fn lock_exclusive_with_timeout(file: &std::fs::File, timeout: Duration) -> io::Result<()> {
     use fs2::FileExt;
 
     if file.try_lock_exclusive().is_ok() {

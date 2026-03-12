@@ -25,12 +25,18 @@ const MANAGED_VARS: &[&str] = &[
     "AWSWIT_EXPIRATION",
 ];
 
-fn credential_bindings(creds: &Credentials, profile_name: &str) -> Vec<(&'static str, Option<String>)> {
+fn credential_bindings(
+    creds: &Credentials,
+    profile_name: &str,
+) -> Vec<(&'static str, Option<String>)> {
     let expiration_str = creds.expiration.map(|exp| exp.to_rfc3339());
 
     vec![
         ("AWS_ACCESS_KEY_ID", Some(creds.access_key_id.clone())),
-        ("AWS_SECRET_ACCESS_KEY", Some(creds.secret_access_key.clone())),
+        (
+            "AWS_SECRET_ACCESS_KEY",
+            Some(creds.secret_access_key.clone()),
+        ),
         ("AWS_SESSION_TOKEN", creds.session_token.clone()),
         // AWS_SECURITY_TOKEN is the legacy name for AWS_SESSION_TOKEN.
         // Some older AWS SDKs and tools (e.g., boto2) only read this variable.

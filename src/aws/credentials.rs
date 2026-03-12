@@ -96,5 +96,4 @@ mod tests {
         creds.expiration = Some(Utc::now() - chrono::Duration::hours(1));
         assert!(creds.is_expired());
     }
-
 }

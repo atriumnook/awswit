@@ -325,9 +325,7 @@ fn handle_list_profiles(
         };
         let region = profile.region.as_deref().unwrap_or("-");
 
-        let account = profile
-            .get_account_id()
-            .unwrap_or_else(|| "-".to_string());
+        let account = profile.get_account_id().unwrap_or_else(|| "-".to_string());
 
         let line = format!(
             "{:<20} {:<8} {:<15} {:<6} {:<12} {}",
@@ -375,9 +373,8 @@ fn determine_target_profile(
             .session_name
             .clone()
             .or_else(|| {
-                args.resolve_role_arn().and_then(|arn| {
-                    arn.rsplit('/').next().map(|s| s.to_string())
-                })
+                args.resolve_role_arn()
+                    .and_then(|arn| arn.rsplit('/').next().map(|s| s.to_string()))
             })
             .unwrap_or_else(|| "cli-role".to_string());
         return Ok(name);

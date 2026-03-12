@@ -130,7 +130,11 @@ impl CacheManager {
     /// Uses hex encoding to avoid collisions from character sanitization
     /// (e.g., "role/dev" and "role_dev" would collide with simple replacement).
     fn cache_file_path(&self, key: &str) -> PathBuf {
-        let hex_key: String = key.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_key: String = key
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         self.cache_dir.join(format!("{}.json", hex_key))
     }
 }
@@ -278,5 +282,4 @@ mod tests {
         let result = manager.get("test-key").unwrap();
         assert!(result.is_none());
     }
-
 }

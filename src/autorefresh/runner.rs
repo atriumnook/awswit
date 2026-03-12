@@ -37,10 +37,7 @@ pub async fn run_daemon_loop() {
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to install SIGTERM handler, daemon will exit: {}",
-                        e
-                    );
+                    tracing::error!("Failed to install SIGTERM handler, daemon will exit: {}", e);
                     return;
                 }
             };
@@ -74,9 +71,7 @@ async fn interruptible_sleep(
 /// Core daemon loop shared between unix and non-unix platforms.
 /// On unix, `sigterm` enables graceful SIGTERM shutdown.
 /// On non-unix, the daemon exits when all profiles are removed or after MAX_CONSECUTIVE_FAILURES.
-async fn run_daemon_loop_inner(
-    #[cfg(unix)] mut sigterm: Option<&mut tokio::signal::unix::Signal>,
-) {
+async fn run_daemon_loop_inner(#[cfg(unix)] mut sigterm: Option<&mut tokio::signal::unix::Signal>) {
     let mut consecutive_failures: u32 = 0;
     let mut backoff_secs = INITIAL_BACKOFF_SECS;
 
@@ -234,8 +229,7 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
         }
         // Remove expired credential sections in batch
         let creds_path = crate::utils::paths::aws_credentials_path()?;
-        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles)
-        {
+        if let Err(e) = credentials_file::remove_credentials_batch(&creds_path, &expired_profiles) {
             tracing::warn!("Failed to remove expired credential sections: {}", e);
         }
     }
@@ -402,14 +396,15 @@ async fn refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitError
             message: e.to_string(),
         })?;
         let canonical_exe = current_exe.canonicalize()?;
-        let canonical_cmd = command_path.canonicalize().map_err(|e| {
-            AwswitError::AutoRefreshError {
-                message: format!(
-                    "Cannot resolve command path '{}': {}",
-                    profile.awswit_command[0], e
-                ),
-            }
-        })?;
+        let canonical_cmd =
+            command_path
+                .canonicalize()
+                .map_err(|e| AwswitError::AutoRefreshError {
+                    message: format!(
+                        "Cannot resolve command path '{}': {}",
+                        profile.awswit_command[0], e
+                    ),
+                })?;
         let cmd_name = canonical_cmd
             .file_name()
             .and_then(|n| n.to_str())
@@ -484,16 +479,18 @@ fn update_credentials_file(profile_name: &str, output: &str) -> Result<(), Awswi
         }
     }
 
-    let access_key = creds
-        .get("AWS_ACCESS_KEY_ID")
-        .ok_or_else(|| AwswitError::AutoRefreshError {
-            message: "Missing access key".to_string(),
-        })?;
-    let secret_key = creds
-        .get("AWS_SECRET_ACCESS_KEY")
-        .ok_or_else(|| AwswitError::AutoRefreshError {
-            message: "Missing secret key".to_string(),
-        })?;
+    let access_key =
+        creds
+            .get("AWS_ACCESS_KEY_ID")
+            .ok_or_else(|| AwswitError::AutoRefreshError {
+                message: "Missing access key".to_string(),
+            })?;
+    let secret_key =
+        creds
+            .get("AWS_SECRET_ACCESS_KEY")
+            .ok_or_else(|| AwswitError::AutoRefreshError {
+                message: "Missing secret key".to_string(),
+            })?;
     let session_token = creds.get("AWS_SESSION_TOKEN");
     let expiration = creds.get("AWSWIT_EXPIRATION");
 

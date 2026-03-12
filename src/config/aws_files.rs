@@ -131,16 +131,16 @@ impl AwsFiles {
             mfa_serial: get("mfa_serial"),
             external_id: get("external_id"),
             role_session_name: get("role_session_name"),
-            duration_seconds: get("duration_seconds").and_then(|s| {
-                match s.parse() {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse duration_seconds '{}' in section '{}': {}",
-                            s, section, e
-                        );
-                        None
-                    }
+            duration_seconds: get("duration_seconds").and_then(|s| match s.parse() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse duration_seconds '{}' in section '{}': {}",
+                        s,
+                        section,
+                        e
+                    );
+                    None
                 }
             }),
             region: get("region"),

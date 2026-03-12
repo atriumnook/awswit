@@ -126,4 +126,3 @@ mod credential_file_validation {
         assert!(validate_credential_value("key", "AKIAIOSFODNN7EXAMPLE").is_ok());
     }
 }
-

@@ -143,7 +143,6 @@ impl ProfileHistory {
             .map(|e| e.name.as_str())
             .collect()
     }
-
 }
 
 #[cfg(test)]
@@ -173,5 +172,4 @@ mod tests {
         history.set_favorite("test-profile", false);
         assert!(!history.is_favorite("test-profile"));
     }
-
 }

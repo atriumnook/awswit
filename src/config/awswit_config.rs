@@ -136,10 +136,8 @@ impl AwswitConfig {
             }
             _ => {
                 // Store in extra for plugins
-                self.extra.insert(
-                    key.to_string(),
-                    serde_yml::Value::String(value.to_string()),
-                );
+                self.extra
+                    .insert(key.to_string(), serde_yml::Value::String(value.to_string()));
             }
         }
         Ok(())
@@ -239,7 +237,9 @@ mod tests {
     #[test]
     fn test_session_token_duration_boundary_high_reject() {
         let mut config = AwswitConfig::default();
-        assert!(config.set_value("session-token-duration", "129601").is_err());
+        assert!(config
+            .set_value("session-token-duration", "129601")
+            .is_err());
     }
 
     #[test]
