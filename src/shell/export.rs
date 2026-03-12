@@ -504,4 +504,37 @@ mod tests {
         assert!(!output.contains("AWSWIT_VERSION="));
         assert!(output.contains("AWSWIT_UNSET=1"));
     }
+
+    #[test]
+    fn test_shell_quote_empty_string() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn test_shell_quote_with_single_quote() {
+        let result = shell_quote("it's");
+        assert_eq!(result, "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_quote_consecutive_single_quotes() {
+        let result = shell_quote("a''b");
+        assert_eq!(result, "'a'\\'''\\''b'");
+    }
+
+    #[test]
+    fn test_shell_quote_special_chars() {
+        let result = shell_quote("$HOME");
+        // Should be wrapped in single quotes, preventing expansion
+        assert_eq!(result, "'$HOME'");
+
+        let result = shell_quote("$(whoami)");
+        assert_eq!(result, "'$(whoami)'");
+
+        let result = shell_quote("foo bar");
+        assert_eq!(result, "'foo bar'");
+
+        let result = shell_quote("a`cmd`b");
+        assert_eq!(result, "'a`cmd`b'");
+    }
 }

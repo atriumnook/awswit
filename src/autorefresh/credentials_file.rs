@@ -423,6 +423,34 @@ mod tests {
     }
 
     #[test]
+    fn validate_profile_name_allows_slash_and_colon() {
+        // AWS CLI compatible names with / and :
+        assert!(validate_profile_name("org/dev-role").is_ok());
+        assert!(validate_profile_name("sso:admin").is_ok());
+        assert!(validate_profile_name("my profile with spaces").is_ok());
+    }
+
+    #[test]
+    fn validate_profile_name_rejects_ini_breaking_chars() {
+        assert!(validate_profile_name("[evil]").is_err());
+        assert!(validate_profile_name("key=value").is_err());
+        assert!(validate_profile_name("has\x00null").is_err());
+        assert!(validate_profile_name("has\ttab").is_err());
+    }
+
+    #[test]
+    fn validate_credential_value_rejects_all_control_chars() {
+        for byte in 0x01u8..=0x1F {
+            let value = format!("prefix{}suffix", byte as char);
+            assert!(
+                validate_credential_value("key", &value).is_err(),
+                "Control char 0x{:02x} should be rejected",
+                byte
+            );
+        }
+    }
+
+    #[test]
     fn remove_section_preserves_surrounding_content() {
         let content = "[before]\nkey1 = val1\n[target]\nkey2 = val2\n[after]\nkey3 = val3\n";
         let result = remove_credentials_section(content, "target");
