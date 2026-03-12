@@ -67,7 +67,7 @@ pub enum AwswitError {
     #[error("[E020] TOML parse error: {0}")]
     TomlDeError(#[from] toml::de::Error),
 
-    #[error("[E020] TOML serialize error: {0}")]
+    #[error("[E028] TOML serialize error: {0}")]
     TomlSerError(#[from] toml::ser::Error),
 
     #[error("[E021] JSON parse error: {0}")]

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::AwswitError;
 
@@ -54,7 +54,9 @@ impl AwswitConfig {
             })
     }
 
-    /// Get the legacy YAML config file path
+    /// Get the legacy YAML config file path.
+    /// DEPRECATED: Legacy YAML support will be removed in v2.1.
+    /// Users should migrate to config.toml.
     fn legacy_yaml_path() -> Result<PathBuf, AwswitError> {
         crate::utils::paths::awswit_home_dir()
             .map(|p| p.join("config.yaml"))
@@ -67,43 +69,81 @@ impl AwswitConfig {
     /// Prefers config.toml; falls back to config.yaml with a deprecation warning.
     pub fn load() -> Result<Self, AwswitError> {
         let toml_path = Self::config_path()?;
+        let yaml_path = Self::legacy_yaml_path()?;
 
-        // Try TOML first
-        match fs::read_to_string(&toml_path) {
-            Ok(content) => {
-                let config: Self = toml::from_str(&content)?;
-                return Ok(config);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Fall through to YAML fallback
-            }
-            Err(e) => {
-                return Err(AwswitError::ConfigFileError {
-                    message: format!("Failed to read config: {}", e),
-                });
-            }
+        let (config, used_legacy_yaml) = Self::load_from_paths(&toml_path, &yaml_path)?;
+        if used_legacy_yaml {
+            eprintln!("Warning: ~/.awswit/config.yaml is deprecated and will be removed in v2.1. Rename to config.toml.");
+        }
+        Ok(config)
+    }
+
+    fn load_from_paths(toml_path: &Path, yaml_path: &Path) -> Result<(Self, bool), AwswitError> {
+        if let Some(config) = Self::load_toml_if_exists(toml_path)? {
+            return Ok((config, false));
         }
 
-        // Try legacy YAML fallback
-        let yaml_path = Self::legacy_yaml_path()?;
-        match fs::read_to_string(&yaml_path) {
-            Ok(content) => {
-                eprintln!("Warning: ~/.awswit/config.yaml is deprecated. Rename to config.toml.");
-                let config: Self = toml::from_str(&content).map_err(|_| {
-                    AwswitError::ConfigFileError {
-                        message: "Failed to parse config.yaml. Please convert to TOML format and rename to config.toml.".to_string(),
-                    }
-                })?;
-                Ok(config)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!("awswit config not found, using defaults");
-                Ok(Self::default())
-            }
+        if let Some(config) = Self::load_legacy_yaml_if_exists(yaml_path)? {
+            return Ok((config, true));
+        }
+
+        tracing::debug!("awswit config not found, using defaults");
+        Ok((Self::default(), false))
+    }
+
+    fn load_toml_if_exists(path: &Path) -> Result<Option<Self>, AwswitError> {
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(Some(toml::from_str(&content)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(AwswitError::ConfigFileError {
                 message: format!("Failed to read config: {}", e),
             }),
         }
+    }
+
+    fn load_legacy_yaml_if_exists(path: &Path) -> Result<Option<Self>, AwswitError> {
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(Some(Self::parse_legacy_yaml(&content)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(AwswitError::ConfigFileError {
+                message: format!("Failed to read config: {}", e),
+            }),
+        }
+    }
+
+    fn parse_legacy_yaml(content: &str) -> Result<Self, AwswitError> {
+        let mut config = Self::default();
+
+        for (idx, raw_line) in content.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let (key, raw_value) =
+                line.split_once(':')
+                    .ok_or_else(|| AwswitError::ConfigFileError {
+                        message: format!(
+                            "Failed to parse config.yaml line {}: expected 'key: value'",
+                            idx + 1
+                        ),
+                    })?;
+
+            let key = key.trim();
+            let value = strip_yaml_comment(raw_value).trim();
+            let value =
+                unquote_yaml_value(value).map_err(|message| AwswitError::ConfigFileError {
+                    message: format!("Failed to parse config.yaml line {}: {}", idx + 1, message),
+                })?;
+
+            config
+                .set_value(key, &value)
+                .map_err(|e| AwswitError::ConfigFileError {
+                    message: format!("Failed to parse config.yaml line {}: {}", idx + 1, e),
+                })?;
+        }
+
+        Ok(config)
     }
 
     /// Save config to file
@@ -322,4 +362,96 @@ mod tests {
         let mut config = AwswitConfig::default();
         assert!(config.reset_value("nonexistent-key").is_err());
     }
+
+    #[test]
+    fn test_parse_legacy_yaml() {
+        let yaml = r#"
+colors: false
+fuzzy-match: true
+role-duration: 3600
+region: us-west-2
+role-session-name: "team session"
+session-token-duration: 43200
+"#;
+
+        let config = AwswitConfig::parse_legacy_yaml(yaml).unwrap();
+        assert!(!config.colors);
+        assert!(config.fuzzy_match);
+        assert_eq!(config.role_duration, 3600);
+        assert_eq!(config.region.as_deref(), Some("us-west-2"));
+        assert_eq!(config.role_session_name.as_deref(), Some("team session"));
+        assert_eq!(config.session_token_duration, Some(43200));
+    }
+
+    #[test]
+    fn test_load_prefers_toml_over_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let toml_path = temp.path().join("config.toml");
+        let yaml_path = temp.path().join("config.yaml");
+
+        fs::write(&toml_path, "colors = false\nregion = \"us-east-1\"\n").unwrap();
+        fs::write(&yaml_path, "colors: true\nregion: us-west-2\n").unwrap();
+
+        let (config, used_legacy_yaml) =
+            AwswitConfig::load_from_paths(&toml_path, &yaml_path).unwrap();
+        assert!(!used_legacy_yaml);
+        assert!(!config.colors);
+        assert_eq!(config.region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_load_legacy_yaml_when_toml_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let toml_path = temp.path().join("config.toml");
+        let yaml_path = temp.path().join("config.yaml");
+
+        fs::write(&yaml_path, "colors: true\nregion: ap-northeast-1\n").unwrap();
+
+        let (config, used_legacy_yaml) =
+            AwswitConfig::load_from_paths(&toml_path, &yaml_path).unwrap();
+        assert!(used_legacy_yaml);
+        assert!(config.colors);
+        assert_eq!(config.region.as_deref(), Some("ap-northeast-1"));
+    }
+}
+
+fn strip_yaml_comment(value: &str) -> &str {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '#' if !in_single_quotes && !in_double_quotes => return &value[..idx],
+            _ => {}
+        }
+    }
+
+    value
+}
+
+fn unquote_yaml_value(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let is_single_quoted = trimmed.starts_with('\'') && trimmed.ends_with('\'');
+    let is_double_quoted = trimmed.starts_with('"') && trimmed.ends_with('"');
+
+    if is_single_quoted || is_double_quoted {
+        if trimmed.len() < 2 {
+            return Err("unterminated quoted value".to_string());
+        }
+
+        let quote = trimmed.chars().next().unwrap_or('"');
+        if !trimmed.ends_with(quote) {
+            return Err("unterminated quoted value".to_string());
+        }
+
+        return Ok(trimmed[1..trimmed.len() - 1].to_string());
+    }
+
+    Ok(trimmed.to_string())
 }

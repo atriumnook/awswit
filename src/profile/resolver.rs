@@ -445,6 +445,11 @@ impl<'a> ProfileResolver<'a> {
             return Ok(token.clone());
         }
 
+        // In non-interactive mode (e.g., exec subcommand), we cannot prompt for MFA
+        if args.no_interactive {
+            return Err(AwswitError::MfaTokenRequired);
+        }
+
         // Prompt user
         use dialoguer::Input;
         let token: String = Input::new()
@@ -1145,5 +1150,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].role_arn, "arn:aws:iam::111:role/Dev");
         assert_eq!(calls[0].session_name, "dev");
+        assert_eq!(calls[0].external_id, None);
+        assert_eq!(calls[0].region, None);
+        assert_eq!(calls[0].duration_seconds, None);
     }
 }
