@@ -51,17 +51,10 @@ fn main() {
         .init();
 
     // Acquire daemon lock before writing PID file to prevent race conditions.
-    let lock_path = dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".awswit")
-        .join("autoawswit.lock");
-    let _daemon_lock = match awswit::utils::fs::lock_file_with_permissions(
-        &lock_path,
-        std::time::Duration::from_secs(30),
-    ) {
-        Ok(lock) => lock,
-        Err(e) => {
-            tracing::error!("Failed to acquire daemon lock: {}", e);
+    let lock_path = match dirs::home_dir() {
+        Some(home) => home.join(".awswit").join("autoawswit.lock"),
+        None => {
+            tracing::error!("Could not determine home directory");
             #[cfg(unix)]
             if let Some(fd) = notify_fd {
                 notify_pipe(fd, false);
@@ -69,10 +62,26 @@ fn main() {
             std::process::exit(1);
         }
     };
-
-    // Write PID file after successful init (not from parent)
-    if let Err(e) = awswit::autorefresh::runner::write_own_pid_file() {
-        tracing::error!("Failed to write PID file: {}", e);
+    let mut daemon_lock = match awswit::utils::fs::lock_file_with_permissions(&lock_path) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::error!("Failed to open daemon lock: {}", e);
+            #[cfg(unix)]
+            if let Some(fd) = notify_fd {
+                notify_pipe(fd, false);
+            }
+            std::process::exit(1);
+        }
+    };
+    let mut pid_write_result = Ok(());
+    if let Err(e) = awswit::utils::fs::lock_exclusive_with_timeout(
+        &mut daemon_lock,
+        std::time::Duration::from_secs(30),
+        |_daemon_guard| {
+            pid_write_result = awswit::autorefresh::runner::write_own_pid_file();
+        },
+    ) {
+        tracing::error!("Failed to acquire daemon lock: {}", e);
         #[cfg(unix)]
         if let Some(fd) = notify_fd {
             notify_pipe(fd, false);
@@ -80,8 +89,14 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Release lock explicitly by dropping
-    drop(_daemon_lock);
+    if let Err(e) = pid_write_result {
+        tracing::error!("Failed to write PID file: {}", e);
+        #[cfg(unix)]
+        if let Some(fd) = notify_fd {
+            notify_pipe(fd, false);
+        }
+        std::process::exit(1);
+    }
 
     // Signal the spawning parent that initialization succeeded
     #[cfg(unix)]
@@ -92,7 +107,13 @@ fn main() {
     tracing::info!("Autoawswit daemon started (pid={})", std::process::id());
 
     // Start tokio runtime after fork, run daemon loop with SIGTERM handling
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("Failed to create tokio runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
     rt.block_on(awswit::autorefresh::runner::run_daemon_loop());
 }
 

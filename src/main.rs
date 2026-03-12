@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::process::ExitStatus;
 
 use clap::Parser;
 use tracing::Level;
@@ -35,7 +36,9 @@ async fn main() {
         .with_line_number(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Warning: Failed to set tracing subscriber: {}", e);
+    }
 
     // Run the main application
     match run(args).await {
@@ -412,9 +415,10 @@ async fn handle_exec(
         profile_name: Some(profile.to_string()),
         force_refresh,
         region: region.clone(),
+        no_interactive: true,
         ..Default::default()
     };
-    let ctx = AppContext::build(args)?;
+    let mut ctx = AppContext::build(args)?;
     let resolver = ProfileResolver::new(&ctx.profiles, &ctx.config);
     let sts_client = StsClient::new().await;
 
@@ -422,38 +426,49 @@ async fn handle_exec(
         .resolve_credentials(profile, &ctx.args, &sts_client, &ctx.cache)
         .await?;
 
+    ctx.history.record_use(profile);
+    if let Err(e) = ctx.history.save() {
+        tracing::warn!("Failed to save profile history: {}", e);
+    }
+
     let (program, cmd_args) = command
         .split_first()
         .ok_or_else(|| AwswitError::ShellError {
             message: "No command specified".to_string(),
         })?;
 
-    let status = std::process::Command::new(program)
+    let mut child = std::process::Command::new(program);
+    child
         .args(cmd_args)
         .env("AWS_ACCESS_KEY_ID", &credentials.access_key_id)
         .env("AWS_SECRET_ACCESS_KEY", &credentials.secret_access_key)
-        .env(
-            "AWS_SESSION_TOKEN",
-            credentials.session_token.as_deref().unwrap_or(""),
-        )
-        .env(
-            "AWS_DEFAULT_REGION",
-            credentials
-                .region
-                .as_deref()
-                .or(region.as_deref())
-                .unwrap_or(""),
-        )
         .env("AWSWIT_PROFILE", profile)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| AwswitError::ShellError {
-            message: format!("Failed to execute command '{}': {}", program, e),
-        })?;
+        .stderr(std::process::Stdio::inherit());
 
-    Ok(status.code().unwrap_or(1))
+    if let Some(session_token) = credentials.session_token.as_deref() {
+        child.env("AWS_SESSION_TOKEN", session_token);
+    } else {
+        child.env_remove("AWS_SESSION_TOKEN");
+    }
+
+    let resolved_region = credentials.region.as_deref().or(region.as_deref());
+    if let Some(region_value) = resolved_region {
+        child
+            .env("AWS_REGION", region_value)
+            .env("AWS_DEFAULT_REGION", region_value);
+    } else {
+        child
+            .env_remove("AWS_REGION")
+            .env_remove("AWS_DEFAULT_REGION");
+    }
+
+    let status = child.status().map_err(|e| AwswitError::ShellError {
+        message: format!("Failed to execute command '{}': {}", program, e),
+    })?;
+
+    Ok(exit_status_to_code(status))
 }
 
 fn handle_init(shell: &str) -> Result<(), AwswitError> {
@@ -473,4 +488,23 @@ fn handle_init(shell: &str) -> Result<(), AwswitError> {
     };
     print!("{}", script);
     Ok(())
+}
+
+fn exit_status_to_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| signal_exit_code(status))
+        .unwrap_or(1)
+}
+
+#[cfg(unix)]
+fn signal_exit_code(status: ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+
+    status.signal().map(|signal| 128 + signal)
+}
+
+#[cfg(not(unix))]
+fn signal_exit_code(_status: ExitStatus) -> Option<i32> {
+    None
 }
