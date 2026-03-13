@@ -152,7 +152,6 @@ impl ProfileHistory {
             self.entries.insert(profile_name.to_string(), entry);
         }
     }
-
 }
 
 #[cfg(test)]

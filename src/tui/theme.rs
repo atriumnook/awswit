@@ -124,8 +124,7 @@ impl Theme {
     }
 }
 
-impl Icons {
-}
+impl Icons {}
 
 /// Profile type indicator with color
 pub enum ProfileType {

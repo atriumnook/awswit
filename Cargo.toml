@@ -2,7 +2,7 @@
 name = "awswit"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.93"
 authors = ["awswit contributors"]
 description = "A fast, modern AWS profile switcher with interactive TUI"
 license = "MIT"

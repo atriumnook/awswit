@@ -129,11 +129,7 @@ pub async fn start_auto_refresh(
     tokio::task::spawn_blocking(move || {
         let lock_path = get_daemon_lock_path()?;
         with_daemon_lock(&lock_path, || {
-            credentials_file::write_credentials(
-                &creds_path,
-                &write_profile_name,
-                &write_creds,
-            )?;
+            credentials_file::write_credentials(&creds_path, &write_profile_name, &write_creds)?;
             spawn_daemon_if_not_running()
         })
     })
@@ -321,177 +317,171 @@ where
 
 /// Spawn the daemon if not already running. Caller must already hold the daemon lock.
 fn spawn_daemon_if_not_running() -> Result<(), AwswitError> {
-        // Check if already running (under lock)
-        if is_autoawswit_running()? {
-            tracing::debug!("Autoawswit daemon already running");
-            return Ok(());
-        }
+    // Check if already running (under lock)
+    if is_autoawswit_running()? {
+        tracing::debug!("Autoawswit daemon already running");
+        return Ok(());
+    }
 
-        // Spawn the daemon process
-        let exe = std::env::current_exe().map_err(|e| AwswitError::AutoRefreshError {
-            message: e.to_string(),
-        })?;
+    // Spawn the daemon process
+    let exe = std::env::current_exe().map_err(|e| AwswitError::AutoRefreshError {
+        message: e.to_string(),
+    })?;
 
-        // Look for autoawswit binary in same directory
-        let autoawswit_path = exe
-            .parent()
-            .map(|p| p.join("autoawswit"))
-            .filter(|p| p.exists());
+    // Look for autoawswit binary in same directory
+    let autoawswit_path = exe
+        .parent()
+        .map(|p| p.join("autoawswit"))
+        .filter(|p| p.exists());
 
-        match autoawswit_path {
-            Some(path) => {
-                // Create a pipe for the daemon child to signal successful initialization.
-                // This replaces PID-file polling which is timing-dependent and unreliable.
+    match autoawswit_path {
+        Some(path) => {
+            // Create a pipe for the daemon child to signal successful initialization.
+            // This replaces PID-file polling which is timing-dependent and unreliable.
+            #[cfg(unix)]
+            let (read_fd, write_fd) = {
+                let mut fds = [0i32; 2];
+                if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                    return Err(AwswitError::AutoRefreshError {
+                        message: format!(
+                            "Failed to create notification pipe: {}",
+                            std::io::Error::last_os_error()
+                        ),
+                    });
+                }
+                (fds[0], fds[1])
+            };
+
+            let spawn_result = {
+                let mut cmd = Command::new(&path);
                 #[cfg(unix)]
-                let (read_fd, write_fd) = {
-                    let mut fds = [0i32; 2];
-                    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-                        return Err(AwswitError::AutoRefreshError {
-                            message: format!(
-                                "Failed to create notification pipe: {}",
-                                std::io::Error::last_os_error()
-                            ),
+                {
+                    // Pass write fd to child via env var; the child will write a
+                    // success/failure byte after init completes.
+                    cmd.env("AWSWIT_NOTIFY_FD", write_fd.to_string());
+                    // Ensure the write fd is inherited (not close-on-exec)
+                    use std::os::unix::process::CommandExt;
+                    unsafe {
+                        cmd.pre_exec(move || {
+                            // Clear FD_CLOEXEC on the write fd so it survives exec
+                            let flags = libc::fcntl(write_fd, libc::F_GETFD);
+                            if flags < 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            Ok(())
                         });
                     }
-                    (fds[0], fds[1])
-                };
+                }
+                cmd.spawn()
+            };
 
-                let spawn_result = {
-                    let mut cmd = Command::new(&path);
-                    #[cfg(unix)]
-                    {
-                        // Pass write fd to child via env var; the child will write a
-                        // success/failure byte after init completes.
-                        cmd.env("AWSWIT_NOTIFY_FD", write_fd.to_string());
-                        // Ensure the write fd is inherited (not close-on-exec)
-                        use std::os::unix::process::CommandExt;
-                        unsafe {
-                            cmd.pre_exec(move || {
-                                // Clear FD_CLOEXEC on the write fd so it survives exec
-                                let flags = libc::fcntl(write_fd, libc::F_GETFD);
-                                if flags < 0 {
-                                    return Err(std::io::Error::last_os_error());
-                                }
-                                if libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC)
-                                    < 0
-                                {
-                                    return Err(std::io::Error::last_os_error());
-                                }
-                                Ok(())
-                            });
-                        }
-                    }
-                    cmd.spawn()
-                };
-
-                let mut child = spawn_result.map_err(|e| {
-                    #[cfg(unix)]
-                    {
-                        unsafe {
-                            libc::close(read_fd);
-                            libc::close(write_fd);
-                        }
-                    }
-                    AwswitError::AutoRefreshError {
-                        message: format!("Failed to spawn daemon: {}", e),
-                    }
-                })?;
-
+            let mut child = spawn_result.map_err(|e| {
                 #[cfg(unix)]
                 {
-                    // Close write end in parent so we get EOF if child dies without writing
-                    unsafe { libc::close(write_fd) };
-
-                    // Read from pipe with timeout — the child writes 1 byte:
-                    //   0x01 = success, 0x00 = failure, EOF = crashed
-                    use std::os::unix::io::FromRawFd;
-                    let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let handle = std::thread::spawn(move || {
-                        use std::io::Read;
-                        let mut buf = [0u8; 1];
-                        let mut f = read_file;
-                        let result = f.read_exact(&mut buf);
-                        let _ = tx.send(result.map(|()| buf[0]));
-                    });
-
-                    let timeout = std::time::Duration::from_secs(10);
-                    match rx.recv_timeout(timeout) {
-                        Ok(Ok(1)) => {
-                            let _ = handle.join();
-                            tracing::info!("Spawned autoawswit daemon (pipe handshake confirmed)");
-                            Ok(())
-                        }
-                        Ok(Ok(_)) => {
-                            // Child reported failure
-                            let _ = handle.join();
-                            if let Err(e) = child.kill() {
-                                tracing::warn!("Failed to kill daemon child process: {}", e);
-                            }
-                            if let Err(e) = child.wait() {
-                                tracing::warn!("Failed to wait for daemon child process: {}", e);
-                            }
-                            Err(AwswitError::AutoRefreshError {
-                                message: "Daemon reported initialization failure".to_string(),
-                            })
-                        }
-                        Ok(Err(_)) | Err(_) => {
-                            // EOF (child died) or timeout
-                            let _ = handle.join();
-                            if let Err(e) = child.kill() {
-                                tracing::warn!("Failed to kill daemon child process: {}", e);
-                            }
-                            if let Err(e) = child.wait() {
-                                tracing::warn!("Failed to wait for daemon child process: {}", e);
-                            }
-                            Err(AwswitError::AutoRefreshError {
-                                message:
-                                    "Daemon process failed to initialize (pipe handshake failed)"
-                                        .to_string(),
-                            })
-                        }
+                    unsafe {
+                        libc::close(read_fd);
+                        libc::close(write_fd);
                     }
                 }
+                AwswitError::AutoRefreshError {
+                    message: format!("Failed to spawn daemon: {}", e),
+                }
+            })?;
 
-                // Non-unix fallback: poll for PID file
-                #[cfg(not(unix))]
-                {
-                    let pid_path = super::get_pid_file_path()?;
-                    let start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_secs(5);
-                    let poll_interval = std::time::Duration::from_millis(100);
+            #[cfg(unix)]
+            {
+                // Close write end in parent so we get EOF if child dies without writing
+                unsafe { libc::close(write_fd) };
 
-                    while start.elapsed() < timeout {
-                        if pid_path.exists() {
-                            tracing::info!(
-                                "Spawned autoawswit daemon process (PID file confirmed)"
-                            );
-                            return Ok(());
+                // Read from pipe with timeout — the child writes 1 byte:
+                //   0x01 = success, 0x00 = failure, EOF = crashed
+                use std::os::unix::io::FromRawFd;
+                let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+
+                let (tx, rx) = std::sync::mpsc::channel();
+                let handle = std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut buf = [0u8; 1];
+                    let mut f = read_file;
+                    let result = f.read_exact(&mut buf);
+                    let _ = tx.send(result.map(|()| buf[0]));
+                });
+
+                let timeout = std::time::Duration::from_secs(10);
+                match rx.recv_timeout(timeout) {
+                    Ok(Ok(1)) => {
+                        let _ = handle.join();
+                        tracing::info!("Spawned autoawswit daemon (pipe handshake confirmed)");
+                        Ok(())
+                    }
+                    Ok(Ok(_)) => {
+                        // Child reported failure
+                        let _ = handle.join();
+                        if let Err(e) = child.kill() {
+                            tracing::warn!("Failed to kill daemon child process: {}", e);
                         }
-                        std::thread::sleep(poll_interval);
+                        if let Err(e) = child.wait() {
+                            tracing::warn!("Failed to wait for daemon child process: {}", e);
+                        }
+                        Err(AwswitError::AutoRefreshError {
+                            message: "Daemon reported initialization failure".to_string(),
+                        })
                     }
+                    Ok(Err(_)) | Err(_) => {
+                        // EOF (child died) or timeout
+                        let _ = handle.join();
+                        if let Err(e) = child.kill() {
+                            tracing::warn!("Failed to kill daemon child process: {}", e);
+                        }
+                        if let Err(e) = child.wait() {
+                            tracing::warn!("Failed to wait for daemon child process: {}", e);
+                        }
+                        Err(AwswitError::AutoRefreshError {
+                            message: "Daemon process failed to initialize (pipe handshake failed)"
+                                .to_string(),
+                        })
+                    }
+                }
+            }
 
-                    if let Err(e) = child.kill() {
-                        tracing::warn!("Failed to kill daemon child process: {}", e);
+            // Non-unix fallback: poll for PID file
+            #[cfg(not(unix))]
+            {
+                let pid_path = super::get_pid_file_path()?;
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(5);
+                let poll_interval = std::time::Duration::from_millis(100);
+
+                while start.elapsed() < timeout {
+                    if pid_path.exists() {
+                        tracing::info!("Spawned autoawswit daemon process (PID file confirmed)");
+                        return Ok(());
                     }
-                    if let Err(e) = child.wait() {
-                        tracing::warn!("Failed to wait for daemon child process: {}", e);
-                    }
-                    Err(AwswitError::AutoRefreshError {
-                        message: format!(
+                    std::thread::sleep(poll_interval);
+                }
+
+                if let Err(e) = child.kill() {
+                    tracing::warn!("Failed to kill daemon child process: {}", e);
+                }
+                if let Err(e) = child.wait() {
+                    tracing::warn!("Failed to wait for daemon child process: {}", e);
+                }
+                Err(AwswitError::AutoRefreshError {
+                    message: format!(
                         "Daemon process failed to initialize within {:?} (PID file not written)",
                         timeout
                     ),
-                    })
-                }
+                })
             }
-            None => Err(AwswitError::AutoRefreshError {
-                message:
-                    "autoawswit binary not found in the same directory as the current executable"
-                        .to_string(),
-            }),
         }
+        None => Err(AwswitError::AutoRefreshError {
+            message: "autoawswit binary not found in the same directory as the current executable"
+                .to_string(),
+        }),
+    }
 }
 
 /// Verify that a PID belongs to the autoawswit process.
