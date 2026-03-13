@@ -73,19 +73,24 @@ impl<'a> ProfilePicker<'a> {
         // Create app state
         let mut app = PickerApp::new(self.profiles, self.history, self.theme);
 
-        // Run event loop
-        let result = app.run(&mut terminal);
+        // Run event loop, ensuring terminal cleanup even on panic
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.run(&mut terminal)
+        }));
 
-        // Restore terminal
-        disable_raw_mode()?;
-        execute!(
+        // Restore terminal — always runs regardless of panic or error
+        let _ = disable_raw_mode();
+        let _ = execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
+        );
+        let _ = terminal.show_cursor();
 
-        result
+        match result {
+            Ok(inner) => inner,
+            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+        }
     }
 }
 

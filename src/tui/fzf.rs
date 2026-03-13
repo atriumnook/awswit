@@ -13,6 +13,26 @@ pub fn is_truthy(val: &str) -> bool {
         .any(|candidate| val.eq_ignore_ascii_case(candidate))
 }
 
+/// Options that allow arbitrary command execution via fzf and must be blocked.
+const BLOCKED_FZF_OPTIONS: &[&str] = &[
+    "--preview",
+    "--bind",
+    "--execute",
+    "--execute-silent",
+    "--reload",
+    "--transform",
+    "--preview-window", // can contain execute(...) action
+    "--header-first",
+];
+
+/// Check if a token is a blocked fzf option (handles both `--opt` and `--opt=value` forms).
+fn is_blocked_fzf_option(token: &str) -> bool {
+    let normalized = token.to_ascii_lowercase();
+    BLOCKED_FZF_OPTIONS.iter().any(|blocked| {
+        normalized == *blocked || normalized.starts_with(&format!("{}=", blocked))
+    })
+}
+
 fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "--prompt".to_string(),
@@ -25,6 +45,13 @@ fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
 
     if let Some(opts) = extra_opts {
         for token in opts.split_whitespace() {
+            if is_blocked_fzf_option(token) {
+                tracing::warn!(
+                    "Ignoring blocked fzf option from AWSWIT_FZF_OPTS: {}",
+                    token
+                );
+                continue;
+            }
             args.push(token.to_string());
         }
     }
@@ -170,5 +197,37 @@ mod tests {
                 "--cycle",
             ]
         );
+    }
+
+    #[test]
+    fn build_fzf_args_blocks_dangerous_options() {
+        // --preview, --bind, --execute etc. should be stripped
+        let args = build_fzf_args(Some("--ansi --preview 'cat {}' --bind 'enter:execute(rm -rf /)' --cycle"));
+        assert!(args.contains(&"--ansi".to_string()));
+        assert!(args.contains(&"--cycle".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("--preview")));
+        assert!(!args.iter().any(|a| a.starts_with("--bind")));
+    }
+
+    #[test]
+    fn build_fzf_args_blocks_option_with_equals() {
+        let args = build_fzf_args(Some("--preview=cat --bind=enter:abort"));
+        assert!(!args.iter().any(|a| a.starts_with("--preview")));
+        assert!(!args.iter().any(|a| a.starts_with("--bind")));
+    }
+
+    #[test]
+    fn is_blocked_fzf_option_cases() {
+        assert!(is_blocked_fzf_option("--preview"));
+        assert!(is_blocked_fzf_option("--PREVIEW"));
+        assert!(is_blocked_fzf_option("--preview=cat"));
+        assert!(is_blocked_fzf_option("--bind"));
+        assert!(is_blocked_fzf_option("--execute"));
+        assert!(is_blocked_fzf_option("--execute-silent"));
+        assert!(is_blocked_fzf_option("--reload"));
+        assert!(is_blocked_fzf_option("--transform"));
+        assert!(!is_blocked_fzf_option("--ansi"));
+        assert!(!is_blocked_fzf_option("--height"));
+        assert!(!is_blocked_fzf_option("--cycle"));
     }
 }
