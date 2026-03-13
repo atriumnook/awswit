@@ -13,7 +13,14 @@ awswit() {
     fi
 
     # Parse and export variables from output
-    while IFS='=' read -r key value; do
+    while IFS= read -r line; do
+        # Split on first '=' only (values like session tokens may contain '=')
+        key="${line%%=*}"
+        value="${line#*=}"
+        # If no '=' was found, key equals the whole line and value equals the whole line
+        if [ "$key" = "$line" ]; then
+            value=""
+        fi
         case "$key" in
             AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|AWS_PROFILE|AWS_DEFAULT_PROFILE|AWSWIT_PROFILE|AWSWIT_EXPIRATION)
                 if [ -n "$value" ]; then
@@ -30,7 +37,7 @@ awswit() {
                 ;;
             *)
                 # Print non-variable output
-                [ -n "$key" ] && printf '%s\n' "$key${value:+=$value}"
+                [ -n "$line" ] && printf '%s\n' "$line"
                 ;;
         esac
     done <<< "$output"
