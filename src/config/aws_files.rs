@@ -155,22 +155,7 @@ impl AwsFiles {
             role_arn: get("role_arn"),
             source_profile: get("source_profile"),
             credential_source: get("credential_source"),
-            credential_process: get("credential_process"),
             mfa_serial: get("mfa_serial"),
-            external_id: get("external_id"),
-            role_session_name: get("role_session_name"),
-            duration_seconds: get("duration_seconds").and_then(|s| match s.parse() {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to parse duration_seconds '{}' in section '{}': {}",
-                        s,
-                        section,
-                        e
-                    );
-                    None
-                }
-            }),
             region: get("region"),
             output: get("output"),
             // SSO fields
@@ -178,8 +163,6 @@ impl AwsFiles {
             sso_region: get("sso_region"),
             sso_account_id: get("sso_account_id"),
             sso_role_name: get("sso_role_name"),
-            // Web identity
-            web_identity_token_file: get("web_identity_token_file"),
         }
     }
 

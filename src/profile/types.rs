@@ -10,11 +10,7 @@ pub struct Profile {
     pub role_arn: Option<String>,
     pub source_profile: Option<String>,
     pub credential_source: Option<String>,
-    pub credential_process: Option<String>,
     pub mfa_serial: Option<String>,
-    pub external_id: Option<String>,
-    pub role_session_name: Option<String>,
-    pub duration_seconds: Option<i32>,
     pub region: Option<String>,
     pub output: Option<String>,
 
@@ -23,9 +19,6 @@ pub struct Profile {
     pub sso_region: Option<String>,
     pub sso_account_id: Option<String>,
     pub sso_role_name: Option<String>,
-
-    // Web identity
-    pub web_identity_token_file: Option<String>,
 }
 
 impl Profile {
