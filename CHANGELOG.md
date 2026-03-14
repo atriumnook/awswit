@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - MSRV を 1.93 に引き上げ
+- Edition を 2024 に更新（Cargo resolver v3 による MSRV-aware 依存解決が有効）
 - Configuration format changed from YAML (`config.yaml`) to TOML (`config.toml`)
   - Existing `config.yaml` files are automatically loaded with a deprecation warning
   - To migrate: rename `~/.awswit/config.yaml` to `~/.awswit/config.toml` and convert syntax
