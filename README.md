@@ -1,266 +1,158 @@
 # awswit
 
-> **AWS Wit** - A fast, modern AWS profile switcher with interactive TUI
+Fast AWS profile switcher. Fuzzy search, frecency sorting, favorites.
 
-[![CI](https://github.com/yourusername/awswit/workflows/CI/badge.svg)](https://github.com/yourusername/awswit/actions)
+[![CI](https://github.com/atnook/awswit/workflows/CI/badge.svg)](https://github.com/atnook/awswit/actions)
 [![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  🔐 awswit                                        5/12     │
-├─────────────────────────────────────────────────────────────┤
-│  > dev                                                      │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │ ★ prod-admin          Role   us-west-2   123456789012 ││
-│  │ ★ dev-admin           Role   us-east-1   234567890123 ││
-│  │   staging-readonly    Role   us-west-2   345678901234 ││
-│  │   sandbox             User   us-east-1   -            ││
-│  └─────────────────────────────────────────────────────────┘│
-├─────────────────────────────────────────────────────────────┤
-│  ↑↓ navigate  ⏎ select  ★ favorite  ^P preview  Esc cancel │
-└─────────────────────────────────────────────────────────────┘
-```
+[日本語](README_ja.md)
 
-## ✨ Features
+<!-- TODO: Add docs/demo.gif screenshot/recording of the TUI in action -->
 
-- **🔍 Interactive Profile Picker** - fzf-style fuzzy search with real-time preview
-- **⭐ Favorites** - Pin frequently used profiles for quick access
-- **📜 Usage History** - Recently used profiles shown first
-- **🎨 Beautiful TUI** - Tokyo Night inspired color scheme
-- **⏱️ Progress Indicators** - Spinners during AWS API calls
-- **🚀 Instant Startup** - Written in Rust for speed
-- **🔄 Auto-refresh** - Background credential renewal
-- **🔗 Role Chaining** - Unlimited depth support
-- **🔐 MFA Support** - Interactive prompts for MFA tokens
-- **💾 Credential Caching** - Cache session tokens for up to 12 hours
+## Quick Start
 
-## Installation
-
-### From Cargo (Recommended)
+### Install
 
 ```bash
 cargo install awswit
 ```
 
-### From Source
-
-```bash
-git clone https://github.com/yourusername/awswit.git
-cd awswit
-cargo build --release
-sudo cp target/release/awswit /usr/local/bin/
-```
-
 ### Shell Setup
 
-Initialize shell integration with:
+<details open>
+<summary>Bash / Zsh</summary>
 
 ```bash
-eval "$(awswit init bash)"
+# ~/.bashrc or ~/.zshrc
+eval "$(awswit init bash)"   # or zsh
 ```
 
-Or use the provided shell wrapper:
+</details>
 
-```bash
-cp shell_scripts/awswit.sh ~/.local/bin/
-alias awswit='source ~/.local/bin/awswit.sh'
+<details>
+<summary>Fish</summary>
+
+```fish
+# ~/.config/fish/config.fish
+awswit init fish | source
 ```
 
-## Usage
+</details>
 
-### Interactive Mode (Default)
+<details>
+<summary>PowerShell</summary>
 
-Simply run `awswit` without arguments to launch the interactive picker:
+```powershell
+# $PROFILE
+awswit init powershell | Invoke-Expression
+```
+
+</details>
+
+### Run
 
 ```bash
 awswit
 ```
 
-**Keyboard shortcuts:**
+Pick a profile, press Enter, and `AWS_PROFILE` is set in your current shell.
+
+## Features
+
+- **Fuzzy search** — type a few characters to instantly filter profiles
+- **Frecency sorting** — frequently and recently used profiles float to the top
+- **Favorites** — press `*` to pin profiles at the top
+- **Preview panel** — `Ctrl+P` to see profile details (type, region, account ID, role ARN)
+- **fzf integration** — `--fzf` to use external fzf, or set `AWSWIT_USE_FZF=1`
+- **No credentials** — sets `AWS_PROFILE` only. Auth stays in the SDK / SSO / aws-vault
+- **Single binary** — Rust, no runtime dependencies
+
+## How It Works
+
+awswit reads `~/.aws/config`, shows a picker, and sets environment variables in the current shell:
+
+```
+AWS_PROFILE=prod
+AWS_DEFAULT_PROFILE=prod
+AWS_REGION=ap-northeast-1       # if the profile defines a region
+AWS_DEFAULT_REGION=ap-northeast-1
+AWSWIT_PROFILE=prod
+```
+
+The AWS SDK then resolves credentials however your profile is configured — IAM keys, SSO, role assumption, `credential_process`, anything. awswit never touches credentials.
+
+## Keybindings
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` or `Ctrl+k`/`Ctrl+j` | Navigate profiles |
+| Type | Fuzzy search |
 | `Enter` | Select profile |
+| `↑`/`↓` or `Ctrl+k`/`Ctrl+j` | Navigate |
 | `*` or `Ctrl+F` | Toggle favorite |
 | `Ctrl+P` | Toggle preview panel |
-| `Esc` or `Ctrl+C` | Cancel |
-| Type | Filter profiles (fuzzy search) |
+| `Esc` / `Ctrl+C` | Cancel |
 
-### Direct Profile Selection
+## CLI Reference
 
-```bash
-# Assume a specific profile
-awswit my-profile
-
-# Force refresh credentials
-awswit my-profile -r
-
-# Show export commands (without executing)
-awswit my-profile -s
-
-# Unset AWS credentials
-awswit -u
-
-# Disable interactive mode (for scripts)
-awswit -n my-profile
+```
+awswit [PROFILE]           Switch to a profile (TUI if no name given)
+awswit init <shell>        Print shell integration script
+awswit completions <shell> Generate tab-completion script
 ```
 
-### Profile Management
+| Flag | Description |
+|------|-------------|
+| `-v, --version` | Print version |
+| `-s, --show-commands` | Print export commands instead of setting them |
+| `-u, --unset` | Unset all AWS environment variables |
+| `-l, --list-profiles` | List profiles (`-l more` for details) |
+| `-n, --no-interactive` | Skip TUI, resolve profile by name or `$AWS_PROFILE` |
+| `--fzf` | Use external fzf |
+| `--region <region>` | Override region |
+| `--config-file <path>` | Path to AWS config file |
+| `--info` | INFO-level logs |
+| `--debug` | DEBUG-level logs |
 
-```bash
-# List all profiles
-awswit -l
+## Configuration
 
-# List with account IDs
-awswit -l more
+`~/.awswit/config.toml` (all optional):
+
+```toml
+fuzzy-match = true           # Fuzzy profile name matching (default: true)
+colors = true                # Colored output (default: true on Linux/macOS)
+region = "ap-northeast-1"    # Default region override
 ```
 
-### Run Commands with Assumed Credentials
+Typos in config keys are rejected on load — no silent misconfiguration.
+
+<details>
+<summary>Shell Completions</summary>
 
 ```bash
-# Run a command with the assumed role's credentials
-awswit exec my-profile -- aws s3 ls
-
-# With forced refresh
-awswit exec my-profile -r -- terraform plan
-```
-
-### External fzf Picker
-
-```bash
-# Use fzf instead of the built-in picker
-awswit --fzf
-
-# Or set via environment variable
-export AWSWIT_USE_FZF=1
-awswit
-
-# Customize fzf options
-export AWSWIT_FZF_OPTS="--height 80% --border"
-```
-
-### Shell Completions
-
-```bash
-# Generate shell completions for your shell
 awswit completions bash > /etc/bash_completion.d/awswit
 awswit completions zsh > ~/.zfunc/_awswit
 awswit completions fish > ~/.config/fish/completions/awswit.fish
 ```
 
-`awswit completions` generates static shell completions. It is separate from
-`--refresh-autocomplete`, which refreshes awswit's dynamic profile-name cache.
+</details>
 
-### Auto-refresh
+## FAQ
 
-```bash
-# Enable auto-refresh for a profile
-awswit my-profile -a
+**Why not just `export AWS_PROFILE=foo`?**
 
-# Kill all auto-refresh processes
-awswit -k
-```
+You absolutely can. awswit is for people who have 10+ profiles and got tired of typing exact names. Fuzzy search, favorites, and frecency sorting mean the right profile is usually one or two keystrokes away.
 
-### Role ARN Shorthand
+**How is this different from awsume / aws-vault?**
 
-```bash
-# Full ARN
-awswit --role-arn arn:aws:iam::123456789012:role/MyRole
+awsume and aws-vault manage credentials — they call STS, cache tokens, and handle MFA. awswit doesn't do any of that. It only sets `AWS_PROFILE` and lets the SDK handle the rest. This means:
 
-# Shorthand (account:role)
-awswit --role-arn 123456789012:MyRole
-```
+- No background processes
+- No token files to debug
+- Works with any auth method, including ones that didn't exist when awswit was written
 
-## Configuration
-
-awswit uses the standard AWS configuration files:
-
-- `~/.aws/config` - Profile definitions
-- `~/.aws/credentials` - Access keys
-
-### awswit-specific Configuration
-
-Create `~/.awswit/config.toml`:
-
-```toml
-# Enable fuzzy matching for profile names
-fuzzy-match = true
-
-# Enable colored output
-colors = true
-
-# Default session duration (seconds)
-role-duration = 3600
-```
-
-> **Note:** If you have an existing `config.yaml`, it will be loaded automatically with a deprecation warning:
-> `Warning: ~/.awswit/config.yaml is deprecated. Rename to config.toml.`
-
-## AWS Profile Examples
-
-### Basic Role Profile
-
-```ini
-[profile dev]
-role_arn = arn:aws:iam::123456789012:role/DevRole
-source_profile = default
-region = us-west-2
-```
-
-### Role with MFA
-
-```ini
-[profile prod-admin]
-role_arn = arn:aws:iam::987654321098:role/AdminRole
-source_profile = default
-mfa_serial = arn:aws:iam::123456789012:mfa/myuser
-region = us-east-1
-```
-
-### Role Chaining
-
-```ini
-[profile level1]
-role_arn = arn:aws:iam::111111111111:role/Level1
-source_profile = default
-
-[profile level2]
-role_arn = arn:aws:iam::222222222222:role/Level2
-source_profile = level1
-
-[profile level3]
-role_arn = arn:aws:iam::333333333333:role/Level3
-source_profile = level2
-```
-
-## Shell Support
-
-| Shell | Status |
-|-------|--------|
-| Bash | ✅ Full support |
-| Zsh | ✅ Full support |
-| Fish | ✅ Full support |
-| PowerShell | ✅ Full support |
-
-## Comparison
-
-| Feature | awswit | awsume | aws-vault |
-|---------|--------|--------|-----------|
-| Language | Rust | Python | Go |
-| Startup time | ~10ms | ~200ms | ~50ms |
-| Interactive picker | ✅ | ❌ | ❌ |
-| Favorites | ✅ | ❌ | ❌ |
-| Usage history | ✅ | ❌ | ❌ |
-| MFA caching | ✅ | ✅ | ✅ |
-| Role chaining | ✅ | ✅ | ✅ |
-| Auto-refresh | ✅ | ✅ | ✅ |
+If you're already using `aws sso login` or aws-vault, awswit is the missing piece: a fast, fuzzy, frecency-sorted way to pick which profile is active.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+MIT — see [LICENSE](LICENSE).
