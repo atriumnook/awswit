@@ -115,11 +115,11 @@ impl ProfileHistory {
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .open(&tmp_path)?;
             file.write_all(content.as_bytes())?;
+            file.sync_all()?;
         }
 
         #[cfg(not(unix))]
@@ -389,12 +389,12 @@ mod tests {
             let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
             let mut file = fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .open(&tmp_path)
                 .unwrap();
             file.write_all(content.as_bytes()).unwrap();
+            file.sync_all().unwrap();
             fs::rename(&tmp_path, &path).unwrap();
         }
 
