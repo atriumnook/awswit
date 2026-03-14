@@ -7,23 +7,17 @@ use ratatui::{
 };
 
 use super::theme::{ProfileType, Theme};
-use crate::history::ProfileHistory;
 use crate::profile::Profile;
 
 /// Profile preview panel
 pub struct ProfilePreview<'a> {
     profile: &'a Profile,
-    history: Option<&'a ProfileHistory>,
     theme: &'a Theme,
 }
 
 impl<'a> ProfilePreview<'a> {
     pub fn new(profile: &'a Profile, theme: &'a Theme) -> Self {
-        Self {
-            profile,
-            history: None,
-            theme,
-        }
+        Self { profile, theme }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
@@ -46,7 +40,6 @@ impl<'a> ProfilePreview<'a> {
                 Constraint::Length(3), // Role ARN
                 Constraint::Length(2), // Source profile chain
                 Constraint::Length(2), // MFA info
-                Constraint::Min(0),    // Last used / extra info
             ])
             .split(inner);
 
@@ -54,7 +47,6 @@ impl<'a> ProfilePreview<'a> {
         self.render_role_arn(frame, chunks[1]);
         self.render_source_chain(frame, chunks[2]);
         self.render_mfa_info(frame, chunks[3]);
-        self.render_history(frame, chunks[4]);
     }
 
     fn render_type_region(&self, frame: &mut Frame, area: Rect) {
@@ -169,46 +161,6 @@ impl<'a> ProfilePreview<'a> {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_history(&self, frame: &mut Frame, area: Rect) {
-        if let Some(history) = self.history
-            && let Some(entry) = history.get(&self.profile.name)
-        {
-            let duration = chrono::Utc::now() - entry.last_used;
-            let time_ago = format_duration(duration);
-
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{}Last used: ", self.theme.icons.clock),
-                    self.theme.muted_style(),
-                ),
-                Span::styled(time_ago, Style::default().fg(self.theme.muted)),
-            ]);
-
-            let use_count = Line::from(vec![Span::styled(
-                format!("  Used {} times", entry.use_count),
-                self.theme.muted_style(),
-            )]);
-
-            let paragraph = Paragraph::new(vec![line, use_count]);
-            frame.render_widget(paragraph, area);
-        }
-    }
-}
-
-/// Format a duration as human-readable time ago string
-fn format_duration(duration: chrono::Duration) -> String {
-    let secs = duration.num_seconds();
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{} minutes ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{} hours ago", secs / 3600)
-    } else if secs < 604800 {
-        format!("{} days ago", secs / 86400)
-    } else {
-        format!("{} weeks ago", secs / 604800)
-    }
 }
 
 /// Compact preview line for list view

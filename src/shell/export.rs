@@ -4,10 +4,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Validate that a value is safe for shell output (no newlines or carriage returns).
-fn validate_shell_value(
-    label: &str,
-    value: &str,
-) -> Result<(), crate::error::AwswitError> {
+fn validate_shell_value(label: &str, value: &str) -> Result<(), crate::error::AwswitError> {
     if value.contains('\n') || value.contains('\r') {
         return Err(crate::error::AwswitError::ShellError {
             message: format!(
@@ -59,7 +56,6 @@ pub enum ShellType {
     Zsh,
     Fish,
     PowerShell,
-    Cmd,
 }
 
 impl ShellExporter {
@@ -89,7 +85,7 @@ impl ShellExporter {
         }
 
         if cfg!(windows) {
-            return ShellType::Cmd;
+            return ShellType::PowerShell;
         }
 
         ShellType::Bash
@@ -103,11 +99,34 @@ impl ShellExporter {
             ShellType::Zsh
         } else if lower.contains("powershell") || lower.contains("pwsh") {
             ShellType::PowerShell
-        } else if lower.contains("cmd") {
-            ShellType::Cmd
         } else {
+            if !lower.contains("bash") && !lower.contains("sh") {
+                tracing::warn!("Unknown shell '{}', falling back to Bash", name);
+            }
             ShellType::Bash
         }
+    }
+
+    /// Generate bindings with validation and a formatting function.
+    fn generate_bindings<F>(
+        profile_name: &str,
+        region: Option<&str>,
+        format_fn: F,
+    ) -> Result<String, crate::error::AwswitError>
+    where
+        F: Fn(&str, Option<&str>) -> String,
+    {
+        validate_shell_value("Profile name", profile_name)?;
+        if let Some(r) = region {
+            validate_shell_value("Region", r)?;
+        }
+
+        let bindings = profile_bindings(profile_name, region);
+        let mut output = String::new();
+        for (name, value) in &bindings {
+            output.push_str(&format_fn(name, value.as_deref()));
+        }
+        Ok(output)
     }
 
     /// Generate export commands that can be displayed to the user (--show-commands).
@@ -116,26 +135,10 @@ impl ShellExporter {
         profile_name: &str,
         region: Option<&str>,
     ) -> Result<String, crate::error::AwswitError> {
-        validate_shell_value("Profile name", profile_name)?;
-        if let Some(r) = region {
-            validate_shell_value("Region", r)?;
-        }
-
-        let bindings = profile_bindings(profile_name, region);
-        let mut output = String::new();
-
-        for (name, value) in &bindings {
-            match value {
-                Some(val) => {
-                    output.push_str(&self.format_set(name, val));
-                }
-                None => {
-                    output.push_str(&self.format_unset(name));
-                }
-            }
-        }
-
-        Ok(output)
+        Self::generate_bindings(profile_name, region, |name, value| match value {
+            Some(val) => self.format_set(name, val),
+            None => self.format_unset(name),
+        })
     }
 
     /// Generate output for shell wrapper to eval.
@@ -147,26 +150,10 @@ impl ShellExporter {
         profile_name: &str,
         region: Option<&str>,
     ) -> Result<String, crate::error::AwswitError> {
-        validate_shell_value("Profile name", profile_name)?;
-        if let Some(r) = region {
-            validate_shell_value("Region", r)?;
-        }
-
-        let bindings = profile_bindings(profile_name, region);
-        let mut output = String::new();
-
-        for (name, value) in &bindings {
-            match value {
-                Some(val) => {
-                    output.push_str(&format!("{}={}\n", name, val));
-                }
-                None => {
-                    output.push_str(&format!("{}=\n", name));
-                }
-            }
-        }
-
-        Ok(output)
+        Self::generate_bindings(profile_name, region, |name, value| match value {
+            Some(val) => format!("{}={}\n", name, val),
+            None => format!("{}=\n", name),
+        })
     }
 
     /// Generate unset commands for display
@@ -196,16 +183,6 @@ impl ShellExporter {
                 let ps_value = format!("'{}'", value.replace('\'', "''"));
                 format!("$env:{} = {}\n", name, ps_value)
             }
-            ShellType::Cmd => {
-                let escaped = value
-                    .replace('^', "^^")
-                    .replace('&', "^&")
-                    .replace('|', "^|")
-                    .replace('<', "^<")
-                    .replace('>', "^>")
-                    .replace('%', "%%");
-                format!("set {}={}\n", name, escaped)
-            }
         }
     }
 
@@ -220,9 +197,6 @@ impl ShellExporter {
             }
             ShellType::PowerShell => {
                 format!("Remove-Item Env:\\{} -ErrorAction SilentlyContinue\n", name)
-            }
-            ShellType::Cmd => {
-                format!("set {}=\n", name)
             }
         }
     }
@@ -289,12 +263,7 @@ mod tests {
 
     #[test]
     fn test_unset_commands_all_shells() {
-        for shell in [
-            ShellType::Bash,
-            ShellType::Fish,
-            ShellType::PowerShell,
-            ShellType::Cmd,
-        ] {
+        for shell in [ShellType::Bash, ShellType::Fish, ShellType::PowerShell] {
             let exporter = ShellExporter::for_shell(shell);
             let output = exporter.generate_unset_commands();
             for var in MANAGED_VARS {
@@ -396,18 +365,6 @@ mod tests {
             assert!(fish.contains(var), "fish.fish missing {}", var);
             assert!(ps1.contains(var), "powershell.ps1 missing {}", var);
         }
-    }
-
-    #[test]
-    fn test_cmd_special_chars_escaped() {
-        let exporter = ShellExporter::for_shell(ShellType::Cmd);
-        let output = exporter.format_set("TEST", "val&ue|with<special>chars^and%percent");
-        assert!(output.contains("^&"));
-        assert!(output.contains("^|"));
-        assert!(output.contains("^<"));
-        assert!(output.contains("^>"));
-        assert!(output.contains("^^"));
-        assert!(output.contains("%%"));
     }
 
     #[test]
