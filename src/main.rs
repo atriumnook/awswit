@@ -152,7 +152,7 @@ fn emit_profile(
 ) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
     if args.show_commands {
-        print!("{}", exporter.generate_export_commands(profile_name, region));
+        print!("{}", exporter.generate_export_commands(profile_name, region)?);
     } else {
         tui::StatusLine::profile_switched(profile_name);
         print!(

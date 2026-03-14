@@ -3,6 +3,22 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Validate that a value is safe for shell output (no newlines or carriage returns).
+fn validate_shell_value(
+    label: &str,
+    value: &str,
+) -> Result<(), crate::error::AwswitError> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(crate::error::AwswitError::ShellError {
+            message: format!(
+                "{} contains newline characters, which is not allowed in shell output",
+                label
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// All environment variable names managed by awswit.
 ///
 /// These must be kept in sync with the variable lists in:
@@ -95,7 +111,16 @@ impl ShellExporter {
     }
 
     /// Generate export commands that can be displayed to the user (--show-commands).
-    pub fn generate_export_commands(&self, profile_name: &str, region: Option<&str>) -> String {
+    pub fn generate_export_commands(
+        &self,
+        profile_name: &str,
+        region: Option<&str>,
+    ) -> Result<String, crate::error::AwswitError> {
+        validate_shell_value("Profile name", profile_name)?;
+        if let Some(r) = region {
+            validate_shell_value("Region", r)?;
+        }
+
         let bindings = profile_bindings(profile_name, region);
         let mut output = String::new();
 
@@ -110,7 +135,7 @@ impl ShellExporter {
             }
         }
 
-        output
+        Ok(output)
     }
 
     /// Generate output for shell wrapper to eval.
@@ -122,12 +147,9 @@ impl ShellExporter {
         profile_name: &str,
         region: Option<&str>,
     ) -> Result<String, crate::error::AwswitError> {
-        if profile_name.contains('\n') || profile_name.contains('\r') {
-            return Err(crate::error::AwswitError::ShellError {
-                message:
-                    "Profile name contains newline characters, which is not allowed in shell output"
-                        .to_string(),
-            });
+        validate_shell_value("Profile name", profile_name)?;
+        if let Some(r) = region {
+            validate_shell_value("Region", r)?;
         }
 
         let bindings = profile_bindings(profile_name, region);
@@ -219,7 +241,9 @@ mod tests {
     #[test]
     fn test_posix_export() {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_export_commands("test-profile", Some("us-west-2"));
+        let output = exporter
+            .generate_export_commands("test-profile", Some("us-west-2"))
+            .unwrap();
 
         assert!(output.contains("export AWS_PROFILE='test-profile'"));
         assert!(output.contains("export AWS_DEFAULT_PROFILE='test-profile'"));
@@ -230,7 +254,9 @@ mod tests {
     #[test]
     fn test_fish_export() {
         let exporter = ShellExporter::for_shell(ShellType::Fish);
-        let output = exporter.generate_export_commands("test-profile", Some("us-west-2"));
+        let output = exporter
+            .generate_export_commands("test-profile", Some("us-west-2"))
+            .unwrap();
 
         assert!(output.contains("set -gx AWS_PROFILE 'test-profile'"));
     }
@@ -238,7 +264,9 @@ mod tests {
     #[test]
     fn test_powershell_export() {
         let exporter = ShellExporter::for_shell(ShellType::PowerShell);
-        let output = exporter.generate_export_commands("test-profile", Some("us-west-2"));
+        let output = exporter
+            .generate_export_commands("test-profile", Some("us-west-2"))
+            .unwrap();
 
         assert!(output.contains("$env:AWS_PROFILE = 'test-profile'"));
     }
@@ -246,16 +274,16 @@ mod tests {
     #[test]
     fn test_no_region_emits_unset() {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_export_commands("test", None);
+        let output = exporter.generate_export_commands("test", None).unwrap();
         assert!(output.contains("unset AWS_REGION"));
         assert!(output.contains("unset AWS_DEFAULT_REGION"));
 
         let exporter = ShellExporter::for_shell(ShellType::Fish);
-        let output = exporter.generate_export_commands("test", None);
+        let output = exporter.generate_export_commands("test", None).unwrap();
         assert!(output.contains("set -e AWS_REGION"));
 
         let exporter = ShellExporter::for_shell(ShellType::PowerShell);
-        let output = exporter.generate_export_commands("test", None);
+        let output = exporter.generate_export_commands("test", None).unwrap();
         assert!(output.contains("Remove-Item Env:\\AWS_REGION"));
     }
 
@@ -307,6 +335,27 @@ mod tests {
     fn test_shell_output_rejects_carriage_return_in_profile() {
         let exporter = ShellExporter::for_shell(ShellType::Bash);
         let result = exporter.generate_shell_output("test\rinjected", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shell_output_rejects_newline_in_region() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_shell_output("prod", Some("us-east-1\nMALICIOUS=evil"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_export_commands_rejects_newline_in_profile() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_export_commands("test\ninjected", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_export_commands_rejects_newline_in_region() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let result = exporter.generate_export_commands("prod", Some("us-east-1\nMALICIOUS=evil"));
         assert!(result.is_err());
     }
 
