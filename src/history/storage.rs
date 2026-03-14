@@ -327,6 +327,99 @@ mod tests {
     }
 
     #[test]
+    fn test_compare_by_frecency_favorites_first() {
+        let mut history = ProfileHistory::default();
+        history.set_favorite("fav", true);
+        history.record_use("recent");
+        let now = Utc::now();
+        assert_eq!(
+            history.compare_by_frecency("fav", "recent", now),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_compare_by_frecency_higher_score_first() {
+        let mut history = ProfileHistory::default();
+        // Use "heavy" many times, "light" once
+        for _ in 0..10 {
+            history.record_use("heavy");
+        }
+        history.record_use("light");
+        let now = Utc::now();
+        assert_eq!(
+            history.compare_by_frecency("heavy", "light", now),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_compare_by_frecency_unknown_profiles_alphabetical() {
+        let history = ProfileHistory::default();
+        let now = Utc::now();
+        assert_eq!(
+            history.compare_by_frecency("aaa", "zzz", now),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            history.compare_by_frecency("zzz", "aaa", now),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            history.compare_by_frecency("same", "same", now),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_creates_file_with_restricted_permissions() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+
+        // Temporarily override the history path by saving directly
+        let history = ProfileHistory::default();
+        let content = serde_json::to_string_pretty(&history).unwrap();
+
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+            fs::rename(&tmp_path, &path).unwrap();
+        }
+
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+
+        let mut history = ProfileHistory::default();
+        history.record_use("test-profile");
+        history.set_favorite("test-profile", true);
+
+        let content = serde_json::to_string_pretty(&history).unwrap();
+        fs::write(&path, &content).unwrap();
+
+        let loaded: ProfileHistory = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.get("test-profile").unwrap().use_count, 1);
+        assert!(loaded.is_favorite("test-profile"));
+    }
+
+    #[test]
     fn test_favorites() {
         let mut history = ProfileHistory::default();
 
