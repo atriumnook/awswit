@@ -91,7 +91,11 @@ impl ProfileHistory {
         }
     }
 
-    /// Save history to file
+    /// Save history to file atomically.
+    ///
+    /// Writes to a temporary file with restricted permissions, then renames
+    /// it into place. This avoids a race window where the file exists with
+    /// default permissions before `set_permissions` is called.
     pub fn save(&self) -> Result<(), AwswitError> {
         let path = Self::history_path()?;
 
@@ -101,12 +105,31 @@ impl ProfileHistory {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content.as_bytes())?;
+
+        // Write to a PID-unique temp file in the same directory, then atomically rename.
+        let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&tmp_path, content.as_bytes())?;
+        }
+
+        if let Err(e) = fs::rename(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
         }
 
         Ok(())
@@ -141,6 +164,22 @@ impl ProfileHistory {
             .get(profile_name)
             .map(|e| e.is_favorite)
             .unwrap_or(false)
+    }
+
+    /// Compare two profiles by frecency order: favorites first, then frecency descending, then name ascending.
+    pub fn compare_by_frecency(&self, a: &str, b: &str, now: DateTime<Utc>) -> std::cmp::Ordering {
+        let a_fav = self.is_favorite(a);
+        let b_fav = self.is_favorite(b);
+        b_fav
+            .cmp(&a_fav)
+            .then_with(|| {
+                let a_score = self.get(a).map(|e| e.frecency_score(now)).unwrap_or(0.0);
+                let b_score = self.get(b).map(|e| e.frecency_score(now)).unwrap_or(0.0);
+                b_score
+                    .partial_cmp(&a_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.cmp(b))
     }
 
     /// Set favorite status

@@ -127,6 +127,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
     ctx.history.record_use(&target_profile_name);
     if let Err(e) = ctx.history.save() {
         tracing::warn!("Failed to save profile history: {}", e);
+        eprintln!("Warning: Failed to save profile history: {}", e);
     }
 
     // Look up the profile to get its region
@@ -145,20 +146,16 @@ fn run(args: Args) -> Result<i32, AwswitError> {
 }
 
 /// Emit profile selection as shell output or export commands
-fn emit_profile(
-    profile_name: &str,
-    region: Option<&str>,
-    args: &Args,
-) -> Result<(), AwswitError> {
+fn emit_profile(profile_name: &str, region: Option<&str>, args: &Args) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
     if args.show_commands {
-        print!("{}", exporter.generate_export_commands(profile_name, region)?);
-    } else {
-        tui::StatusLine::profile_switched(profile_name);
         print!(
             "{}",
-            exporter.generate_shell_output(profile_name, region)?
+            exporter.generate_export_commands(profile_name, region)?
         );
+    } else {
+        tui::StatusLine::profile_switched(profile_name);
+        print!("{}", exporter.generate_shell_output(profile_name, region)?);
     }
 
     Ok(())

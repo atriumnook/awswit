@@ -63,8 +63,14 @@ impl<'a> ProfilePicker<'a> {
 
     /// Run the interactive picker
     pub fn run(self) -> io::Result<PickerResult> {
-        // Setup terminal
         enable_raw_mode()?;
+        // From here on, disable_raw_mode() must run even if run_inner fails.
+        let result = self.run_inner();
+        let _ = disable_raw_mode();
+        result
+    }
+
+    fn run_inner(self) -> io::Result<PickerResult> {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
@@ -78,7 +84,6 @@ impl<'a> ProfilePicker<'a> {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
 
         // Restore terminal — always runs regardless of panic or error
-        let _ = disable_raw_mode();
         let _ = execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
@@ -124,24 +129,7 @@ impl PickerApp {
 
         // Sort: favorites first, then by frecency descending, then alphabetically
         let now = chrono::Utc::now();
-        entries.sort_by(|a, b| {
-            b.is_favorite
-                .cmp(&a.is_favorite)
-                .then_with(|| {
-                    let a_frecency = history
-                        .get(&a.name)
-                        .map(|h| h.frecency_score(now))
-                        .unwrap_or(0.0);
-                    let b_frecency = history
-                        .get(&b.name)
-                        .map(|h| h.frecency_score(now))
-                        .unwrap_or(0.0);
-                    b_frecency
-                        .partial_cmp(&a_frecency)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| history.compare_by_frecency(&a.name, &b.name, now));
 
         let filtered: Vec<usize> = (0..entries.len()).collect();
 
@@ -549,6 +537,7 @@ impl PickerApp {
             self.history.set_favorite(&entry.name, entry.is_favorite);
             if let Err(e) = self.history.save() {
                 tracing::warn!("Failed to save history: {}", e);
+                eprintln!("Warning: Failed to save history: {}", e);
             }
         }
     }

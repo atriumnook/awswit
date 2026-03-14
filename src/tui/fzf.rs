@@ -22,7 +22,6 @@ const BLOCKED_FZF_OPTIONS: &[&str] = &[
     "--reload",
     "--transform",
     "--preview-window", // can contain execute(...) action
-    "--header-first",
 ];
 
 /// Check if a token is a blocked fzf option (handles both `--opt` and `--opt=value` forms).
@@ -68,23 +67,7 @@ pub fn select_with_fzf(
 
     // Sort: favorite first, then frecency desc, then name asc
     let mut names: Vec<&String> = profiles.keys().collect();
-    names.sort_by(|a, b| {
-        let a_entry = history.get(a);
-        let b_entry = history.get(b);
-        let a_fav = a_entry.map(|e| e.is_favorite).unwrap_or(false);
-        let b_fav = b_entry.map(|e| e.is_favorite).unwrap_or(false);
-
-        b_fav
-            .cmp(&a_fav)
-            .then_with(|| {
-                let a_score = a_entry.map(|e| e.frecency_score(now)).unwrap_or(0.0);
-                let b_score = b_entry.map(|e| e.frecency_score(now)).unwrap_or(0.0);
-                b_score
-                    .partial_cmp(&a_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.cmp(b))
-    });
+    names.sort_by(|a, b| history.compare_by_frecency(a, b, now));
 
     let input: String = names.iter().map(|n| format!("{}\n", n)).collect();
 
