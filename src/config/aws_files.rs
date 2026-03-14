@@ -39,14 +39,14 @@ impl AwsFiles {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if let Ok(meta) = fs::metadata(&path) {
-                if meta.mode() & 0o002 != 0 {
-                    tracing::warn!(
-                        "AWS config file {} is world-writable (mode {:o}). This is a security risk.",
-                        path,
-                        meta.mode() & 0o777
-                    );
-                }
+            if let Ok(meta) = fs::metadata(&path)
+                && meta.mode() & 0o002 != 0
+            {
+                tracing::warn!(
+                    "AWS config file {} is world-writable (mode {:o}). This is a security risk.",
+                    path,
+                    meta.mode() & 0o777
+                );
             }
         }
 

@@ -5,8 +5,8 @@ use aws_sdk_sts::Client;
 use chrono::{DateTime, Utc};
 use tokio::time::timeout;
 
-use crate::aws::traits::StsOperations;
 use crate::aws::Credentials;
+use crate::aws::traits::StsOperations;
 use crate::error::AwswitError;
 
 const STS_TIMEOUT_SECS: u64 = 30;

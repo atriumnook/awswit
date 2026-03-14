@@ -45,7 +45,7 @@ impl CredentialStore for TestStore {
             Err(e) => {
                 return Err(awswit::error::AwswitError::CacheError {
                     message: e.to_string(),
-                })
+                });
             }
         };
         let entry: CacheEntry = match serde_json::from_str(&content) {

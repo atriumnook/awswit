@@ -388,11 +388,11 @@ fn determine_target_profile(
         return Ok(profile_name);
     }
 
-    if config.fuzzy_match {
-        if let Some(matched) = utils::fuzzy::find_closest_profile(&profile_name, profiles) {
-            tracing::info!("Fuzzy matched '{}' to '{}'", profile_name, matched);
-            return Ok(matched);
-        }
+    if config.fuzzy_match
+        && let Some(matched) = utils::fuzzy::find_closest_profile(&profile_name, profiles)
+    {
+        tracing::info!("Fuzzy matched '{}' to '{}'", profile_name, matched);
+        return Ok(matched);
     }
 
     Err(AwswitError::ProfileNotFound { name: profile_name })

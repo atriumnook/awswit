@@ -53,10 +53,10 @@ pub async fn start_auto_refresh(
     tracing::info!("Starting auto-refresh for profile: {}", profile_name);
 
     // Check role duration limit
-    if let Some(duration) = args.role_duration {
-        if duration > 3600 {
-            return Err(AwswitError::AutoRefreshDurationLimit);
-        }
+    if let Some(duration) = args.role_duration
+        && duration > 3600
+    {
+        return Err(AwswitError::AutoRefreshDurationLimit);
     }
 
     // Refuse auto-refresh for MFA-protected profiles (daemon has no terminal for MFA prompt).
@@ -241,10 +241,10 @@ fn save_auto_refresh_profile(profile: &AutoRefreshProfile) -> Result<(), AwswitE
 fn remove_auto_refresh_profile(profile_name: &str) -> Result<(), AwswitError> {
     let safe_name = sanitize_profile_name(profile_name)?;
     let path = super::get_auto_refresh_dir()?.join(format!("{}.json", safe_name));
-    if let Err(e) = fs::remove_file(&path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(e.into());
-        }
+    if let Err(e) = fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(e.into());
     }
     Ok(())
 }
@@ -263,10 +263,10 @@ fn list_auto_refresh_profiles() -> Result<Vec<String>, AwswitError> {
             .extension()
             .map(|e| e == "json")
             .unwrap_or(false)
+            && let Some(name) = entry.path().file_stem()
+            && !name.is_empty()
         {
-            if let Some(name) = entry.path().file_stem() {
-                profiles.push(name.to_string_lossy().to_string());
-            }
+            profiles.push(name.to_string_lossy().to_string());
         }
     }
 
@@ -633,14 +633,14 @@ fn read_pid(pid_path: &std::path::Path) -> Option<u32> {
 
 /// Remove a stale PID file, logging non-NotFound errors.
 fn remove_stale_pid_file(pid_path: &std::path::Path) {
-    if let Err(e) = fs::remove_file(pid_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(
-                "Failed to remove stale PID file {}: {}",
-                pid_path.display(),
-                e
-            );
-        }
+    if let Err(e) = fs::remove_file(pid_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            "Failed to remove stale PID file {}: {}",
+            pid_path.display(),
+            e
+        );
     }
 }
 

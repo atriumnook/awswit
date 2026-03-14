@@ -69,7 +69,7 @@ impl ProfileHistory {
             Err(e) => {
                 return Err(AwswitError::CacheError {
                     message: format!("Failed to read history: {}", e),
-                })
+                });
             }
         };
 

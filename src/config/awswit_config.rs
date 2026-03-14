@@ -73,7 +73,9 @@ impl AwswitConfig {
 
         let (config, used_legacy_yaml) = Self::load_from_paths(&toml_path, &yaml_path)?;
         if used_legacy_yaml {
-            eprintln!("Warning: ~/.awswit/config.yaml is deprecated and will be removed in v2.1. Rename to config.toml.");
+            eprintln!(
+                "Warning: ~/.awswit/config.yaml is deprecated and will be removed in v2.1. Rename to config.toml."
+            );
         }
         Ok(config)
     }
@@ -324,9 +326,11 @@ mod tests {
     #[test]
     fn test_session_token_duration_boundary_high_reject() {
         let mut config = AwswitConfig::default();
-        assert!(config
-            .set_value("session-token-duration", "129601")
-            .is_err());
+        assert!(
+            config
+                .set_value("session-token-duration", "129601")
+                .is_err()
+        );
     }
 
     #[test]

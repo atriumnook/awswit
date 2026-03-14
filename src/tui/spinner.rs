@@ -1,7 +1,7 @@
 use crossterm::style::Stylize;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const SPINNER_CHARS: &[char] = &[

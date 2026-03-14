@@ -40,16 +40,16 @@ fn load_profile_names() -> Vec<String> {
     }
 
     // Check environment variables
-    if let Ok(config_file) = std::env::var("AWS_CONFIG_FILE") {
-        if let Some(names) = load_profiles_from_file(Path::new(&config_file), true) {
-            profiles.extend(names);
-        }
+    if let Ok(config_file) = std::env::var("AWS_CONFIG_FILE")
+        && let Some(names) = load_profiles_from_file(Path::new(&config_file), true)
+    {
+        profiles.extend(names);
     }
 
-    if let Ok(creds_file) = std::env::var("AWS_SHARED_CREDENTIALS_FILE") {
-        if let Some(names) = load_profiles_from_file(Path::new(&creds_file), false) {
-            profiles.extend(names);
-        }
+    if let Ok(creds_file) = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+        && let Some(names) = load_profiles_from_file(Path::new(&creds_file), false)
+    {
+        profiles.extend(names);
     }
 
     // Deduplicate

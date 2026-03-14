@@ -18,10 +18,10 @@ use crate::error::AwswitError;
 /// Get the credentials file path for a profile, using the stored path if available,
 /// otherwise falling back to the default.
 fn credentials_path_for_profile(profile: &AutoRefreshProfile) -> Result<PathBuf, AwswitError> {
-    if let Some(ref path) = profile.credentials_file_path {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
+    if let Some(ref path) = profile.credentials_file_path
+        && !path.is_empty()
+    {
+        return Ok(PathBuf::from(path));
     }
     credentials_file::get_aws_credentials_path()
 }
@@ -176,12 +176,12 @@ async fn run_daemon_loop_inner(#[cfg(unix)] mut sigterm: Option<&mut tokio::sign
         }
     }
 
-    if let Ok(pid_path) = super::get_pid_file_path() {
-        if let Err(e) = fs::remove_file(&pid_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Failed to remove PID file {}: {}", pid_path.display(), e);
-            }
-        }
+    // Only warn on real errors; NotFound is expected if the daemon was already cleaned up.
+    if let Ok(pid_path) = super::get_pid_file_path()
+        && let Err(e) = fs::remove_file(&pid_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("Failed to remove PID file {}: {}", pid_path.display(), e);
     }
     tracing::info!("Daemon shutdown complete");
 }
@@ -228,17 +228,17 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
     // Clean up profiles that have been expired for too long
     let mut expired_profiles = HashSet::new();
     for (name, profile) in &profiles {
-        if let Some(ref exp_str) = profile.awswit_role_expiration {
-            if let Ok(exp_time) = DateTime::parse_from_rfc3339(exp_str) {
-                let exp_utc = exp_time.with_timezone(&Utc);
-                if exp_utc + chrono::Duration::hours(MAX_EXPIRED_HOURS) < Utc::now() {
-                    tracing::info!(
-                        "Cleaning up long-expired profile '{}' (expired at {})",
-                        name,
-                        exp_str
-                    );
-                    expired_profiles.insert(name.clone());
-                }
+        if let Some(ref exp_str) = profile.awswit_role_expiration
+            && let Ok(exp_time) = DateTime::parse_from_rfc3339(exp_str)
+        {
+            let exp_utc = exp_time.with_timezone(&Utc);
+            if exp_utc + chrono::Duration::hours(MAX_EXPIRED_HOURS) < Utc::now() {
+                tracing::info!(
+                    "Cleaning up long-expired profile '{}' (expired at {})",
+                    name,
+                    exp_str
+                );
+                expired_profiles.insert(name.clone());
             }
         }
     }
@@ -274,10 +274,10 @@ async fn refresh_all_profiles() -> Result<bool, AwswitError> {
                 Err(_) => true, // read error, attempt removal
             };
             if still_expired {
-                if let Err(e) = fs::remove_file(&json_path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!("Failed to remove expired profile {}: {}", name, e);
-                    }
+                if let Err(e) = fs::remove_file(&json_path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!("Failed to remove expired profile {}: {}", name, e);
                 }
                 confirmed_expired.push(name.clone());
             } else {
@@ -649,24 +649,24 @@ fn update_credentials_file(
 
     // Idempotency check: if metadata already has a newer or equal expiration,
     // a previous partial run already wrote the credentials successfully.
-    if let (Some(new_exp), Some(ref profile)) = (expiration, &existing_profile) {
-        if let Some(ref existing_exp) = profile.awswit_role_expiration {
-            let should_skip = match (
-                DateTime::parse_from_rfc3339(existing_exp),
-                DateTime::parse_from_rfc3339(new_exp),
-            ) {
-                (Ok(existing_dt), Ok(new_dt)) => existing_dt >= new_dt,
-                _ => existing_exp >= new_exp, // fallback to string comparison
-            };
-            if should_skip {
-                tracing::debug!(
-                    "Skipping redundant refresh for {} (existing expiration {} >= new {})",
-                    profile_name,
-                    existing_exp,
-                    new_exp
-                );
-                return Ok(());
-            }
+    if let (Some(new_exp), Some(profile)) = (expiration, &existing_profile)
+        && let Some(ref existing_exp) = profile.awswit_role_expiration
+    {
+        let should_skip = match (
+            DateTime::parse_from_rfc3339(existing_exp),
+            DateTime::parse_from_rfc3339(new_exp),
+        ) {
+            (Ok(existing_dt), Ok(new_dt)) => existing_dt >= new_dt,
+            _ => existing_exp >= new_exp, // fallback to string comparison
+        };
+        if should_skip {
+            tracing::debug!(
+                "Skipping redundant refresh for {} (existing expiration {} >= new {})",
+                profile_name,
+                existing_exp,
+                new_exp
+            );
+            return Ok(());
         }
     }
 

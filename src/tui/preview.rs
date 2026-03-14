@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use super::theme::{ProfileType, Theme};
@@ -170,27 +170,27 @@ impl<'a> ProfilePreview<'a> {
     }
 
     fn render_history(&self, frame: &mut Frame, area: Rect) {
-        if let Some(history) = self.history {
-            if let Some(entry) = history.get(&self.profile.name) {
-                let duration = chrono::Utc::now() - entry.last_used;
-                let time_ago = format_duration(duration);
+        if let Some(history) = self.history
+            && let Some(entry) = history.get(&self.profile.name)
+        {
+            let duration = chrono::Utc::now() - entry.last_used;
+            let time_ago = format_duration(duration);
 
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{}Last used: ", self.theme.icons.clock),
-                        self.theme.muted_style(),
-                    ),
-                    Span::styled(time_ago, Style::default().fg(self.theme.muted)),
-                ]);
-
-                let use_count = Line::from(vec![Span::styled(
-                    format!("  Used {} times", entry.use_count),
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{}Last used: ", self.theme.icons.clock),
                     self.theme.muted_style(),
-                )]);
+                ),
+                Span::styled(time_ago, Style::default().fg(self.theme.muted)),
+            ]);
 
-                let paragraph = Paragraph::new(vec![line, use_count]);
-                frame.render_widget(paragraph, area);
-            }
+            let use_count = Line::from(vec![Span::styled(
+                format!("  Used {} times", entry.use_count),
+                self.theme.muted_style(),
+            )]);
+
+            let paragraph = Paragraph::new(vec![line, use_count]);
+            frame.render_widget(paragraph, area);
         }
     }
 }

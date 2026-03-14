@@ -16,10 +16,10 @@ pub fn awswit_home_dir() -> Result<PathBuf, std::io::Error> {
 /// Checks `AWS_SHARED_CREDENTIALS_FILE` environment variable first,
 /// falling back to `~/.aws/credentials`.
 pub fn aws_credentials_path() -> Result<PathBuf, std::io::Error> {
-    if let Ok(path) = std::env::var("AWS_SHARED_CREDENTIALS_FILE") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
+    if let Ok(path) = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+        && !path.is_empty()
+    {
+        return Ok(PathBuf::from(path));
     }
     let home = dirs::home_dir().ok_or_else(|| {
         std::io::Error::new(
@@ -35,10 +35,10 @@ pub fn aws_credentials_path() -> Result<PathBuf, std::io::Error> {
 /// Checks `AWS_CONFIG_FILE` environment variable first,
 /// falling back to `~/.aws/config`.
 pub fn aws_config_path() -> Result<PathBuf, std::io::Error> {
-    if let Ok(path) = std::env::var("AWS_CONFIG_FILE") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
+    if let Ok(path) = std::env::var("AWS_CONFIG_FILE")
+        && !path.is_empty()
+    {
+        return Ok(PathBuf::from(path));
     }
     let home = dirs::home_dir().ok_or_else(|| {
         std::io::Error::new(

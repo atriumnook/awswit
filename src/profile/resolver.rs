@@ -91,11 +91,7 @@ impl<'a> ProfileResolver<'a> {
             .or_else(|| profile.and_then(|p| p.duration_seconds))
             .or_else(|| {
                 let rd = self.config.role_duration;
-                if rd > 0 {
-                    Some(rd)
-                } else {
-                    None
-                }
+                if rd > 0 { Some(rd) } else { None }
             });
         if let Some(d) = duration {
             crate::cli::validate_role_duration(d)?;
@@ -307,13 +303,12 @@ impl<'a> ProfileResolver<'a> {
             chain.push(profile);
 
             // If this profile has a source_profile that's also a role, continue the chain
-            if let Some(ref source_name) = profile.source_profile {
-                if let Some(source_profile) = self.profiles.get(source_name) {
-                    if source_profile.is_role_profile() {
-                        current_name = source_name.clone();
-                        continue;
-                    }
-                }
+            if let Some(ref source_name) = profile.source_profile
+                && let Some(source_profile) = self.profiles.get(source_name)
+                && source_profile.is_role_profile()
+            {
+                current_name = source_name.clone();
+                continue;
             }
 
             // End of chain
@@ -411,11 +406,11 @@ impl<'a> ProfileResolver<'a> {
         // Check cache first (unless force refresh)
         if !args.force_refresh {
             let cache_key = mfa_cache_key(&source_credentials.access_key_id, mfa_serial);
-            if let Some(cached) = cache_manager.get(&cache_key)? {
-                if !cached.is_expired() {
-                    tracing::info!("Using cached MFA session credentials");
-                    return Ok(cached);
-                }
+            if let Some(cached) = cache_manager.get(&cache_key)?
+                && !cached.is_expired()
+            {
+                tracing::info!("Using cached MFA session credentials");
+                return Ok(cached);
             }
         }
 

@@ -28,9 +28,9 @@ const BLOCKED_FZF_OPTIONS: &[&str] = &[
 /// Check if a token is a blocked fzf option (handles both `--opt` and `--opt=value` forms).
 fn is_blocked_fzf_option(token: &str) -> bool {
     let normalized = token.to_ascii_lowercase();
-    BLOCKED_FZF_OPTIONS.iter().any(|blocked| {
-        normalized == *blocked || normalized.starts_with(&format!("{}=", blocked))
-    })
+    BLOCKED_FZF_OPTIONS
+        .iter()
+        .any(|blocked| normalized == *blocked || normalized.starts_with(&format!("{}=", blocked)))
 }
 
 fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
@@ -109,10 +109,12 @@ pub fn select_with_fzf(
             }
         })?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(input.as_bytes()) {
-            tracing::warn!("Failed to write to fzf stdin: {}", e);
-        }
+    // stdin is dropped here after write_all, closing the pipe and sending EOF to fzf.
+    // This must happen before wait_with_output() to avoid deadlock.
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = stdin.write_all(input.as_bytes())
+    {
+        tracing::warn!("Failed to write to fzf stdin: {}", e);
     }
 
     let output = child
@@ -202,7 +204,9 @@ mod tests {
     #[test]
     fn build_fzf_args_blocks_dangerous_options() {
         // --preview, --bind, --execute etc. should be stripped
-        let args = build_fzf_args(Some("--ansi --preview 'cat {}' --bind 'enter:execute(rm -rf /)' --cycle"));
+        let args = build_fzf_args(Some(
+            "--ansi --preview 'cat {}' --bind 'enter:execute(rm -rf /)' --cycle",
+        ));
         assert!(args.contains(&"--ansi".to_string()));
         assert!(args.contains(&"--cycle".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("--preview")));

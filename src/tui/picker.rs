@@ -5,17 +5,17 @@ use std::time::Duration;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame, Terminal,
 };
 
 use super::preview::compact_preview_line;
@@ -74,9 +74,8 @@ impl<'a> ProfilePicker<'a> {
         let mut app = PickerApp::new(self.profiles, self.history, self.theme);
 
         // Run event loop, ensuring terminal cleanup even on panic
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.run(&mut terminal)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
 
         // Restore terminal — always runs regardless of panic or error
         let _ = disable_raw_mode();
@@ -171,103 +170,103 @@ impl PickerApp {
             terminal.draw(|f| self.render(f))?;
 
             // Poll for events with timeout
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        // Navigation
-                        KeyCode::Up => self.move_selection(-1),
-                        KeyCode::Down => self.move_selection(1),
-                        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.move_selection(-1);
-                        }
-                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.move_selection(1);
-                        }
-                        KeyCode::PageUp => self.move_selection(-10),
-                        KeyCode::PageDown => self.move_selection(10),
-                        KeyCode::Home => self.move_to_start(),
-                        KeyCode::End => self.move_to_end(),
-
-                        // Selection
-                        KeyCode::Enter => {
-                            if let Some(selected) = self.get_selected_profile() {
-                                return Ok(PickerResult::Selected(selected.name.clone()));
-                            }
-                        }
-
-                        // Toggle favorite
-                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.toggle_favorite();
-                        }
-                        KeyCode::Char('*') => {
-                            self.toggle_favorite();
-                        }
-
-                        // Toggle preview
-                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.show_preview = !self.show_preview;
-                        }
-
-                        // Cancel
-                        KeyCode::Esc => {
-                            return Ok(PickerResult::Cancelled);
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return Ok(PickerResult::Cancelled);
-                        }
-
-                        // Clear query
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.query.clear();
-                            self.cursor_pos = 0;
-                            self.update_filter();
-                        }
-
-                        // Query editing
-                        KeyCode::Char(c) => {
-                            self.query.insert(self.cursor_pos, c);
-                            self.cursor_pos += c.len_utf8();
-                            self.update_filter();
-                        }
-                        KeyCode::Backspace => {
-                            if self.cursor_pos > 0 {
-                                let prev = self.query[..self.cursor_pos]
-                                    .char_indices()
-                                    .next_back()
-                                    .map(|(idx, _)| idx)
-                                    .unwrap_or(0);
-                                self.query.remove(prev);
-                                self.cursor_pos = prev;
-                                self.update_filter();
-                            }
-                        }
-                        KeyCode::Delete => {
-                            if self.cursor_pos < self.query.len() {
-                                self.query.remove(self.cursor_pos);
-                                self.update_filter();
-                            }
-                        }
-                        KeyCode::Left => {
-                            if self.cursor_pos > 0 {
-                                self.cursor_pos = self.query[..self.cursor_pos]
-                                    .char_indices()
-                                    .next_back()
-                                    .map(|(idx, _)| idx)
-                                    .unwrap_or(0);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if self.cursor_pos < self.query.len() {
-                                self.cursor_pos = self.query[self.cursor_pos..]
-                                    .char_indices()
-                                    .nth(1)
-                                    .map(|(idx, _)| self.cursor_pos + idx)
-                                    .unwrap_or(self.query.len());
-                            }
-                        }
-
-                        _ => {}
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()?
+            {
+                match key.code {
+                    // Navigation
+                    KeyCode::Up => self.move_selection(-1),
+                    KeyCode::Down => self.move_selection(1),
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.move_selection(-1);
                     }
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.move_selection(1);
+                    }
+                    KeyCode::PageUp => self.move_selection(-10),
+                    KeyCode::PageDown => self.move_selection(10),
+                    KeyCode::Home => self.move_to_start(),
+                    KeyCode::End => self.move_to_end(),
+
+                    // Selection
+                    KeyCode::Enter => {
+                        if let Some(selected) = self.get_selected_profile() {
+                            return Ok(PickerResult::Selected(selected.name.clone()));
+                        }
+                    }
+
+                    // Toggle favorite
+                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.toggle_favorite();
+                    }
+                    KeyCode::Char('*') => {
+                        self.toggle_favorite();
+                    }
+
+                    // Toggle preview
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.show_preview = !self.show_preview;
+                    }
+
+                    // Cancel
+                    KeyCode::Esc => {
+                        return Ok(PickerResult::Cancelled);
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(PickerResult::Cancelled);
+                    }
+
+                    // Clear query
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.query.clear();
+                        self.cursor_pos = 0;
+                        self.update_filter();
+                    }
+
+                    // Query editing
+                    KeyCode::Char(c) => {
+                        self.query.insert(self.cursor_pos, c);
+                        self.cursor_pos += c.len_utf8();
+                        self.update_filter();
+                    }
+                    KeyCode::Backspace => {
+                        if self.cursor_pos > 0 {
+                            let prev = self.query[..self.cursor_pos]
+                                .char_indices()
+                                .next_back()
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(0);
+                            self.query.remove(prev);
+                            self.cursor_pos = prev;
+                            self.update_filter();
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if self.cursor_pos < self.query.len() {
+                            self.query.remove(self.cursor_pos);
+                            self.update_filter();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if self.cursor_pos > 0 {
+                            self.cursor_pos = self.query[..self.cursor_pos]
+                                .char_indices()
+                                .next_back()
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(0);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if self.cursor_pos < self.query.len() {
+                            self.cursor_pos = self.query[self.cursor_pos..]
+                                .char_indices()
+                                .nth(1)
+                                .map(|(idx, _)| self.cursor_pos + idx)
+                                .unwrap_or(self.query.len());
+                        }
+                    }
+
+                    _ => {}
                 }
             }
         }
@@ -540,16 +539,16 @@ impl PickerApp {
     }
 
     fn toggle_favorite(&mut self) {
-        if let Some(selected) = self.list_state.selected() {
-            if let Some(&entry_idx) = self.filtered.get(selected) {
-                let entry = &mut self.entries[entry_idx];
-                entry.is_favorite = !entry.is_favorite;
+        if let Some(selected) = self.list_state.selected()
+            && let Some(&entry_idx) = self.filtered.get(selected)
+        {
+            let entry = &mut self.entries[entry_idx];
+            entry.is_favorite = !entry.is_favorite;
 
-                // Update history
-                self.history.set_favorite(&entry.name, entry.is_favorite);
-                if let Err(e) = self.history.save() {
-                    tracing::warn!("Failed to save history: {}", e);
-                }
+            // Update history
+            self.history.set_favorite(&entry.name, entry.is_favorite);
+            if let Err(e) = self.history.save() {
+                tracing::warn!("Failed to save history: {}", e);
             }
         }
     }
