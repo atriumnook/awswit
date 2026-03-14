@@ -14,7 +14,7 @@ awswit() {
 
     # Parse and export variables from output
     while IFS= read -r line; do
-        # Split on first '=' only (values like session tokens may contain '=')
+        # Split on first '=' only
         key="${line%%=*}"
         value="${line#*=}"
         # If no '=' was found, key equals the whole line and value equals the whole line
@@ -22,7 +22,7 @@ awswit() {
             value=""
         fi
         case "$key" in
-            AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|AWS_PROFILE|AWS_DEFAULT_PROFILE|AWSWIT_PROFILE|AWSWIT_EXPIRATION)
+            AWS_PROFILE|AWS_DEFAULT_PROFILE|AWS_REGION|AWS_DEFAULT_REGION|AWSWIT_PROFILE)
                 if [ -n "$value" ]; then
                     export "$key=$value"
                 else
@@ -30,10 +30,9 @@ awswit() {
                 fi
                 ;;
             AWSWIT_UNSET)
-                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-                unset AWS_REGION AWS_DEFAULT_REGION
                 unset AWS_PROFILE AWS_DEFAULT_PROFILE
-                unset AWSWIT_PROFILE AWSWIT_EXPIRATION
+                unset AWS_REGION AWS_DEFAULT_REGION
+                unset AWSWIT_PROFILE
                 ;;
             *)
                 # Print non-variable output

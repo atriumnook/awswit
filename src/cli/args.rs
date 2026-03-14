@@ -1,9 +1,7 @@
 use clap::{Parser, Subcommand};
 
 /// awswit: A fast, modern AWS profile switcher with interactive TUI
-///
-/// A convenient way to manage session tokens and assume role credentials.
-#[derive(Parser, Clone, Default)]
+#[derive(Parser, Clone, Default, Debug)]
 #[command(name = "awswit")]
 #[command(author, about, long_about = None, disable_version_flag = true)]
 #[command(after_help = "Thank you for using awswit!")]
@@ -20,10 +18,6 @@ pub struct Args {
     #[arg(short = 'v', long = "version")]
     pub version: bool,
 
-    /// Force refresh credentials
-    #[arg(short = 'r', long = "refresh")]
-    pub force_refresh: bool,
-
     /// Show the commands to set the credentials
     #[arg(short = 's', long = "show-commands")]
     pub show_commands: bool,
@@ -32,57 +26,17 @@ pub struct Args {
     #[arg(short = 'u', long = "unset")]
     pub unset: bool,
 
-    /// Auto-refresh credentials in the background
-    #[arg(short = 'a', long = "auto-refresh")]
-    pub auto_refresh: bool,
-
-    /// Kill the auto-refresher for a profile (or all if no profile specified)
-    #[arg(short = 'k', long = "kill-refresher", alias = "kill")]
-    pub kill_refresher: bool,
-
-    /// List available profiles. Pass 'more' for additional details
+    /// List available profiles
     #[arg(short = 'l', long = "list-profiles", value_name = "detail_level", num_args = 0..=1, default_missing_value = "")]
     pub list_profiles: Option<String>,
-
-    /// Refresh the autocomplete profile cache
-    #[arg(long = "refresh-autocomplete")]
-    pub refresh_autocomplete: bool,
-
-    /// Role ARN to assume (can use shorthand: account_id:role_name)
-    #[arg(long = "role-arn", value_name = "role_arn")]
-    pub role_arn: Option<String>,
-
-    /// Source profile to use for assuming the role
-    #[arg(long = "source-profile", value_name = "source_profile")]
-    pub source_profile: Option<String>,
-
-    /// External ID for assuming the role
-    #[arg(long = "external-id", value_name = "external_id")]
-    pub external_id: Option<String>,
-
-    /// MFA token code
-    #[arg(long = "mfa-token", value_name = "mfa_token")]
-    pub mfa_token: Option<String>,
-
-    /// AWS region to use
-    #[arg(long = "region", value_name = "region")]
-    pub region: Option<String>,
-
-    /// Session name for the assumed role
-    #[arg(long = "session-name", value_name = "session_name")]
-    pub session_name: Option<String>,
-
-    /// Role duration in seconds
-    #[arg(long = "role-duration", value_name = "role_duration")]
-    pub role_duration: Option<i32>,
-
-    /// Path to credentials file
-    #[arg(long = "credentials-file", value_name = "credentials_file")]
-    pub credentials_file: Option<String>,
 
     /// Path to config file
     #[arg(long = "config-file", value_name = "config_file")]
     pub config_file: Option<String>,
+
+    /// AWS region to use
+    #[arg(long = "region", value_name = "region")]
+    pub region: Option<String>,
 
     /// Display INFO level logs
     #[arg(long = "info")]
@@ -118,8 +72,6 @@ pub enum Command {
     /// Generate static shell completions
     ///
     /// This generates tab-completion scripts for your shell.
-    /// Unlike --refresh-autocomplete (which lists dynamic profile names),
-    /// this provides static completion of awswit's own flags and subcommands.
     ///
     /// Usage:
     ///   awswit completions bash > /etc/bash_completion.d/awswit
@@ -129,309 +81,43 @@ pub enum Command {
         /// Shell type
         shell: clap_complete::Shell,
     },
-
-    /// Run a command with assumed role credentials
-    ///
-    /// Usage:
-    ///   awswit exec <profile> -- <command> [args...]
-    Exec {
-        /// Profile to assume
-        profile: String,
-
-        /// Force refresh credentials
-        #[arg(short = 'r', long = "refresh")]
-        force_refresh: bool,
-
-        /// AWS region
-        #[arg(long = "region")]
-        region: Option<String>,
-
-        /// Command and arguments to execute
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
 }
 
 impl Args {
-    /// Parse role ARN from shorthand format (account_id:role_name) if needed.
-    /// Uses the region (if set) to determine the correct AWS partition for
-    /// GovCloud (arn:aws-us-gov) and China (arn:aws-cn) regions.
-    pub fn resolve_role_arn(&self) -> Option<String> {
-        self.role_arn.as_ref().map(|arn| {
-            if arn.starts_with("arn:") {
-                arn.clone()
-            } else if arn.contains(':') {
-                // Shorthand format: account_id:role_name
-                let parts: Vec<&str> = arn.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    let partition = partition_for_region(self.region.as_deref());
-                    format!("arn:{}:iam::{}:role/{}", partition, parts[0], parts[1])
-                } else {
-                    arn.clone()
-                }
-            } else {
-                arn.clone()
-            }
-        })
-    }
-
-    /// Get session name with fallback.
-    /// The returned name is sanitized to meet AWS STS constraints (2-64 chars,
-    /// `[a-zA-Z0-9_=,.@-]`).
-    pub fn get_session_name(&self, profile_name: &str) -> String {
-        let raw = self.session_name.clone().unwrap_or_else(|| {
-            if profile_name.len() < 2 {
-                format!("_{}_", profile_name)
-            } else {
-                profile_name.to_string()
-            }
-        });
-        sanitize_session_name(&raw)
-    }
-
     /// Check if interactive mode is disabled
     pub fn interactive_disabled(&self) -> bool {
         self.no_interactive
     }
 }
 
-/// Sanitize a session name to meet AWS STS RoleSessionName constraints:
-/// - 2-64 characters
-/// - Only `[a-zA-Z0-9_=,.@-]` allowed
-///   Invalid characters are replaced with `_`, and the result is truncated to 64 chars.
-///   If the result is shorter than 2 chars, it is padded with `_`.
-pub fn sanitize_session_name(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '=' | ',' | '.' | '@' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect();
-
-    // Ensure minimum length of 2
-    match sanitized.len() {
-        0 => "__".to_string(),
-        1 => format!("{}_", sanitized),
-        _ => sanitized,
-    }
-}
-
-/// Determine the AWS partition from an optional region string.
-/// Returns "aws-us-gov" for GovCloud regions, "aws-cn" for China regions,
-/// and "aws" for everything else (including when no region is specified).
-fn partition_for_region(region: Option<&str>) -> &'static str {
-    match region {
-        Some(r) if r.starts_with("us-gov-") => "aws-us-gov",
-        Some(r) if r.starts_with("cn-") => "aws-cn",
-        _ => "aws",
-    }
-}
-
-/// Validate that a role duration is within AWS STS limits (900-43200 seconds).
-pub fn validate_role_duration(duration: i32) -> Result<(), crate::error::AwswitError> {
-    if !(900..=43200).contains(&duration) {
-        return Err(crate::error::AwswitError::ValidationError {
-            message: format!(
-                "Role duration {} is out of range. Must be between 900 and 43200 seconds (15 minutes to 12 hours).",
-                duration
-            ),
-        });
-    }
-    Ok(())
-}
-
-impl std::fmt::Debug for Args {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Args")
-            .field("command", &self.command)
-            .field("profile_name", &self.profile_name)
-            .field("version", &self.version)
-            .field("force_refresh", &self.force_refresh)
-            .field("show_commands", &self.show_commands)
-            .field("unset", &self.unset)
-            .field("auto_refresh", &self.auto_refresh)
-            .field("kill_refresher", &self.kill_refresher)
-            .field("list_profiles", &self.list_profiles)
-            .field("refresh_autocomplete", &self.refresh_autocomplete)
-            .field("role_arn", &self.role_arn)
-            .field("source_profile", &self.source_profile)
-            .field("external_id", &self.external_id)
-            .field("mfa_token", &self.mfa_token.as_ref().map(|_| "[REDACTED]"))
-            .field("region", &self.region)
-            .field("session_name", &self.session_name)
-            .field("role_duration", &self.role_duration)
-            .field("credentials_file", &self.credentials_file)
-            .field("config_file", &self.config_file)
-            .field("info", &self.info)
-            .field("debug", &self.debug)
-            .field("no_interactive", &self.no_interactive)
-            .field("use_fzf", &self.use_fzf)
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
-    fn test_debug_redacts_mfa_token() {
-        let args = Args {
-            mfa_token: Some("123456".to_string()),
-            ..Default::default()
-        };
-        let debug_output = format!("{:?}", args);
-        assert!(!debug_output.contains("123456"));
-        assert!(debug_output.contains("[REDACTED]"));
+    fn test_parse_defaults() {
+        let args = Args::try_parse_from(["awswit"]).unwrap();
+        assert!(!args.version);
+        assert!(!args.unset);
+        assert!(args.profile_name.is_none());
     }
 
     #[test]
-    fn test_resolve_role_arn_full() {
-        let args = Args {
-            role_arn: Some("arn:aws:iam::123456789012:role/MyRole".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            args.resolve_role_arn(),
-            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
-        );
+    fn test_parse_profile_name() {
+        let args = Args::try_parse_from(["awswit", "prod"]).unwrap();
+        assert_eq!(args.profile_name, Some("prod".to_string()));
     }
 
     #[test]
-    fn test_resolve_role_arn_shorthand() {
-        let args = Args {
-            role_arn: Some("123456789012:MyRole".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            args.resolve_role_arn(),
-            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
-        );
+    fn test_parse_unset() {
+        let args = Args::try_parse_from(["awswit", "--unset"]).unwrap();
+        assert!(args.unset);
     }
 
     #[test]
-    fn test_resolve_role_arn_shorthand_govcloud() {
-        let args = Args {
-            role_arn: Some("123456789012:MyRole".to_string()),
-            region: Some("us-gov-west-1".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            args.resolve_role_arn(),
-            Some("arn:aws-us-gov:iam::123456789012:role/MyRole".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_role_arn_shorthand_china() {
-        let args = Args {
-            role_arn: Some("123456789012:MyRole".to_string()),
-            region: Some("cn-north-1".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            args.resolve_role_arn(),
-            Some("arn:aws-cn:iam::123456789012:role/MyRole".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_role_arn_full_arn_not_affected_by_region() {
-        let args = Args {
-            role_arn: Some("arn:aws:iam::123456789012:role/MyRole".to_string()),
-            region: Some("cn-north-1".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            args.resolve_role_arn(),
-            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
-        );
-    }
-
-    #[test]
-    fn test_partition_for_region() {
-        assert_eq!(super::partition_for_region(None), "aws");
-        assert_eq!(super::partition_for_region(Some("us-east-1")), "aws");
-        assert_eq!(
-            super::partition_for_region(Some("us-gov-west-1")),
-            "aws-us-gov"
-        );
-        assert_eq!(
-            super::partition_for_region(Some("us-gov-east-1")),
-            "aws-us-gov"
-        );
-        assert_eq!(super::partition_for_region(Some("cn-north-1")), "aws-cn");
-        assert_eq!(
-            super::partition_for_region(Some("cn-northwest-1")),
-            "aws-cn"
-        );
-    }
-
-    #[test]
-    fn test_get_session_name_default() {
-        let args = Args::default();
-        assert_eq!(args.get_session_name("my-profile"), "my-profile");
-    }
-
-    #[test]
-    fn test_get_session_name_short_profile() {
-        let args = Args::default();
-        assert_eq!(args.get_session_name("x"), "_x_");
-    }
-
-    #[test]
-    fn test_sanitize_session_name_valid() {
-        assert_eq!(super::sanitize_session_name("my-session"), "my-session");
-        assert_eq!(super::sanitize_session_name("test_123"), "test_123");
-    }
-
-    #[test]
-    fn test_sanitize_session_name_invalid_chars() {
-        assert_eq!(super::sanitize_session_name("hello world"), "hello_world");
-        assert_eq!(super::sanitize_session_name("a/b:c"), "a_b_c");
-    }
-
-    #[test]
-    fn test_sanitize_session_name_short() {
-        assert_eq!(super::sanitize_session_name(""), "__");
-        assert_eq!(super::sanitize_session_name("x"), "x_");
-    }
-
-    #[test]
-    fn test_sanitize_session_name_long() {
-        let long = "a".repeat(100);
-        let result = super::sanitize_session_name(&long);
-        assert_eq!(result.len(), 64);
-    }
-
-    #[test]
-    fn test_validate_role_duration_valid() {
-        assert!(super::validate_role_duration(900).is_ok());
-        assert!(super::validate_role_duration(3600).is_ok());
-        assert!(super::validate_role_duration(43200).is_ok());
-    }
-
-    #[test]
-    fn test_validate_role_duration_invalid() {
-        assert!(super::validate_role_duration(899).is_err());
-        assert!(super::validate_role_duration(43201).is_err());
-        assert!(super::validate_role_duration(0).is_err());
-        assert!(super::validate_role_duration(-1).is_err());
-    }
-
-    #[test]
-    fn test_kill_refresher_flag_both_forms() {
-        use clap::Parser;
-        let args = Args::try_parse_from(["awswit", "--kill-refresher"]).unwrap();
-        assert!(args.kill_refresher);
-        let args = Args::try_parse_from(["awswit", "--kill"]).unwrap();
-        assert!(args.kill_refresher);
-        let args = Args::try_parse_from(["awswit", "-k"]).unwrap();
-        assert!(args.kill_refresher);
+    fn test_parse_fzf() {
+        let args = Args::try_parse_from(["awswit", "--fzf"]).unwrap();
+        assert!(args.use_fzf);
     }
 }

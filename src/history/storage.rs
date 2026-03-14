@@ -53,7 +53,7 @@ impl ProfileHistory {
     fn history_path() -> Result<PathBuf, AwswitError> {
         crate::utils::paths::awswit_home_dir()
             .map(|p| p.join("history.json"))
-            .map_err(|e| AwswitError::CacheError {
+            .map_err(|e| AwswitError::ConfigFileError {
                 message: e.to_string(),
             })
     }
@@ -67,7 +67,7 @@ impl ProfileHistory {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => {
-                return Err(AwswitError::CacheError {
+                return Err(AwswitError::ConfigFileError {
                     message: format!("Failed to read history: {}", e),
                 });
             }
@@ -101,7 +101,7 @@ impl ProfileHistory {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        crate::utils::fs::atomic_write_restricted(&path, content.as_bytes())?;
+        fs::write(&path, content.as_bytes())?;
 
         Ok(())
     }

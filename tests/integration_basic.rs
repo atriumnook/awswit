@@ -111,35 +111,29 @@ fn missing_profile_returns_error() {
     assert!(stderr.contains("[E001] Profile not found: missing-profile"));
 }
 
-#[cfg(unix)]
 #[test]
-fn exec_propagates_child_exit_code() {
+fn profile_selection_outputs_aws_profile() {
     let home = setup_aws_home();
     let output = awswit_command(&home)
-        .args(["exec", "default", "--", "sh", "-c", "exit 42"])
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(42));
-}
-
-#[cfg(unix)]
-#[test]
-fn exec_injects_env_without_leaking_parent_values() {
-    let home = setup_aws_home();
-    let output = awswit_command(&home)
-        .env("AWS_SESSION_TOKEN", "LEAKED_TOKEN")
-        .env("AWS_REGION", "leaked-region")
-        .args(["exec", "default", "--", "env"])
+        .args(["--no-interactive", "default"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("AWS_ACCESS_KEY_ID=AKIATEST"));
-    assert!(stdout.contains("AWS_SECRET_ACCESS_KEY=secret"));
-    assert!(stdout.contains("AWS_REGION=us-west-2"));
-    assert!(stdout.contains("AWS_DEFAULT_REGION=us-west-2"));
+    assert!(stdout.contains("AWS_PROFILE=default"));
     assert!(stdout.contains("AWSWIT_PROFILE=default"));
-    assert!(!stdout.contains("AWS_SESSION_TOKEN=LEAKED_TOKEN"));
+    assert!(stdout.contains("AWS_REGION=us-west-2"));
+}
+
+#[test]
+fn unset_outputs_unset_marker() {
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .arg("--unset")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWSWIT_UNSET=1"));
 }

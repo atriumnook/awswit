@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::cache::CacheManager;
 use crate::cli::Args;
 use crate::config::{AwsFiles, AwswitConfig};
 use crate::error::AwswitError;
@@ -13,26 +12,23 @@ pub struct AppContext {
     pub config: AwswitConfig,
     pub profiles: HashMap<String, Profile>,
     pub history: ProfileHistory,
-    pub cache: CacheManager,
 }
 
 impl AppContext {
-    /// Load config, AWS files, profiles, history, and cache from the standard locations.
+    /// Load config, AWS files, profiles, and history from the standard locations.
     pub fn build(args: Args) -> Result<Self, AwswitError> {
         let config = AwswitConfig::load()?;
         tracing::debug!("Loaded awswit config: {:?}", config);
-
-        let credentials_file = args
-            .credentials_file
-            .clone()
-            .or_else(|| std::env::var("AWS_SHARED_CREDENTIALS_FILE").ok())
-            .unwrap_or_else(|| default_aws_path("credentials"));
 
         let config_file = args
             .config_file
             .clone()
             .or_else(|| std::env::var("AWS_CONFIG_FILE").ok())
             .unwrap_or_else(|| default_aws_path("config"));
+
+        let credentials_file = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+            .ok()
+            .unwrap_or_else(|| default_aws_path("credentials"));
 
         let aws_files = AwsFiles::load(&config_file, &credentials_file)?;
         let profiles = aws_files.merge_profiles();
@@ -47,14 +43,11 @@ impl AppContext {
             ProfileHistory::default()
         });
 
-        let cache = CacheManager::new()?;
-
         Ok(Self {
             args,
             config,
             profiles,
             history,
-            cache,
         })
     }
 }

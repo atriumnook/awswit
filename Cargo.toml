@@ -2,13 +2,13 @@
 name = "awswit"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.94"
 authors = ["awswit contributors"]
 description = "A fast, modern AWS profile switcher with interactive TUI"
 license = "MIT"
 repository = "https://github.com/awswit/awswit"
-keywords = ["aws", "iam", "assume-role", "credentials", "cli"]
-categories = ["command-line-utilities", "authentication"]
+keywords = ["aws", "profile", "switcher", "tui", "cli"]
+categories = ["command-line-utilities"]
 
 [lib]
 name = "awswit"
@@ -18,26 +18,10 @@ path = "src/lib.rs"
 name = "awswit"
 path = "src/main.rs"
 
-[[bin]]
-name = "autoawswit"
-path = "src/bin/autoawswit.rs"
-
-[[bin]]
-name = "awswit-autocomplete"
-path = "src/bin/autocomplete.rs"
-
 [dependencies]
-# AWS SDK
-aws-config = { version = "^1.1.1", features = ["behavior-version-latest"] }
-aws-sdk-sts = "^1.9.0"
-aws-credential-types = "^1.1.1"
-aws-types = "^1.1.1"
-
-# Async runtime
-tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "time", "process", "signal"] }
-
 # CLI
 clap = { version = "4.4", features = ["derive", "env", "string"] }
+clap_complete = "4.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -53,12 +37,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Error handling
 thiserror = "1.0"
 
-# Async trait support
-async-trait = "0.1"
-
-# File locking
-fd-lock = "4.0"
-
 # Directory paths
 dirs = "5.0"
 
@@ -66,36 +44,19 @@ dirs = "5.0"
 strsim = "0.10"
 nucleo-matcher = "0.3"
 
-# Interactive prompts
-dialoguer = "0.11"
-
 # Modern TUI
 ratatui = { version = "0.25", features = ["crossterm"] }
 crossterm = "0.27"
-
-# Time formatting
-humantime = "2.1"
-
-# Terminal detection (using std::io::IsTerminal, stable since Rust 1.70)
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-
-# Shell detection
+# Shell path expansion
 shellexpand = "3.1"
-
-# Shell completion generation
-clap_complete = "4.5"
-
-# Unix-specific
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.9"
-tokio-test = "0.4"
 strsim = "0.10"
 
 [profile.release]

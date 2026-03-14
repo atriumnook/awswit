@@ -1,11 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::AwswitError;
-
-/// Valid credential sources
-pub const VALID_CREDENTIAL_SOURCES: &[&str] =
-    &["Environment", "Ec2InstanceMetadata", "EcsContainer"];
-
 /// Represents an AWS profile from config/credentials files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
@@ -32,11 +26,6 @@ pub struct Profile {
 
     // Web identity
     pub web_identity_token_file: Option<String>,
-
-    // awswit-specific
-    pub manager: Option<String>,
-    pub awswit_cache_name: Option<String>,
-    pub autoawswit: Option<bool>,
 }
 
 impl Profile {
@@ -45,77 +34,9 @@ impl Profile {
         self.role_arn.is_some()
     }
 
-    /// Check if this profile requires MFA
-    pub fn requires_mfa(&self) -> bool {
-        self.mfa_serial.is_some()
-    }
-
-    /// Check if this profile uses credential_process
-    pub fn uses_credential_process(&self) -> bool {
-        self.credential_process.is_some()
-    }
-
     /// Check if this profile uses SSO
     pub fn is_sso_profile(&self) -> bool {
         self.sso_start_url.is_some() && self.sso_account_id.is_some()
-    }
-
-    /// Check if credential_source is valid
-    pub fn has_valid_credential_source(&self) -> bool {
-        self.credential_source
-            .as_ref()
-            .map(|cs| VALID_CREDENTIAL_SOURCES.contains(&cs.as_str()))
-            .unwrap_or(false)
-    }
-
-    /// Validate the profile configuration
-    pub fn validate(&self) -> Result<(), AwswitError> {
-        // Role profiles must have source_profile OR credential_source OR credential_process
-        if self.is_role_profile() {
-            let has_source = self.source_profile.is_some();
-            let has_cred_source = self.credential_source.is_some();
-            let has_cred_process = self.credential_process.is_some();
-
-            if !has_source && !has_cred_source && !has_cred_process {
-                return Err(AwswitError::InvalidProfile {
-                    profile_name: self.name.clone(),
-                    message: "role profiles must contain one of credential_source, source_profile, or credential_process".to_string(),
-                });
-            }
-
-            // source_profile and credential_source are mutually exclusive
-            if has_source && has_cred_source {
-                return Err(AwswitError::InvalidProfile {
-                    profile_name: self.name.clone(),
-                    message: "credential_source and source_profile are mutually exclusive"
-                        .to_string(),
-                });
-            }
-
-            // Validate credential_source value
-            if has_cred_source && !self.has_valid_credential_source() {
-                let cs = self.credential_source.as_deref().unwrap_or_default();
-                return Err(AwswitError::InvalidCredentialSource {
-                    name: cs.to_string(),
-                });
-            }
-        }
-
-        // User profiles need access keys (unless using credential_process)
-        if !self.is_role_profile()
-            && !self.uses_credential_process()
-            && (self.aws_access_key_id.is_none() || self.aws_secret_access_key.is_none())
-        {
-            // Allow if using credential_source
-            if !self.has_valid_credential_source() {
-                return Err(AwswitError::InvalidProfile {
-                    profile_name: self.name.clone(),
-                    message: "missing aws_access_key_id or aws_secret_access_key".to_string(),
-                });
-            }
-        }
-
-        Ok(())
     }
 
     /// Merge credentials from another profile
@@ -136,7 +57,6 @@ impl Profile {
         self.role_arn
             .as_ref()
             .and_then(|arn| {
-                // arn:aws:iam::123456789012:role/RoleName
                 let parts: Vec<&str> = arn.split(':').collect();
                 if parts.len() >= 5 {
                     Some(parts[4].to_string())
@@ -145,7 +65,6 @@ impl Profile {
                 }
             })
             .or_else(|| {
-                // Try from mfa_serial
                 self.mfa_serial.as_ref().and_then(|serial| {
                     let parts: Vec<&str> = serial.split(':').collect();
                     if parts.len() >= 5 {
@@ -172,15 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_mfa() {
-        let mut profile = Profile::default();
-        assert!(!profile.requires_mfa());
-
-        profile.mfa_serial = Some("arn:aws:iam::123456789012:mfa/user".to_string());
-        assert!(profile.requires_mfa());
-    }
-
-    #[test]
     fn test_get_account_id() {
         let profile = Profile {
             role_arn: Some("arn:aws:iam::123456789012:role/TestRole".to_string()),
@@ -190,107 +100,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_role_profile() {
-        let mut profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            ..Default::default()
-        };
-
-        // Should fail without source
-        assert!(profile.validate().is_err());
-
-        // Should pass with source_profile
-        profile.source_profile = Some("default".to_string());
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_credential_source_environment() {
-        let profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            credential_source: Some("Environment".to_string()),
-            ..Default::default()
-        };
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_credential_source_ec2() {
-        let profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            credential_source: Some("Ec2InstanceMetadata".to_string()),
-            ..Default::default()
-        };
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_credential_source_ecs() {
-        let profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            credential_source: Some("EcsContainer".to_string()),
-            ..Default::default()
-        };
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_source_and_credential_source_conflict() {
-        let profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            source_profile: Some("default".to_string()),
-            credential_source: Some("Environment".to_string()),
-            ..Default::default()
-        };
-        let err = profile.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            AwswitError::InvalidProfile {
-                message,
-                ..
-            } if message.contains("mutually exclusive")
-        ));
-    }
-
-    #[test]
-    fn test_validate_credential_process_role() {
-        let profile = Profile {
-            role_arn: Some("arn:aws:iam::123456789012:role/Test".to_string()),
-            credential_process: Some("my-cred-process".to_string()),
-            ..Default::default()
-        };
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_user_profile_missing_keys() {
-        let profile = Profile::default();
-        let err = profile.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            AwswitError::InvalidProfile {
-                message,
-                ..
-            } if message.contains("missing aws_access_key_id")
-        ));
-    }
-
-    #[test]
-    fn test_validate_user_with_credential_process() {
-        let profile = Profile {
-            credential_process: Some("my-cred-process".to_string()),
-            ..Default::default()
-        };
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
     fn test_is_sso_profile() {
         let mut profile = Profile::default();
         assert!(!profile.is_sso_profile());
 
         profile.sso_start_url = Some("https://example.awsapps.com/start".to_string());
-        assert!(!profile.is_sso_profile()); // Needs account_id too
+        assert!(!profile.is_sso_profile());
 
         profile.sso_account_id = Some("123456789012".to_string());
         assert!(profile.is_sso_profile());

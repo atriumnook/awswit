@@ -6,5 +6,5 @@ mod theme;
 
 pub use picker::ProfilePicker;
 pub use preview::ProfilePreview;
-pub use spinner::{AwswitSpinner, StatusLine};
+pub use spinner::StatusLine;
 pub use theme::Theme;
