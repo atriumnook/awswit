@@ -103,6 +103,12 @@ impl ProfileHistory {
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, content.as_bytes())?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+
         Ok(())
     }
 
@@ -112,7 +118,7 @@ impl ProfileHistory {
 
         if let Some(entry) = self.entries.get_mut(profile_name) {
             entry.last_used = now;
-            entry.use_count += 1;
+            entry.use_count = entry.use_count.saturating_add(1);
         } else {
             let entry = HistoryEntry {
                 name: profile_name.to_string(),
