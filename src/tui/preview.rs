@@ -160,7 +160,6 @@ impl<'a> ProfilePreview<'a> {
         let paragraph = Paragraph::new(vec![line]);
         frame.render_widget(paragraph, area);
     }
-
 }
 
 /// Compact preview line for list view
