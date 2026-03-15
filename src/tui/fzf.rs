@@ -27,13 +27,11 @@ const BLOCKED_FZF_OPTIONS: &[&str] = &[
 /// Check if a token is a blocked fzf option (handles both `--opt` and `--opt=value` forms).
 fn is_blocked_fzf_option(token: &str) -> bool {
     let normalized = token.to_ascii_lowercase();
-    BLOCKED_FZF_OPTIONS
-        .iter()
-        .any(|blocked| {
-            normalized == *blocked
-                || (normalized.starts_with(blocked)
-                    && normalized.as_bytes().get(blocked.len()) == Some(&b'='))
-        })
+    BLOCKED_FZF_OPTIONS.iter().any(|blocked| {
+        normalized == *blocked
+            || (normalized.starts_with(blocked)
+                && normalized.as_bytes().get(blocked.len()) == Some(&b'='))
+    })
 }
 
 fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
