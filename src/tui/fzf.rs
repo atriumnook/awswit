@@ -29,7 +29,11 @@ fn is_blocked_fzf_option(token: &str) -> bool {
     let normalized = token.to_ascii_lowercase();
     BLOCKED_FZF_OPTIONS
         .iter()
-        .any(|blocked| normalized == *blocked || normalized.starts_with(&format!("{}=", blocked)))
+        .any(|blocked| {
+            normalized == *blocked
+                || (normalized.starts_with(blocked)
+                    && normalized.as_bytes().get(blocked.len()) == Some(&b'='))
+        })
 }
 
 fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
@@ -216,5 +220,22 @@ mod tests {
         assert!(!is_blocked_fzf_option("--ansi"));
         assert!(!is_blocked_fzf_option("--height"));
         assert!(!is_blocked_fzf_option("--cycle"));
+    }
+
+    #[test]
+    fn build_fzf_args_empty_extra_opts() {
+        let args = build_fzf_args(Some(""));
+        // Empty string produces no extra args — same result as None
+        assert_eq!(args, build_fzf_args(None));
+    }
+
+    #[test]
+    fn is_blocked_fzf_option_mixed_case() {
+        assert!(is_blocked_fzf_option("--Preview"));
+        assert!(is_blocked_fzf_option("--BIND"));
+        assert!(is_blocked_fzf_option("--Execute-Silent"));
+        assert!(is_blocked_fzf_option("--RELOAD=cmd"));
+        assert!(is_blocked_fzf_option("--Transform"));
+        assert!(is_blocked_fzf_option("--PREVIEW-WINDOW"));
     }
 }
