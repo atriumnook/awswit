@@ -44,5 +44,5 @@ awswit() {
 
 # Register zsh completion for the awswit function
 if type compdef &>/dev/null; then
-    compdef _awswit_rs awswit
+    compdef _awswit awswit
 fi

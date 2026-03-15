@@ -14,7 +14,7 @@ function awswit {
         return
     }
 
-    foreach ($line in $output -split "`n") {
+    foreach ($line in $output) {
         if ($line -match '^([^=]+)=(.*)$') {
             $key = $Matches[1]
             $value = $Matches[2]

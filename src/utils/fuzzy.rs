@@ -93,8 +93,6 @@ fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
     }
 
     // Require LCS length to be at least LCS_MIN_RATIO_PERCENT% of input length.
-    // Using manual div-ceil for MSRV 1.75 compatibility — usize::div_ceil is
-    // not stable until Rust 1.73+ and may not be available on all target toolchains.
     #[allow(clippy::manual_div_ceil)]
     let min_lcs = (input.chars().count() * LCS_MIN_RATIO_PERCENT + 99) / 100;
     best_match

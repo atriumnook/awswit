@@ -76,7 +76,7 @@ impl Default for Icons {
             lock: "󰌾 ",  // Lock
             key: "󰌆 ",   // Key
             chain: "󰌷 ", // Chain link
-            search: " ", // Magnifying glass
+            search: " ", // Nerd Font search icon (nf-cod-search)
             spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
         }
     }

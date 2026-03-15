@@ -45,15 +45,21 @@ fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
     ];
 
     if let Some(opts) = extra_opts {
-        for token in opts.split_whitespace() {
-            if is_blocked_fzf_option(token) {
+        let tokens = shell_words::split(opts).unwrap_or_default();
+        let mut iter = tokens.into_iter();
+        while let Some(token) = iter.next() {
+            if is_blocked_fzf_option(&token) {
                 tracing::warn!(
                     "Ignoring blocked fzf option from AWSWIT_FZF_OPTS: {}",
                     token
                 );
+                // For non-`=` form, also skip the following argument value
+                if !token.contains('=') {
+                    let _ = iter.next();
+                }
                 continue;
             }
-            args.push(token.to_string());
+            args.push(token);
         }
     }
 
@@ -188,7 +194,7 @@ mod tests {
 
     #[test]
     fn build_fzf_args_blocks_dangerous_options() {
-        // --preview, --bind, --execute etc. should be stripped
+        // --preview, --bind, --execute etc. should be stripped along with their values
         let args = build_fzf_args(Some(
             "--ansi --preview 'cat {}' --bind 'enter:execute(rm -rf /)' --cycle",
         ));
@@ -196,6 +202,9 @@ mod tests {
         assert!(args.contains(&"--cycle".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("--preview")));
         assert!(!args.iter().any(|a| a.starts_with("--bind")));
+        // Quoted argument values must not leak as stray tokens
+        assert!(!args.iter().any(|a| a.contains("cat")));
+        assert!(!args.iter().any(|a| a.contains("execute")));
     }
 
     #[test]
