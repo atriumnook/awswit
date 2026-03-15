@@ -33,11 +33,9 @@ pub enum PickerResult {
 #[derive(Clone)]
 struct ProfileEntry {
     name: String,
-    name_lower: String, // Pre-computed lowercase for fuzzy matching
     profile: Profile,
     is_favorite: bool,
     last_used: Option<chrono::DateTime<chrono::Utc>>,
-    score: Option<u32>,
 }
 
 /// Interactive profile picker with fuzzy search
@@ -111,18 +109,15 @@ struct PickerApp {
 
 impl PickerApp {
     fn new(profiles: &HashMap<String, Profile>, history: ProfileHistory, theme: Theme) -> Self {
-        // Create entries with history data, pre-compute lowercase names
         let mut entries: Vec<ProfileEntry> = profiles
             .iter()
             .map(|(name, profile)| {
                 let history_entry = history.get(name);
                 ProfileEntry {
                     name: name.clone(),
-                    name_lower: name.to_lowercase(),
                     profile: profile.clone(),
                     is_favorite: history.is_favorite(name),
                     last_used: history_entry.map(|h| h.last_used),
-                    score: None,
                 }
             })
             .collect();
@@ -427,9 +422,6 @@ impl PickerApp {
     fn update_filter(&mut self) {
         if self.query.is_empty() {
             self.filtered = (0..self.entries.len()).collect();
-            for entry in &mut self.entries {
-                entry.score = None;
-            }
         } else {
             let mut matcher = Matcher::new(Config::DEFAULT);
             let pattern = Pattern::new(
@@ -439,47 +431,20 @@ impl PickerApp {
                 AtomKind::Fuzzy,
             );
 
-            let mut scored: Vec<(usize, u32)> = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, entry)| {
-                    let mut buf = Vec::new();
-                    let haystack = nucleo_matcher::Utf32Str::new(&entry.name_lower, &mut buf);
-                    pattern.score(haystack, &mut matcher).map(|s| (idx, s))
-                })
-                .collect();
+            let mut buf = Vec::new();
+            let mut scored: Vec<(usize, u32)> = Vec::new();
+            for (idx, entry) in self.entries.iter().enumerate() {
+                buf.clear();
+                let haystack = nucleo_matcher::Utf32Str::new(&entry.name, &mut buf);
+                if let Some(s) = pattern.score(haystack, &mut matcher) {
+                    scored.push((idx, s));
+                }
+            }
 
             // Sort: fuzzy score desc, then favorite, then history, then name asc
-            scored.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then_with(|| {
-                        let ea = &self.entries[a.0];
-                        let eb = &self.entries[b.0];
-                        eb.is_favorite.cmp(&ea.is_favorite)
-                    })
-                    .then_with(|| {
-                        let ea = &self.entries[a.0];
-                        let eb = &self.entries[b.0];
-                        match (&ea.last_used, &eb.last_used) {
-                            (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => std::cmp::Ordering::Equal,
-                        }
-                    })
-                    .then_with(|| self.entries[a.0].name.cmp(&self.entries[b.0].name))
-            });
+            scored.sort_by(|a, b| Self::compare_scored_entries(&self.entries, a, b));
 
             self.filtered = scored.iter().map(|(idx, _)| *idx).collect();
-
-            // Update scores in entries
-            for entry in &mut self.entries {
-                entry.score = None;
-            }
-            for &(idx, score) in &scored {
-                self.entries[idx].score = Some(score);
-            }
         }
 
         // Reset selection to first item
@@ -488,6 +453,24 @@ impl PickerApp {
         } else {
             self.list_state.select(None);
         }
+    }
+
+    fn compare_scored_entries(
+        entries: &[ProfileEntry],
+        a: &(usize, u32),
+        b: &(usize, u32),
+    ) -> std::cmp::Ordering {
+        let ea = &entries[a.0];
+        let eb = &entries[b.0];
+        b.1.cmp(&a.1)
+            .then_with(|| eb.is_favorite.cmp(&ea.is_favorite))
+            .then_with(|| match (&ea.last_used, &eb.last_used) {
+                (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| ea.name.cmp(&eb.name))
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -535,10 +518,143 @@ impl PickerApp {
 
             // Update history
             self.history.set_favorite(&entry.name, entry.is_favorite);
-            if let Err(e) = self.history.save() {
+            if let Err(e) = crate::history::save_history(&self.history) {
                 tracing::warn!("Failed to save history: {}", e);
                 eprintln!("Warning: Failed to save history: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::ProfileHistory;
+    use crate::profile::Profile;
+
+    fn test_profiles() -> HashMap<String, Profile> {
+        let mut profiles = HashMap::new();
+        profiles.insert("alpha".to_string(), Profile::default());
+        profiles.insert("beta".to_string(), Profile::default());
+        profiles.insert("gamma".to_string(), Profile::default());
+        profiles
+    }
+
+    fn make_app(profiles: &HashMap<String, Profile>) -> PickerApp {
+        PickerApp::new(profiles, ProfileHistory::default(), Theme::default())
+    }
+
+    #[test]
+    fn move_selection_down_and_up() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        assert_eq!(app.list_state.selected(), Some(0));
+
+        app.move_selection(1);
+        assert_eq!(app.list_state.selected(), Some(1));
+
+        app.move_selection(-1);
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn move_selection_clamps_at_boundaries() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+
+        // Already at 0, moving up should stay at 0
+        app.move_selection(-1);
+        assert_eq!(app.list_state.selected(), Some(0));
+
+        // Move past the end
+        app.move_selection(100);
+        assert_eq!(app.list_state.selected(), Some(app.filtered.len() - 1));
+    }
+
+    #[test]
+    fn move_selection_empty_list() {
+        let profiles = HashMap::new();
+        let mut app = make_app(&profiles);
+        // Should not panic
+        app.move_selection(1);
+        app.move_selection(-1);
+        assert!(app.list_state.selected().is_none());
+    }
+
+    #[test]
+    fn update_filter_narrows_results() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        assert_eq!(app.filtered.len(), 3);
+
+        app.query = "alp".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered.len(), 1);
+        let selected = app.get_selected_profile().unwrap();
+        assert_eq!(selected.name, "alpha");
+    }
+
+    #[test]
+    fn update_filter_empty_query_restores_all() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+
+        app.query = "alp".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered.len(), 1);
+
+        app.query.clear();
+        app.update_filter();
+        assert_eq!(app.filtered.len(), 3);
+    }
+
+    #[test]
+    fn toggle_favorite_via_history() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+
+        let name = app.get_selected_profile().unwrap().name.clone();
+        assert!(!app.history.is_favorite(&name));
+
+        let entry_idx = app.filtered[0];
+        app.entries[entry_idx].is_favorite = true;
+        app.history.set_favorite(&app.entries[entry_idx].name, true);
+        assert!(app.history.is_favorite(&name));
+
+        app.entries[entry_idx].is_favorite = false;
+        app.history
+            .set_favorite(&app.entries[entry_idx].name, false);
+        assert!(!app.history.is_favorite(&name));
+    }
+
+    #[test]
+    fn move_to_start_and_end() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+
+        app.move_to_end();
+        assert_eq!(app.list_state.selected(), Some(app.filtered.len() - 1));
+
+        app.move_to_start();
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn get_selected_profile_none_when_empty() {
+        let profiles = HashMap::new();
+        let app = make_app(&profiles);
+        assert!(app.get_selected_profile().is_none());
+    }
+
+    #[test]
+    fn compare_scored_entries_by_score() {
+        let profiles = test_profiles();
+        let app = make_app(&profiles);
+        let a = (0, 100u32);
+        let b = (1, 50u32);
+        assert_eq!(
+            PickerApp::compare_scored_entries(&app.entries, &a, &b),
+            std::cmp::Ordering::Less
+        );
     }
 }
