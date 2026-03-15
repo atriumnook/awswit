@@ -3,6 +3,9 @@ use strsim::levenshtein;
 
 use crate::profile::Profile;
 
+const LEVENSHTEIN_MAX_DISTANCE: usize = 3;
+const LCS_MIN_RATIO_PERCENT: usize = 50;
+
 /// Find the closest matching profile name using fuzzy matching
 ///
 /// Uses three methods in order:
@@ -89,11 +92,11 @@ fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
         return None;
     }
 
-    // Require LCS length to be at least 50% of input length.
+    // Require LCS length to be at least LCS_MIN_RATIO_PERCENT% of input length.
     // Using manual div-ceil for MSRV 1.75 compatibility — usize::div_ceil is
     // not stable until Rust 1.73+ and may not be available on all target toolchains.
     #[allow(clippy::manual_div_ceil)]
-    let min_lcs = (input.len() + 1) / 2;
+    let min_lcs = (input.chars().count() * LCS_MIN_RATIO_PERCENT + 99) / 100;
     best_match
         .filter(|(_, lcs_len)| *lcs_len >= min_lcs)
         .map(|(p, _)| p.to_string())
@@ -158,7 +161,7 @@ fn levenshtein_match(input: &str, profiles: &[&str]) -> Option<String> {
     }
 
     best_match
-        .filter(|(_, dist)| *dist <= 3)
+        .filter(|(_, dist)| *dist <= LEVENSHTEIN_MAX_DISTANCE)
         .map(|(p, _)| p.to_string())
 }
 
