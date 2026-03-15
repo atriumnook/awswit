@@ -6,6 +6,6 @@ Initial release.
 
 - Interactive TUI for AWS profile switching with fuzzy search and frecency sorting
 - Non-interactive mode for scripting
-- Shell completion support (bash, zsh, fish, elvish, powershell)
+- Shell completion support (bash, zsh, fish, powershell)
 - Region override via flag, profile config, or awswit config
 - fzf integration
