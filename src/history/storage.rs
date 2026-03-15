@@ -124,7 +124,13 @@ impl ProfileHistory {
 
         #[cfg(not(unix))]
         {
-            fs::write(&tmp_path, content.as_bytes())?;
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
         }
 
         if let Err(e) = fs::rename(&tmp_path, &path) {

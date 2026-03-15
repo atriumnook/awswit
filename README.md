@@ -2,7 +2,7 @@
 
 awswit is an interactive AWS profile switcher with fuzzy search and frecency sorting.
 
-[![CI](https://github.com/atnook/awswit/workflows/CI/badge.svg)](https://github.com/atnook/awswit/actions)
+[![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
 [![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -109,7 +109,7 @@ awswit completions <shell> Generate tab-completion script
 | `-v, --version` | Print version |
 | `-s, --show-commands` | Print export commands instead of setting them |
 | `-u, --unset` | Unset all AWS environment variables |
-| `-l, --list-profiles` | List profiles (`-l more` for details) |
+| `-l, --list-profiles` | List profiles |
 | `-n, --no-interactive` | Skip TUI, resolve profile by name or `$AWS_PROFILE` |
 | `--fzf` | Use external fzf |
 | `--region <region>` | Override region |

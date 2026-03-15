@@ -136,8 +136,13 @@ fn run(args: Args) -> Result<i32, AwswitError> {
         .get(&target_profile_name)
         .and_then(|p| p.region.as_deref());
 
-    // Use --region flag if provided, otherwise use the profile's region
-    let region = ctx.args.region.as_deref().or(profile_region);
+    // Use --region flag if provided, then profile's region, then config region
+    let region = ctx
+        .args
+        .region
+        .as_deref()
+        .or(profile_region)
+        .or(ctx.config.region.as_deref());
 
     // Emit profile selection
     emit_profile(&target_profile_name, region, &ctx.args)?;

@@ -2,7 +2,7 @@
 
 AWS プロファイルをインタラクティブに切り替えるツール。あいまい検索と frecency で、使いたいプロファイルにすぐたどり着ける。
 
-[![CI](https://github.com/atnook/awswit/workflows/CI/badge.svg)](https://github.com/atnook/awswit/actions)
+[![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
 [![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -109,7 +109,7 @@ awswit completions <shell> タブ補完スクリプトを生成
 | `-v, --version` | バージョン表示 |
 | `-s, --show-commands` | export コマンドを表示（実行はしない） |
 | `-u, --unset` | AWS 環境変数をすべて解除 |
-| `-l, --list-profiles` | プロファイル一覧（`-l more` で詳細表示） |
+| `-l, --list-profiles` | プロファイル一覧 |
 | `-n, --no-interactive` | TUI を使わず、名前または `$AWS_PROFILE` から解決 |
 | `--fzf` | 外部 fzf を使用 |
 | `--region <region>` | リージョンを上書き |
