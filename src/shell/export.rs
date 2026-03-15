@@ -380,4 +380,34 @@ mod tests {
         let output = exporter.format_set("TEST", "it's a test");
         assert!(output.contains("'\\''"));
     }
+
+    #[test]
+    fn test_command_substitution_characters_are_quoted() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        // $() and backticks should be safely quoted inside single quotes
+        let output = exporter
+            .generate_export_commands("$(whoami)", Some("us-east-1"))
+            .unwrap();
+        assert!(output.contains("'$(whoami)'"));
+
+        let output = exporter.generate_export_commands("`whoami`", None).unwrap();
+        assert!(output.contains("'`whoami`'"));
+    }
+
+    #[test]
+    fn test_unicode_profile_name() {
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter
+            .generate_export_commands("プロファイル", Some("ap-northeast-1"))
+            .unwrap();
+        assert!(output.contains("'プロファイル'"));
+    }
+
+    #[test]
+    fn test_long_profile_name() {
+        let long_name: String = "a".repeat(256);
+        let exporter = ShellExporter::for_shell(ShellType::Bash);
+        let output = exporter.generate_export_commands(&long_name, None).unwrap();
+        assert!(output.contains(&long_name));
+    }
 }
