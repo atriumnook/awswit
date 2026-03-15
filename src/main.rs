@@ -85,7 +85,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
     let mut ctx = AppContext::build(args)?;
 
     // Handle list profiles
-    if ctx.args.list_profiles.is_some() {
+    if ctx.args.list_profiles {
         handle_list_profiles(&ctx.profiles, &ctx.config)?;
         return Ok(0);
     }

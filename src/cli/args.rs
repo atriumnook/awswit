@@ -27,8 +27,8 @@ pub struct Args {
     pub unset: bool,
 
     /// List available profiles
-    #[arg(short = 'l', long = "list-profiles", value_name = "detail_level", num_args = 0..=1, default_missing_value = "")]
-    pub list_profiles: Option<String>,
+    #[arg(short = 'l', long = "list-profiles")]
+    pub list_profiles: bool,
 
     /// Path to config file
     #[arg(long = "config-file", value_name = "config_file")]
