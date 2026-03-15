@@ -1,6 +1,6 @@
 # awswit
 
-Fast AWS profile switcher. Fuzzy search, frecency sorting, favorites.
+awswit is an interactive AWS profile switcher with fuzzy search and frecency sorting.
 
 [![CI](https://github.com/atnook/awswit/workflows/CI/badge.svg)](https://github.com/atnook/awswit/actions)
 [![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
@@ -50,23 +50,26 @@ awswit init powershell | Invoke-Expression
 
 </details>
 
-### Run
+### Usage
 
 ```bash
-awswit
+awswit                  # interactive picker
+awswit prod             # switch directly
+awswit -l               # list profiles
+awswit -u               # unset
 ```
 
-Pick a profile, hit Enter. `AWS_PROFILE` is set in your current shell. That's it.
+Pick a profile, hit Enter. `AWS_PROFILE` is set in your current shell.
 
 ## Features
 
-- **Fuzzy search** — type a few characters, profiles filter instantly
-- **Frecency sorting** — profiles you use often just float to the top
-- **Favorites** — `*` to pin a profile. It stays at the top
-- **Preview panel** — `Ctrl+P` to check type, region, account ID, role ARN
-- **fzf integration** — `--fzf` or `AWSWIT_USE_FZF=1` if you prefer fzf
-- **No credentials** — just sets `AWS_PROFILE`. Auth is the SDK's job
-- **Single binary** — Rust, no runtime deps
+- **Fuzzy search** — type to filter, matches appear instantly
+- **Frecency sorting** — frequently and recently used profiles are ranked higher
+- **Favorites** — pin profiles to the top with `*`
+- **Preview panel** — press `Ctrl+P` to see region, account ID, role ARN, and more
+- **fzf integration** — pass `--fzf` or set `AWSWIT_USE_FZF=1`
+- **No credential handling** — awswit sets `AWS_PROFILE` and leaves authentication to the AWS SDK, SSO, or aws-vault
+- **Single binary** — written in Rust with no runtime dependencies
 
 ## How It Works
 
@@ -80,7 +83,7 @@ AWS_DEFAULT_REGION=ap-northeast-1
 AWSWIT_PROFILE=prod
 ```
 
-Credential resolution is the SDK's job — IAM keys, SSO, role assumption, `credential_process`, whatever. awswit doesn't touch credentials.
+The AWS SDK resolves credentials based on the profile configuration — IAM keys, SSO, role assumption, `credential_process`, or anything else. awswit does not touch credentials.
 
 ## Keybindings
 
@@ -124,7 +127,7 @@ colors = true                # Colored output (default: true on Linux/macOS)
 region = "ap-northeast-1"    # Default region override
 ```
 
-Unknown keys are rejected on load, so typos won't silently do nothing.
+Unknown keys are rejected on load, so typos are caught immediately.
 
 <details>
 <summary>Shell Completions</summary>
@@ -141,15 +144,15 @@ awswit completions fish > ~/.config/fish/completions/awswit.fish
 
 **Why not just `export AWS_PROFILE=foo`?**
 
-Sure. awswit is for when you have 10+ profiles and got tired of typing exact names. With fuzzy search, favorites, and frecency, the right profile is usually one or two keystrokes away.
+You can. awswit is for when you have 10+ profiles and typing exact names gets tedious. With fuzzy search, favorites, and frecency, the right profile is usually one or two keystrokes away.
 
 **How is this different from awsume / aws-vault?**
 
-They manage credentials — STS calls, token caching, MFA. awswit doesn't do any of that. It sets `AWS_PROFILE` and lets the SDK deal with auth:
+They manage credentials — STS calls, token caching, MFA. awswit does none of that. It sets `AWS_PROFILE` and lets the SDK handle authentication:
 
 - No background processes
 - No token files to debug
-- Works with any auth method, including ones that didn't exist when awswit was written
+- Works with any auth method, including ones that did not exist when awswit was written
 
 If you already use `aws sso login` or aws-vault, awswit is the missing piece — a fast way to pick which profile is active.
 

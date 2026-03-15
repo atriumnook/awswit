@@ -1,6 +1,6 @@
 # awswit
 
-AWS プロファイルを素早く切り替える。あいまい検索、frecency、お気に入り。
+AWS プロファイルをインタラクティブに切り替えるツール。あいまい検索と frecency で、使いたいプロファイルにすぐたどり着ける。
 
 [![CI](https://github.com/atnook/awswit/workflows/CI/badge.svg)](https://github.com/atnook/awswit/actions)
 [![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
@@ -50,27 +50,30 @@ awswit init powershell | Invoke-Expression
 
 </details>
 
-### 使う
+### 使い方
 
 ```bash
-awswit
+awswit                  # インタラクティブに選択
+awswit prod             # 直接切り替え
+awswit -l               # プロファイル一覧
+awswit -u               # 環境変数を解除
 ```
 
-プロファイルを選んで Enter。`AWS_PROFILE` が今のシェルにセットされる。それだけ。
+プロファイルを選んで Enter を押すと、`AWS_PROFILE` が現在のシェルに設定される。
 
 ## 特徴
 
-- **あいまい検索** — 数文字打てばすぐ絞れる
-- **Frecency ソート** — よく使う・最近使ったやつが勝手に上に来る
-- **お気に入り** — `*` でピン留め。常にトップに表示
-- **プレビュー** — `Ctrl+P` で種別・リージョン・アカウント ID・ロール ARN を確認
-- **fzf 連携** — `--fzf` で外部 fzf に切り替え。`AWSWIT_USE_FZF=1` で常時 fzf
-- **認証はノータッチ** — `AWS_PROFILE` をセットするだけ。認証は SDK / SSO / aws-vault の仕事
-- **シングルバイナリ** — Rust 製、依存なし
+- **あいまい検索** — 入力に応じてプロファイルを絞り込む
+- **Frecency ソート** — 使用頻度と新しさに基づいて順位付け
+- **お気に入り** — `*` でプロファイルを先頭に固定
+- **プレビューパネル** — `Ctrl+P` でリージョン、アカウント ID、ロール ARN などを確認
+- **fzf 連携** — `--fzf` または `AWSWIT_USE_FZF=1` で外部 fzf を使用
+- **認証には関与しない** — awswit は `AWS_PROFILE` の設定だけを行い、認証は AWS SDK・SSO・aws-vault に委ねる
+- **シングルバイナリ** — Rust 製、ランタイム依存なし
 
 ## 仕組み
 
-`~/.aws/config` を読んでピッカーを出し、選ばれたプロファイルを環境変数にセットする:
+`~/.aws/config` を読み、選択されたプロファイルを環境変数に設定する:
 
 ```
 AWS_PROFILE=prod
@@ -80,7 +83,7 @@ AWS_DEFAULT_REGION=ap-northeast-1
 AWSWIT_PROFILE=prod
 ```
 
-認証情報の解決は AWS SDK の仕事。IAM キーでも SSO でもロール引き受けでも `credential_process` でも、何でもいい。awswit は認証に関与しない。
+認証の解決は AWS SDK が行う。IAM キー、SSO、ロール引き受け、`credential_process` など、方式を問わない。awswit は認証に関与しない。
 
 ## キーバインド
 
@@ -104,27 +107,27 @@ awswit completions <shell> タブ補完スクリプトを生成
 | フラグ | 説明 |
 |--------|------|
 | `-v, --version` | バージョン表示 |
-| `-s, --show-commands` | export コマンドを表示するだけ（実行しない） |
-| `-u, --unset` | AWS 環境変数を全部解除 |
-| `-l, --list-profiles` | プロファイル一覧（`-l more` で詳細） |
-| `-n, --no-interactive` | TUI なしで名前 or `$AWS_PROFILE` から解決 |
-| `--fzf` | 外部 fzf を使う |
-| `--region <region>` | リージョン上書き |
+| `-s, --show-commands` | export コマンドを表示（実行はしない） |
+| `-u, --unset` | AWS 環境変数をすべて解除 |
+| `-l, --list-profiles` | プロファイル一覧（`-l more` で詳細表示） |
+| `-n, --no-interactive` | TUI を使わず、名前または `$AWS_PROFILE` から解決 |
+| `--fzf` | 外部 fzf を使用 |
+| `--region <region>` | リージョンを上書き |
 | `--config-file <path>` | AWS 設定ファイルのパス |
-| `--info` | INFO ログ |
-| `--debug` | DEBUG ログ |
+| `--info` | INFO レベルのログを表示 |
+| `--debug` | DEBUG レベルのログを表示 |
 
 ## 設定
 
-`~/.awswit/config.toml`（全部オプション）:
+`~/.awswit/config.toml`（すべてオプション）:
 
 ```toml
 fuzzy-match = true           # あいまいマッチ（デフォルト: true）
 colors = true                # カラー出力（デフォルト: Linux/macOS で true）
-region = "ap-northeast-1"    # デフォルトリージョン上書き
+region = "ap-northeast-1"    # デフォルトリージョンの上書き
 ```
 
-知らないキーがあるとロード時にエラーになる。typo で設定が効かない、みたいなことは起きない。
+不明なキーはロード時にエラーとなるため、typo が黙って無視されることはない。
 
 <details>
 <summary>シェル補完</summary>
@@ -141,17 +144,17 @@ awswit completions fish > ~/.config/fish/completions/awswit.fish
 
 **`export AWS_PROFILE=foo` でよくない？**
 
-それでいい。awswit はプロファイルが 10 個 20 個あって正確な名前を打つのが面倒な人向け。あいまい検索とお気に入りと frecency で、だいたい 1〜2 打鍵で目当てのプロファイルにたどり着ける。
+もちろん可能である。awswit はプロファイルが 10 個以上あり、正確な名前を入力するのが手間になった場合に役立つ。あいまい検索・お気に入り・frecency により、通常 1〜2 打鍵で目当てのプロファイルに到達できる。
 
 **awsume / aws-vault と何が違う？**
 
-awsume や aws-vault は認証を管理する。STS を叩いてトークンをキャッシュして MFA を処理する。awswit はそういうことを一切やらない。`AWS_PROFILE` をセットして、あとは SDK に丸投げ。だから:
+awsume や aws-vault は認証を管理する。STS 呼び出し、トークンのキャッシュ、MFA の処理などを行う。awswit はそれらを一切行わない。`AWS_PROFILE` を設定し、認証は SDK に委ねる。そのため:
 
 - バックグラウンドプロセスなし
 - トークンファイルのトラブルシュートなし
-- 認証方式を問わない。awswit より後に出てきた方式でも動く
+- 認証方式を問わない。awswit の開発後に登場した方式でも動作する
 
-`aws sso login` や aws-vault を既に使っているなら、awswit は「どのプロファイルにする？」を速く選ぶためのツール。足りなかったパーツ。
+`aws sso login` や aws-vault を既に使っているなら、awswit はプロファイルを素早く選択するためのツールである。
 
 ## ライセンス
 
