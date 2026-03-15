@@ -125,7 +125,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
 
     // Record usage in history
     ctx.history.record_use(&target_profile_name);
-    if let Err(e) = ctx.history.save() {
+    if let Err(e) = awswit::history::save_history(&ctx.history) {
         tracing::warn!("Failed to save profile history: {}", e);
         eprintln!("Warning: Failed to save profile history: {}", e);
     }

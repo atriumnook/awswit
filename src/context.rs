@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::cli::Args;
 use crate::config::{AwsFiles, AwswitConfig};
 use crate::error::AwswitError;
-use crate::history::ProfileHistory;
+use crate::history::{ProfileHistory, load_history};
 use crate::profile::Profile;
 
 /// Aggregates all application state loaded at startup.
@@ -34,12 +34,9 @@ impl AppContext {
         let profiles = aws_files.merge_profiles();
         tracing::debug!("Loaded {} profiles", profiles.len());
 
-        let history = ProfileHistory::load().unwrap_or_else(|e| {
+        let history = load_history().unwrap_or_else(|e| {
             tracing::warn!("Failed to load profile history: {}", e);
-            eprintln!(
-                "Warning: Failed to load profile history: {}. Favorites and recent profiles may be missing.",
-                e
-            );
+            eprintln!("Warning: Failed to load profile history: {}. Favorites and recent profiles may be missing.", e);
             ProfileHistory::default()
         });
 

@@ -7,6 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AwswitError;
 
+// Frecency time buckets (in hours)
+const FRECENCY_BUCKET_RECENT: f64 = 1.0; // Within 1 hour
+const FRECENCY_BUCKET_TODAY: f64 = 24.0; // Within 24 hours
+const FRECENCY_BUCKET_WEEK: f64 = 168.0; // Within 1 week
+
+// Frecency weights
+const FRECENCY_WEIGHT_RECENT: f64 = 4.0;
+const FRECENCY_WEIGHT_TODAY: f64 = 2.0;
+const FRECENCY_WEIGHT_WEEK: f64 = 1.0;
+const FRECENCY_WEIGHT_OLD: f64 = 0.5;
+
 /// History entry for a profile
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -28,14 +39,14 @@ impl HistoryEntry {
     /// More recent and more frequently used profiles score higher.
     pub fn frecency_score(&self, now: DateTime<Utc>) -> f64 {
         let hours = (now - self.last_used).num_seconds().max(0) as f64 / 3600.0;
-        let weight = if hours < 1.0 {
-            4.0
-        } else if hours < 24.0 {
-            2.0
-        } else if hours < 168.0 {
-            1.0
+        let weight = if hours < FRECENCY_BUCKET_RECENT {
+            FRECENCY_WEIGHT_RECENT
+        } else if hours < FRECENCY_BUCKET_TODAY {
+            FRECENCY_WEIGHT_TODAY
+        } else if hours < FRECENCY_BUCKET_WEEK {
+            FRECENCY_WEIGHT_WEEK
         } else {
-            0.5
+            FRECENCY_WEIGHT_OLD
         };
         self.use_count as f64 * weight
     }
@@ -48,99 +59,100 @@ pub struct ProfileHistory {
     entries: HashMap<String, HistoryEntry>,
 }
 
-impl ProfileHistory {
-    /// Get the history file path
-    fn history_path() -> Result<PathBuf, AwswitError> {
-        crate::utils::paths::awswit_home_dir()
-            .map(|p| p.join("history.json"))
-            .map_err(|e| AwswitError::ConfigFileError {
-                message: e.to_string(),
-            })
-    }
+/// Get the history file path
+fn history_path() -> Result<PathBuf, AwswitError> {
+    crate::utils::paths::awswit_home_dir()
+        .map(|p| p.join("history.json"))
+        .map_err(|e| AwswitError::ConfigFileError {
+            message: e.to_string(),
+        })
+}
 
-    /// Load history from file
-    pub fn load() -> Result<Self, AwswitError> {
-        let path = Self::history_path()?;
+/// Load history from file.
+///
+/// Returns `Ok(default())` if the file does not exist or is corrupt (backed up first).
+/// Propagates errors for permission failures and other I/O errors.
+pub fn load_history() -> Result<ProfileHistory, AwswitError> {
+    let path = history_path()?;
 
-        // Read directly instead of exists() check to avoid TOCTOU race
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => {
-                return Err(AwswitError::ConfigFileError {
-                    message: format!("Failed to read history: {}", e),
-                });
+    // Read directly instead of exists() check to avoid TOCTOU race
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ProfileHistory::default()),
+        Err(e) => return Err(e.into()),
+    };
+
+    match serde_json::from_str::<ProfileHistory>(&content) {
+        Ok(history) => Ok(history),
+        Err(e) => {
+            // Backup corrupt file before resetting to prevent data loss
+            let backup_path = path.with_extension("json.corrupt");
+            tracing::warn!(
+                "History file is corrupt ({}), backing up to {:?} and resetting",
+                e,
+                backup_path
+            );
+            if let Err(backup_err) = fs::copy(&path, &backup_path) {
+                tracing::warn!("Failed to backup corrupt history file: {}", backup_err);
             }
-        };
-
-        match serde_json::from_str::<Self>(&content) {
-            Ok(history) => Ok(history),
-            Err(e) => {
-                // Backup corrupt file before resetting to prevent data loss
-                let backup_path = path.with_extension("json.corrupt");
-                tracing::warn!(
-                    "History file is corrupt ({}), backing up to {:?} and resetting",
-                    e,
-                    backup_path
-                );
-                if let Err(backup_err) = fs::copy(&path, &backup_path) {
-                    tracing::warn!("Failed to backup corrupt history file: {}", backup_err);
-                }
-                Ok(Self::default())
-            }
+            Ok(ProfileHistory::default())
         }
     }
+}
 
-    /// Save history to file atomically.
-    ///
-    /// Writes to a temporary file with restricted permissions, then renames
-    /// it into place. This avoids a race window where the file exists with
-    /// default permissions before `set_permissions` is called.
-    pub fn save(&self) -> Result<(), AwswitError> {
-        let path = Self::history_path()?;
+/// Save history to file atomically.
+///
+/// Writes to a temporary file with restricted permissions, then renames
+/// it into place. This avoids a race window where the file exists with
+/// default permissions before `set_permissions` is called.
+///
+/// **Concurrent access**: This function is designed for single-user CLI use.
+/// If multiple processes call `save_history` concurrently, the last writer wins.
+/// No file locking is performed.
+pub fn save_history(history: &ProfileHistory) -> Result<(), AwswitError> {
+    let path = history_path()?;
 
-        // Ensure directory exists
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    // Ensure directory exists
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
 
-        let content = serde_json::to_string_pretty(self)?;
+    let content = serde_json::to_string_pretty(history)?;
 
-        // Write to a PID-unique temp file in the same directory, then atomically rename.
-        let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    // Write to a PID-unique temp file in the same directory, then atomically rename.
+    let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+
+    {
+        use std::io::Write;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
 
         #[cfg(unix)]
         {
-            use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
+            opts.mode(0o600);
         }
 
-        #[cfg(not(unix))]
-        {
-            use std::io::Write;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-        }
-
-        if let Err(e) = fs::rename(&tmp_path, &path) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e.into());
-        }
-
-        Ok(())
+        let mut file = opts.open(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
     }
 
+    if let Err(e) = fs::rename(&tmp_path, &path) {
+        if let Err(cleanup_err) = fs::remove_file(&tmp_path) {
+            tracing::warn!(
+                "Failed to clean up temp file {:?}: {}",
+                tmp_path,
+                cleanup_err
+            );
+        }
+        return Err(e.into());
+    }
+
+    Ok(())
+}
+
+impl ProfileHistory {
     /// Record profile usage
     pub fn record_use(&mut self, profile_name: &str) {
         let now = Utc::now();
@@ -420,7 +432,8 @@ mod tests {
         let content = serde_json::to_string_pretty(&history).unwrap();
         fs::write(&path, &content).unwrap();
 
-        let loaded: ProfileHistory = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let loaded: ProfileHistory =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.get("test-profile").unwrap().use_count, 1);
         assert!(loaded.is_favorite("test-profile"));
     }
