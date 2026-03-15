@@ -15,14 +15,6 @@ pub struct AwsFiles {
     pub credentials_profiles: HashMap<String, Profile>,
 }
 
-/// Permission check behavior for different AWS file types.
-enum PermissionCheck {
-    /// Warn on world-writable (config file)
-    WarnWorldWritable,
-    /// Error on world-writable, warn on group/other readable (credentials file)
-    StrictCredentials,
-}
-
 impl AwsFiles {
     /// Load AWS config and credentials files
     pub fn load(config_path: &str, credentials_path: &str) -> Result<Self, AwswitError> {
@@ -36,10 +28,14 @@ impl AwsFiles {
     }
 
     /// Common INI file loader with configurable permission checks and section name parsing.
+    ///
+    /// When `strict_permissions` is true, the file is treated as containing secrets
+    /// (e.g. credentials): world-writable causes an error, group/other readable
+    /// triggers a warning. When false, only world-writable triggers a warning.
     fn load_ini_file(
         path: &str,
         label: &str,
-        perm_check: PermissionCheck,
+        strict_permissions: bool,
         extract_profile_name: fn(&str) -> Option<String>,
     ) -> Result<HashMap<String, Profile>, AwswitError> {
         let path = shellexpand::tilde(path).to_string();
@@ -54,37 +50,32 @@ impl AwsFiles {
             use std::os::unix::fs::MetadataExt;
             if let Ok(meta) = fs::metadata(&path) {
                 let mode = meta.mode() & 0o777;
-                match perm_check {
-                    PermissionCheck::WarnWorldWritable => {
-                        if mode & 0o002 != 0 {
-                            tracing::warn!(
-                                "{} {} is world-writable (mode {:o}). This is a security risk.",
-                                label,
-                                path,
-                                mode
-                            );
-                        }
+                if strict_permissions {
+                    if mode & 0o002 != 0 {
+                        return Err(AwswitError::ConfigFileError {
+                            message: format!(
+                                "{} {} is world-writable (mode {:o}). \
+                                 Fix with: chmod 600 {}",
+                                label, path, mode, path
+                            ),
+                        });
                     }
-                    PermissionCheck::StrictCredentials => {
-                        if mode & 0o002 != 0 {
-                            return Err(AwswitError::ConfigFileError {
-                                message: format!(
-                                    "{} {} is world-writable (mode {:o}). \
-                                     Fix with: chmod 600 {}",
-                                    label, path, mode, path
-                                ),
-                            });
-                        }
-                        if mode & 0o044 != 0 {
-                            tracing::warn!(
-                                "{} {} is readable by group/others (mode {:o}). \
-                                 Recommended permissions are 0600.",
-                                label,
-                                path,
-                                mode
-                            );
-                        }
+                    if mode & 0o044 != 0 {
+                        tracing::warn!(
+                            "{} {} is readable by group/others (mode {:o}). \
+                             Recommended permissions are 0600.",
+                            label,
+                            path,
+                            mode
+                        );
                     }
+                } else if mode & 0o002 != 0 {
+                    tracing::warn!(
+                        "{} {} is world-writable (mode {:o}). This is a security risk.",
+                        label,
+                        path,
+                        mode
+                    );
                 }
             }
         }
@@ -114,30 +105,22 @@ impl AwsFiles {
 
     /// Load the AWS config file (~/.aws/config)
     fn load_config_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
-        Self::load_ini_file(
-            path,
-            "Config file",
-            PermissionCheck::WarnWorldWritable,
-            |section_name| {
-                if section_name.starts_with("profile ") {
-                    Some(section_name.strip_prefix("profile ").unwrap().to_string())
-                } else if section_name == "default" {
-                    Some("default".to_string())
-                } else {
-                    None // Skip non-profile sections (like "sso-session")
-                }
-            },
-        )
+        Self::load_ini_file(path, "Config file", false, |section_name| {
+            if section_name.starts_with("profile ") {
+                Some(section_name.strip_prefix("profile ").unwrap().to_string())
+            } else if section_name == "default" {
+                Some("default".to_string())
+            } else {
+                None // Skip non-profile sections (like "sso-session")
+            }
+        })
     }
 
     /// Load the AWS credentials file (~/.aws/credentials)
     fn load_credentials_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
-        Self::load_ini_file(
-            path,
-            "Credentials file",
-            PermissionCheck::StrictCredentials,
-            |section_name| Some(section_name.to_string()),
-        )
+        Self::load_ini_file(path, "Credentials file", true, |section_name| {
+            Some(section_name.to_string())
+        })
     }
 
     /// Convert an INI section to a Profile
