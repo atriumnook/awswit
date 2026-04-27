@@ -1,18 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-/// Represents an AWS profile from config/credentials files
+/// Represents an AWS profile from config/credentials files.
+///
+/// Only metadata that awswit displays or uses for selection is stored here.
+/// Credential material (`aws_access_key_id`, `aws_secret_access_key`,
+/// `aws_session_token`) is intentionally not read or held — the AWS SDK
+/// resolves credentials at runtime.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
-    pub aws_access_key_id: Option<String>,
-    pub aws_secret_access_key: Option<String>,
-    pub aws_session_token: Option<String>,
     pub role_arn: Option<String>,
     pub source_profile: Option<String>,
     pub credential_source: Option<String>,
     pub mfa_serial: Option<String>,
     pub region: Option<String>,
-    pub output: Option<String>,
 
     // SSO fields
     pub sso_start_url: Option<String>,
@@ -30,19 +31,6 @@ impl Profile {
     /// Check if this profile uses SSO
     pub fn is_sso_profile(&self) -> bool {
         self.sso_start_url.is_some() && self.sso_account_id.is_some()
-    }
-
-    /// Merge credentials from another profile
-    pub fn merge_credentials(&mut self, other: &Profile) {
-        if other.aws_access_key_id.is_some() {
-            self.aws_access_key_id = other.aws_access_key_id.clone();
-        }
-        if other.aws_secret_access_key.is_some() {
-            self.aws_secret_access_key = other.aws_secret_access_key.clone();
-        }
-        if other.aws_session_token.is_some() {
-            self.aws_session_token = other.aws_session_token.clone();
-        }
     }
 
     /// Extract account ID from role ARN

@@ -27,15 +27,15 @@ impl AwsFiles {
         })
     }
 
-    /// Common INI file loader with configurable permission checks and section name parsing.
+    /// Common INI file loader: reads sections matching `extract_profile_name`
+    /// and returns them as `Profile`s.
     ///
-    /// When `strict_permissions` is true, the file is treated as containing secrets
-    /// (e.g. credentials): world-writable causes an error, group/other readable
-    /// triggers a warning. When false, only world-writable triggers a warning.
+    /// File permissions are intentionally not validated here. Securing
+    /// `~/.aws/credentials` is the responsibility of the AWS SDK / aws-vault
+    /// / the user — awswit only reads section names and metadata.
     fn load_ini_file(
         path: &str,
         label: &str,
-        strict_permissions: bool,
         extract_profile_name: fn(&str) -> Option<String>,
     ) -> Result<HashMap<String, Profile>, AwswitError> {
         let path = shellexpand::tilde(path).to_string();
@@ -43,41 +43,6 @@ impl AwsFiles {
         if !Path::new(&path).exists() {
             tracing::debug!("{} not found: {}", label, path);
             return Ok(HashMap::new());
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let Ok(meta) = fs::metadata(&path) {
-                let mode = meta.mode() & 0o777;
-                if strict_permissions {
-                    if mode & 0o002 != 0 {
-                        return Err(AwswitError::ConfigFileError {
-                            message: format!(
-                                "{} {} is world-writable (mode {:o}). \
-                                 Fix with: chmod 600 {}",
-                                label, path, mode, path
-                            ),
-                        });
-                    }
-                    if mode & 0o044 != 0 {
-                        tracing::warn!(
-                            "{} {} is readable by group/others (mode {:o}). \
-                             Recommended permissions are 0600.",
-                            label,
-                            path,
-                            mode
-                        );
-                    }
-                } else if mode & 0o002 != 0 {
-                    tracing::warn!(
-                        "{} {} is world-writable (mode {:o}). This is a security risk.",
-                        label,
-                        path,
-                        mode
-                    );
-                }
-            }
         }
 
         let content = fs::read_to_string(&path).map_err(|e| AwswitError::ConfigFileError {
@@ -105,7 +70,7 @@ impl AwsFiles {
 
     /// Load the AWS config file (~/.aws/config)
     fn load_config_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
-        Self::load_ini_file(path, "Config file", false, |section_name| {
+        Self::load_ini_file(path, "Config file", |section_name| {
             if section_name.starts_with("profile ") {
                 Some(section_name.strip_prefix("profile ").unwrap().to_string())
             } else if section_name == "default" {
@@ -118,7 +83,7 @@ impl AwsFiles {
 
     /// Load the AWS credentials file (~/.aws/credentials)
     fn load_credentials_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
-        Self::load_ini_file(path, "Credentials file", true, |section_name| {
+        Self::load_ini_file(path, "Credentials file", |section_name| {
             Some(section_name.to_string())
         })
     }
@@ -132,15 +97,11 @@ impl AwsFiles {
                 .strip_prefix("profile ")
                 .unwrap_or(section)
                 .to_string(),
-            aws_access_key_id: get("aws_access_key_id"),
-            aws_secret_access_key: get("aws_secret_access_key"),
-            aws_session_token: get("aws_session_token"),
             role_arn: get("role_arn"),
             source_profile: get("source_profile"),
             credential_source: get("credential_source"),
             mfa_serial: get("mfa_serial"),
             region: get("region"),
-            output: get("output"),
             // SSO fields
             sso_start_url: get("sso_start_url"),
             sso_region: get("sso_region"),
@@ -149,25 +110,19 @@ impl AwsFiles {
         }
     }
 
-    /// Merge config and credentials profiles
-    /// Credentials file takes precedence for credential fields
+    /// Merge config and credentials profiles.
+    ///
+    /// Profiles defined only in `~/.aws/credentials` are exposed by name so the
+    /// picker can list them; awswit does not read or store the actual key
+    /// material — the AWS SDK resolves credentials at runtime.
     pub fn merge_profiles(&self) -> HashMap<String, Profile> {
-        let mut merged = HashMap::new();
+        let mut merged: HashMap<String, Profile> = self.config_profiles.clone();
 
-        // Start with config profiles
-        for (name, profile) in &self.config_profiles {
-            merged.insert(name.clone(), profile.clone());
-        }
-
-        // Merge credentials profiles
-        for (name, cred_profile) in &self.credentials_profiles {
-            if let Some(existing) = merged.get_mut(name) {
-                // Merge credentials into existing profile
-                existing.merge_credentials(cred_profile);
-            } else {
-                // Add new profile from credentials
-                merged.insert(name.clone(), cred_profile.clone());
-            }
+        for name in self.credentials_profiles.keys() {
+            merged.entry(name.clone()).or_insert_with(|| Profile {
+                name: name.clone(),
+                ..Profile::default()
+            });
         }
 
         merged
@@ -253,11 +208,8 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
         let merged = aws_files.merge_profiles();
 
+        assert!(merged.contains_key("default"));
         let default = &merged["default"];
-        assert_eq!(
-            default.aws_access_key_id,
-            Some("AKIAIOSFODNN7EXAMPLE".to_string())
-        );
         assert_eq!(default.region, Some("us-east-1".to_string()));
     }
 }
