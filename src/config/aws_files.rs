@@ -32,7 +32,8 @@ impl AwsFiles {
     ///
     /// File permissions are intentionally not validated here. Securing
     /// `~/.aws/credentials` is the responsibility of the AWS SDK / aws-vault
-    /// / the user — awswit only reads section names and metadata.
+    /// / the user — awswit parses the file contents but only retains section
+    /// names and metadata in the returned profiles, ignoring credential keys.
     fn load_ini_file(
         path: &str,
         label: &str,
@@ -118,11 +119,10 @@ impl AwsFiles {
     pub fn merge_profiles(&self) -> HashMap<String, Profile> {
         let mut merged: HashMap<String, Profile> = self.config_profiles.clone();
 
-        for name in self.credentials_profiles.keys() {
-            merged.entry(name.clone()).or_insert_with(|| Profile {
-                name: name.clone(),
-                ..Profile::default()
-            });
+        for (name, cred_profile) in &self.credentials_profiles {
+            merged
+                .entry(name.clone())
+                .or_insert_with(|| cred_profile.clone());
         }
 
         merged
