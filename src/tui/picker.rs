@@ -212,41 +212,33 @@ impl PickerApp {
                         self.cursor_pos += c.len_utf8();
                         self.update_filter();
                     }
-                    KeyCode::Backspace => {
-                        if self.cursor_pos > 0 {
-                            let prev = self.query[..self.cursor_pos]
-                                .char_indices()
-                                .next_back()
-                                .map(|(idx, _)| idx)
-                                .unwrap_or(0);
-                            self.query.remove(prev);
-                            self.cursor_pos = prev;
-                            self.update_filter();
-                        }
+                    KeyCode::Backspace if self.cursor_pos > 0 => {
+                        let prev = self.query[..self.cursor_pos]
+                            .char_indices()
+                            .next_back()
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(0);
+                        self.query.remove(prev);
+                        self.cursor_pos = prev;
+                        self.update_filter();
                     }
-                    KeyCode::Delete => {
-                        if self.cursor_pos < self.query.len() {
-                            self.query.remove(self.cursor_pos);
-                            self.update_filter();
-                        }
+                    KeyCode::Delete if self.cursor_pos < self.query.len() => {
+                        self.query.remove(self.cursor_pos);
+                        self.update_filter();
                     }
-                    KeyCode::Left => {
-                        if self.cursor_pos > 0 {
-                            self.cursor_pos = self.query[..self.cursor_pos]
-                                .char_indices()
-                                .next_back()
-                                .map(|(idx, _)| idx)
-                                .unwrap_or(0);
-                        }
+                    KeyCode::Left if self.cursor_pos > 0 => {
+                        self.cursor_pos = self.query[..self.cursor_pos]
+                            .char_indices()
+                            .next_back()
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(0);
                     }
-                    KeyCode::Right => {
-                        if self.cursor_pos < self.query.len() {
-                            self.cursor_pos = self.query[self.cursor_pos..]
-                                .char_indices()
-                                .nth(1)
-                                .map(|(idx, _)| self.cursor_pos + idx)
-                                .unwrap_or(self.query.len());
-                        }
+                    KeyCode::Right if self.cursor_pos < self.query.len() => {
+                        self.cursor_pos = self.query[self.cursor_pos..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(idx, _)| self.cursor_pos + idx)
+                            .unwrap_or(self.query.len());
                     }
 
                     _ => {}

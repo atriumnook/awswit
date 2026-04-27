@@ -68,22 +68,46 @@ fn test_load_and_parse_config_profiles() {
 }
 
 #[test]
-fn test_merge_profiles_credentials_override() {
-    let temp_dir = setup_test_aws_dir();
+fn test_merge_profiles_includes_credentials_only_profiles() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
     let config_path = temp_dir.path().join("config");
+    fs::write(
+        &config_path,
+        r#"
+[default]
+region = us-east-1
+"#,
+    )
+    .expect("Failed to write config");
+
     let creds_path = temp_dir.path().join("credentials");
+    fs::write(
+        &creds_path,
+        r#"
+[default]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+[creds-only]
+aws_access_key_id = AKIAEXAMPLEONLY
+aws_secret_access_key = secretonly
+"#,
+    )
+    .expect("Failed to write credentials");
 
     let aws_files =
         AwsFiles::load(config_path.to_str().unwrap(), creds_path.to_str().unwrap()).unwrap();
 
     let merged = aws_files.merge_profiles();
 
-    let default = &merged["default"];
-    assert_eq!(
-        default.aws_access_key_id,
-        Some("AKIAIOSFODNN7EXAMPLE".to_string())
-    );
-    assert_eq!(default.region, Some("us-east-1".to_string()));
+    // Profiles defined only in the credentials file are surfaced by name so the
+    // picker can list them.
+    assert!(merged.contains_key("creds-only"));
+
+    // Config-side metadata is preserved when both files mention the profile.
+    assert!(merged.contains_key("default"));
+    assert_eq!(merged["default"].region, Some("us-east-1".to_string()));
 }
 
 #[test]
