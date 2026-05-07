@@ -8,11 +8,8 @@ license = "MIT"
 repository = "https://github.com/atriumnook/awswit"
 keywords = ["aws", "profile", "switcher", "tui", "cli"]
 categories = ["command-line-utilities"]
-publish = false
 
 [package.metadata.dist]
-# Force dist to package this crate even though publish = false.
-dist = true
 cargo-dist-version = "0.28.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
@@ -23,8 +20,6 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
-pr-run-mode = "plan"
-install-updater = false
 
 [lib]
 name = "awswit"
