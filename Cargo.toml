@@ -1,15 +1,6 @@
-[package]
-name = "awswit"
-version = "0.0.2"
-edition = "2024"
-rust-version = "1.94"
-description = "Interactive AWS profile switcher with fuzzy search"
-license = "MIT"
-repository = "https://github.com/atriumnook/awswit"
-keywords = ["aws", "profile", "switcher", "tui", "cli"]
-categories = ["command-line-utilities"]
+[workspace]
 
-[package.metadata.dist]
+[workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
@@ -20,6 +11,17 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
+
+[package]
+name = "awswit"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.94"
+description = "Interactive AWS profile switcher with fuzzy search"
+license = "MIT"
+repository = "https://github.com/atriumnook/awswit"
+keywords = ["aws", "profile", "switcher", "tui", "cli"]
+categories = ["command-line-utilities"]
 
 [lib]
 name = "awswit"
