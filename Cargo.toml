@@ -10,7 +10,7 @@ keywords = ["aws", "profile", "switcher", "tui", "cli"]
 categories = ["command-line-utilities"]
 
 [package.metadata.dist]
-cargo-dist-version = "0.28.0"
+cargo-dist-version = "0.31.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
 targets = [
