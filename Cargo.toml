@@ -11,6 +11,8 @@ categories = ["command-line-utilities"]
 publish = false
 
 [package.metadata.dist]
+# Force dist to package this crate even though publish = false.
+dist = true
 cargo-dist-version = "0.28.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
