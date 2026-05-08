@@ -34,15 +34,15 @@ _Released on {{ timestamp | date(format="%Y-%m-%d") }}_
 """
 trim = true
 commit_parsers = [
-    { message = "^feat", group = "Features" },
-    { message = "^fix", group = "Bug Fixes" },
-    { message = "^perf", group = "Performance" },
-    { message = "^refactor", group = "Refactor" },
-    { message = "^docs?", group = "Documentation" },
-    { message = "^test", group = "Tests" },
-    { message = "^ci", group = "CI" },
+    { message = "^feat[(:!]", group = "Features" },
+    { message = "^fix[(:!]", group = "Bug Fixes" },
+    { message = "^perf[(:!]", group = "Performance" },
+    { message = "^refactor[(:!]", group = "Refactor" },
+    { message = "^docs?[(:!]", group = "Documentation" },
+    { message = "^test[(:!]", group = "Tests" },
+    { message = "^ci[(:!]", group = "CI" },
     { message = "^chore\\(release\\):", skip = true },
-    { message = "^chore", group = "Miscellaneous" },
-    { message = "^review", skip = true },
-    { message = "^Merge", skip = true },
+    { message = "^chore[(:!]", group = "Miscellaneous" },
+    { message = "^review[(:!]", skip = true },
+    { message = "^Merge ", skip = true },
 ]
