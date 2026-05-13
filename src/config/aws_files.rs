@@ -98,6 +98,16 @@ impl AwsFiles {
     /// Returns an empty vec if the file is missing or unreadable — at the
     /// shell-prompt level, we should never make tab-completion hang because
     /// of a transient I/O issue.
+    ///
+    /// Names containing characters that are unsafe for *any* shell wordlist
+    /// (`$`, `` ` ``, `\`, `'`, `"`, `;`, `&`, `|`, `<`, `>`, `(`, `)`,
+    /// whitespace, or any control character) are dropped with a `warn`
+    /// trace. A profile literally named `$(rm -rf $HOME)` is almost
+    /// certainly a hostile or accidental write by another tool (an IaC
+    /// renderer that forgot to expand a variable, a compromised
+    /// dotfile syncer), and feeding it through `compgen -W` would cause
+    /// bash to *execute* the substitution during tab-completion. That's a
+    /// confirmed bug class — defense in depth, drop them here.
     pub fn fast_profile_names(config_path: &str) -> Vec<String> {
         let expanded = shellexpand::tilde(config_path).to_string();
         let Ok(content) = fs::read_to_string(&expanded) else {
@@ -114,12 +124,21 @@ impl AwsFiles {
                 continue;
             };
             let name = name.trim();
-            if name == "default" {
-                names.push("default".to_string());
+            let stripped = if name == "default" {
+                "default"
             } else if let Some(p) = name.strip_prefix("profile ") {
-                names.push(p.to_string());
+                p
+            } else {
+                continue;
+            };
+            if !is_shell_safe_name(stripped) {
+                tracing::warn!(
+                    "skipping profile with shell-unsafe characters in name: {:?}",
+                    stripped
+                );
+                continue;
             }
-            // sso-session / services / other sections: ignored.
+            names.push(stripped.to_string());
         }
         names.sort();
         names.dedup();
@@ -231,6 +250,26 @@ fn parse_tolerant(
     }
 
     sections
+}
+
+/// True when `name` contains no character that would change meaning when
+/// pasted into a shell wordlist consumed by `compgen -W` or similar.
+///
+/// AWS profile-name conventions are alphanumeric, dash, dot, underscore;
+/// anything outside that set is either a typo, an unrendered template
+/// variable, or hostile.
+fn is_shell_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || c == '-'
+                || c == '_'
+                || c == '.'
+                || c == '/'
+                || c == '@'
+                || c == '+'
+                || c == '='
+        })
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -395,6 +434,66 @@ region = us-west-2
         assert!(f.config_profiles.contains_key("dev"));
         assert!(!f.config_profiles.contains_key("corp"));
         assert!(!f.config_profiles.contains_key("sso-session corp"));
+    }
+
+    #[test]
+    fn fast_profile_names_drops_shell_unsafe_names() {
+        // Defense in depth against the bash tab-completion injection class —
+        // see is_shell_safe_name docstring. None of these should ever come
+        // back from fast_profile_names.
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            r#"[default]
+
+[profile innocent]
+
+[profile $(touch /tmp/x)]
+
+[profile `id`]
+
+[profile with;semi]
+
+[profile with|pipe]
+"#
+        )
+        .unwrap();
+        let names = AwsFiles::fast_profile_names(cfg.path().to_str().unwrap());
+        assert_eq!(names, vec!["default".to_string(), "innocent".to_string()]);
+    }
+
+    #[test]
+    fn fast_profile_names_accepts_realistic_names() {
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            r#"[default]
+
+[profile prod-us-east-1]
+
+[profile dev_admin]
+
+[profile foo.bar]
+
+[profile aws@sso]
+
+[profile alpha+beta]
+"#
+        )
+        .unwrap();
+        let mut names = AwsFiles::fast_profile_names(cfg.path().to_str().unwrap());
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "alpha+beta".to_string(),
+                "aws@sso".to_string(),
+                "default".to_string(),
+                "dev_admin".to_string(),
+                "foo.bar".to_string(),
+                "prod-us-east-1".to_string(),
+            ]
+        );
     }
 
     #[test]

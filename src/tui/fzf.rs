@@ -14,14 +14,31 @@ pub fn is_truthy(val: &str) -> bool {
 }
 
 /// Options that allow arbitrary command execution via fzf and must be blocked.
+///
+/// AWSWIT_FZF_OPTS is user-controlled, but the user-controlled value can
+/// flow through CI envs, sourced shell snippets, and dotenv files where
+/// the surface is less obviously theirs. Strip every fzf flag that gives
+/// fzf the ability to spawn arbitrary processes:
+///
+///   --preview / --preview-window — render commands
+///   --bind / --execute / --execute-silent — action bindings
+///   --reload / --transform — re-running commands during the session
+///   --listen / --listen-unsafe — opens an HTTP RPC server that accepts
+///       `execute(cmd)` POSTs (fzf 0.41+); without these, the command-
+///       execution attack surface is closed
+///   --with-shell — picks the shell `execute(...)` uses; only meaningful
+///       when execute is bound but cheap to block for symmetry
 const BLOCKED_FZF_OPTIONS: &[&str] = &[
     "--preview",
+    "--preview-window",
     "--bind",
     "--execute",
     "--execute-silent",
     "--reload",
     "--transform",
-    "--preview-window", // can contain execute(...) action
+    "--listen",
+    "--listen-unsafe",
+    "--with-shell",
 ];
 
 /// Check if a token is a blocked fzf option (handles both `--opt` and `--opt=value` forms).
@@ -224,6 +241,12 @@ mod tests {
         assert!(is_blocked_fzf_option("--execute-silent"));
         assert!(is_blocked_fzf_option("--reload"));
         assert!(is_blocked_fzf_option("--transform"));
+        // fzf 0.41+ RPC surfaces — blocked because they accept execute() POSTs.
+        assert!(is_blocked_fzf_option("--listen"));
+        assert!(is_blocked_fzf_option("--listen=8090"));
+        assert!(is_blocked_fzf_option("--listen-unsafe"));
+        assert!(is_blocked_fzf_option("--with-shell"));
+        // Safe options pass through.
         assert!(!is_blocked_fzf_option("--ansi"));
         assert!(!is_blocked_fzf_option("--height"));
         assert!(!is_blocked_fzf_option("--cycle"));
