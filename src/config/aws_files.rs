@@ -1,4 +1,3 @@
-use configparser::ini::Ini;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -6,7 +5,7 @@ use std::path::Path;
 use crate::error::AwswitError;
 use crate::profile::Profile;
 
-/// Handles loading and parsing of AWS config and credentials files
+/// Handles loading and parsing of AWS config and credentials files.
 #[derive(Debug, Default)]
 pub struct AwsFiles {
     /// Profiles from ~/.aws/config
@@ -16,7 +15,10 @@ pub struct AwsFiles {
 }
 
 impl AwsFiles {
-    /// Load AWS config and credentials files
+    /// Load AWS config and credentials files. Missing files yield an empty
+    /// map (caller decides whether that is an error); malformed lines are
+    /// skipped with a `tracing::warn!` so a single bad section can't
+    /// disable `awswit` for the whole shell.
     pub fn load(config_path: &str, credentials_path: &str) -> Result<Self, AwswitError> {
         let config_profiles = Self::load_config_file(config_path)?;
         let credentials_profiles = Self::load_credentials_file(credentials_path)?;
@@ -27,13 +29,19 @@ impl AwsFiles {
         })
     }
 
-    /// Common INI file loader: reads sections matching `extract_profile_name`
-    /// and returns them as `Profile`s.
+    /// Hand-rolled tolerant INI loader.
+    ///
+    /// AWS config uses a tiny subset of INI: `[section]` headers, `key = value`
+    /// pairs, and `;` / `#` comments. We deliberately avoid pulling in a full
+    /// INI parser (which fails the whole file on a single malformed line) so
+    /// that a stray `[profile bad` written by another tool can't break
+    /// `awswit -l` for every shell on the system — `doctor` is the right
+    /// place to surface those, not the unconditional load path.
     ///
     /// File permissions are intentionally not validated here. Securing
     /// `~/.aws/credentials` is the responsibility of the AWS SDK / aws-vault
     /// / the user — awswit parses the file contents but only retains section
-    /// names and metadata in the returned profiles, ignoring credential keys.
+    /// names and well-known metadata keys.
     fn load_ini_file(
         path: &str,
         label: &str,
@@ -50,18 +58,12 @@ impl AwsFiles {
             message: format!("Failed to read {}: {}", path, e),
         })?;
 
-        let mut ini = Ini::new_cs();
-        ini.read(content)
-            .map_err(|e| AwswitError::ConfigFileError {
-                message: format!("Failed to parse {}: {}", path, e),
-            })?;
+        let sections = parse_tolerant(&content, label, &path);
 
         let mut profiles = HashMap::new();
-
-        for section_name in ini.sections() {
-            if let Some(profile_name) = extract_profile_name(&section_name) {
-                let profile = Self::section_to_profile(&ini, &section_name);
-                profiles.insert(profile_name, profile);
+        for (section_name, fields) in &sections {
+            if let Some(profile_name) = extract_profile_name(section_name) {
+                profiles.insert(profile_name, section_to_profile(section_name, fields));
             }
         }
 
@@ -69,64 +71,144 @@ impl AwsFiles {
         Ok(profiles)
     }
 
-    /// Load the AWS config file (~/.aws/config)
     fn load_config_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
         Self::load_ini_file(path, "Config file", |section_name| {
-            if section_name.starts_with("profile ") {
-                Some(section_name.strip_prefix("profile ").unwrap().to_string())
+            if let Some(rest) = section_name.strip_prefix("profile ") {
+                Some(rest.to_string())
             } else if section_name == "default" {
                 Some("default".to_string())
             } else {
-                None // Skip non-profile sections (like "sso-session")
+                None // sso-session, services, etc. — not profiles
             }
         })
     }
 
-    /// Load the AWS credentials file (~/.aws/credentials)
     fn load_credentials_file(path: &str) -> Result<HashMap<String, Profile>, AwswitError> {
         Self::load_ini_file(path, "Credentials file", |section_name| {
             Some(section_name.to_string())
         })
     }
 
-    /// Convert an INI section to a Profile
-    fn section_to_profile(ini: &Ini, section: &str) -> Profile {
-        let get = |key: &str| -> Option<String> { ini.get(section, key) };
-
-        Profile {
-            name: section
-                .strip_prefix("profile ")
-                .unwrap_or(section)
-                .to_string(),
-            role_arn: get("role_arn"),
-            source_profile: get("source_profile"),
-            credential_source: get("credential_source"),
-            mfa_serial: get("mfa_serial"),
-            region: get("region"),
-            // SSO fields
-            sso_start_url: get("sso_start_url"),
-            sso_region: get("sso_region"),
-            sso_account_id: get("sso_account_id"),
-            sso_role_name: get("sso_role_name"),
-        }
-    }
-
     /// Merge config and credentials profiles.
     ///
-    /// Profiles defined only in `~/.aws/credentials` are exposed by name so the
-    /// picker can list them; awswit does not read or store the actual key
-    /// material — the AWS SDK resolves credentials at runtime.
+    /// Profiles defined only in `~/.aws/credentials` are exposed by name so
+    /// the picker can list them; awswit does not read or store the actual
+    /// key material — the AWS SDK resolves credentials at runtime.
     pub fn merge_profiles(&self) -> HashMap<String, Profile> {
         let mut merged: HashMap<String, Profile> = self.config_profiles.clone();
-
         for (name, cred_profile) in &self.credentials_profiles {
             merged
                 .entry(name.clone())
                 .or_insert_with(|| cred_profile.clone());
         }
-
         merged
     }
+}
+
+/// Project an INI section's well-known keys onto a `Profile`.
+fn section_to_profile(section: &str, fields: &HashMap<String, String>) -> Profile {
+    let get = |k: &str| fields.get(k).cloned();
+    Profile {
+        name: section
+            .strip_prefix("profile ")
+            .unwrap_or(section)
+            .to_string(),
+        role_arn: get("role_arn"),
+        source_profile: get("source_profile"),
+        credential_source: get("credential_source"),
+        mfa_serial: get("mfa_serial"),
+        region: get("region"),
+        sso_start_url: get("sso_start_url"),
+        sso_region: get("sso_region"),
+        sso_account_id: get("sso_account_id"),
+        sso_role_name: get("sso_role_name"),
+    }
+}
+
+/// Parse INI-style content tolerantly: skip malformed headers and keys with
+/// a warn-level log, keep everything else.
+fn parse_tolerant(
+    content: &str,
+    label: &str,
+    path: &str,
+) -> HashMap<String, HashMap<String, String>> {
+    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut current: Option<String> = None;
+
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim_start_matches(['\t', ' ']);
+        let line = strip_comment(line);
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(name) = rest.strip_suffix(']') {
+                let name = name.trim();
+                if name.is_empty() {
+                    tracing::warn!(
+                        "{} {}:{} ignored empty section header",
+                        label,
+                        path,
+                        idx + 1
+                    );
+                    current = None;
+                } else {
+                    current = Some(name.to_string());
+                    sections.entry(name.to_string()).or_default();
+                }
+            } else {
+                tracing::warn!(
+                    "{} {}:{} ignored malformed section header: {:?}",
+                    label,
+                    path,
+                    idx + 1,
+                    raw
+                );
+                current = None;
+            }
+        } else if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            let value = line[eq + 1..].trim();
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(sec) = &current {
+                sections
+                    .entry(sec.clone())
+                    .or_default()
+                    .insert(key.to_string(), value.to_string());
+            } else {
+                tracing::warn!(
+                    "{} {}:{} key=value outside any section: {:?}",
+                    label,
+                    path,
+                    idx + 1,
+                    raw
+                );
+            }
+        } else {
+            tracing::debug!("{} {}:{} ignored line: {:?}", label, path, idx + 1, raw);
+        }
+    }
+
+    sections
+}
+
+fn strip_comment(line: &str) -> &str {
+    // AWS config supports full-line `;` and `#` comments. Inline comments
+    // are technically allowed too, but we conservatively strip only when
+    // the comment marker appears after whitespace — `key = value#nope` is
+    // an unusual but valid value.
+    let mut last = line;
+    if let Some(idx) = last.find(" ;").or_else(|| last.find(" #")) {
+        last = &last[..idx];
+    }
+    if last.starts_with(';') || last.starts_with('#') {
+        return "";
+    }
+    last
 }
 
 #[cfg(test)]
@@ -174,42 +256,126 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
     }
 
     #[test]
-    fn test_load_config() {
-        let config_file = create_temp_config();
-        let creds_file = create_temp_credentials();
-
-        let aws_files = AwsFiles::load(
-            config_file.path().to_str().unwrap(),
-            creds_file.path().to_str().unwrap(),
-        )
-        .unwrap();
-
-        assert!(aws_files.config_profiles.contains_key("dev"));
-        assert!(aws_files.config_profiles.contains_key("prod"));
-
-        let dev = &aws_files.config_profiles["dev"];
+    fn loads_well_formed_config() {
+        let cfg = create_temp_config();
+        let creds = create_temp_credentials();
+        let f =
+            AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap()).unwrap();
+        assert!(f.config_profiles.contains_key("dev"));
+        assert!(f.config_profiles.contains_key("prod"));
+        let dev = &f.config_profiles["dev"];
         assert_eq!(
-            dev.role_arn,
-            Some("arn:aws:iam::123456789012:role/DevRole".to_string())
+            dev.role_arn.as_deref(),
+            Some("arn:aws:iam::123456789012:role/DevRole")
         );
-        assert_eq!(dev.source_profile, Some("default".to_string()));
     }
 
     #[test]
-    fn test_merge_profiles() {
-        let config_file = create_temp_config();
-        let creds_file = create_temp_credentials();
+    fn merge_includes_credentials_only_profiles() {
+        let cfg = create_temp_config();
+        let creds = create_temp_credentials();
+        let merged = AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap())
+            .unwrap()
+            .merge_profiles();
+        assert!(merged.contains_key("default"));
+    }
 
-        let aws_files = AwsFiles::load(
-            config_file.path().to_str().unwrap(),
-            creds_file.path().to_str().unwrap(),
+    #[test]
+    fn missing_files_yield_empty_set() {
+        let f = AwsFiles::load("/nonexistent/foo", "/nonexistent/bar").unwrap();
+        assert!(f.config_profiles.is_empty());
+        assert!(f.credentials_profiles.is_empty());
+    }
+
+    #[test]
+    fn malformed_section_header_is_skipped_not_fatal() {
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            "[profile good]
+region = us-east-1
+
+[profile bad
+region = whatever
+
+[profile other]
+region = eu-west-1
+"
         )
         .unwrap();
+        let creds = NamedTempFile::new().unwrap();
 
-        let merged = aws_files.merge_profiles();
+        let f = AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap())
+            .expect("must not error on malformed section");
+        // Good and other should be present; the bad section's region went
+        // nowhere because no section was current when its `region =` line ran.
+        assert!(f.config_profiles.contains_key("good"));
+        assert!(f.config_profiles.contains_key("other"));
+        assert_eq!(
+            f.config_profiles["good"].region.as_deref(),
+            Some("us-east-1")
+        );
+    }
 
-        assert!(merged.contains_key("default"));
-        let default = &merged["default"];
-        assert_eq!(default.region, Some("us-east-1".to_string()));
+    #[test]
+    fn line_comments_are_stripped() {
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            "; pre-section comment
+[profile commented]
+# region = us-east-1
+region = us-east-2  ; inline
+"
+        )
+        .unwrap();
+        let creds = NamedTempFile::new().unwrap();
+        let f =
+            AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            f.config_profiles["commented"].region.as_deref(),
+            Some("us-east-2")
+        );
+    }
+
+    #[test]
+    fn sso_session_sections_are_ignored() {
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            "[sso-session corp]
+sso_start_url = https://corp.awsapps.com/start
+sso_region = us-east-1
+
+[profile dev]
+region = us-west-2
+"
+        )
+        .unwrap();
+        let creds = NamedTempFile::new().unwrap();
+        let f =
+            AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap()).unwrap();
+        assert!(f.config_profiles.contains_key("dev"));
+        assert!(!f.config_profiles.contains_key("corp"));
+        assert!(!f.config_profiles.contains_key("sso-session corp"));
+    }
+
+    #[test]
+    fn empty_section_header_is_skipped() {
+        let mut cfg = NamedTempFile::new().unwrap();
+        write!(
+            cfg,
+            "[]
+region = us-east-1
+
+[profile dev]
+region = us-west-2
+"
+        )
+        .unwrap();
+        let creds = NamedTempFile::new().unwrap();
+        let f =
+            AwsFiles::load(cfg.path().to_str().unwrap(), creds.path().to_str().unwrap()).unwrap();
+        assert!(f.config_profiles.contains_key("dev"));
     }
 }
