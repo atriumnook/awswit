@@ -78,6 +78,48 @@ pub enum Command {
         /// Shell type
         shell: clap_complete::Shell,
     },
+
+    /// Run a command with a specific profile, without modifying the parent shell.
+    ///
+    /// Example:
+    ///   awswit exec prod -- aws s3 ls
+    ///
+    /// The `--` separator is required when passing flags to the inner command,
+    /// otherwise they'll be parsed as awswit's own flags.
+    Exec {
+        /// Profile to run the command under.
+        profile: String,
+
+        /// Override the region for this invocation only.
+        #[arg(long = "region", value_name = "REGION")]
+        region: Option<String>,
+
+        /// Command and arguments to execute.
+        #[arg(last = true, required = true, value_name = "CMD")]
+        cmd: Vec<String>,
+    },
+
+    /// Show the currently active AWS profile and its details.
+    Which,
+
+    /// Audit ~/.aws/config and SSO token cache for common breakage.
+    ///
+    /// Exits non-zero when at least one error-level issue is found.
+    Doctor,
+
+    /// Print just the current profile name (for shell prompt integration).
+    ///
+    /// Example bash PS1:
+    ///   PS1='[\u@\h $(awswit prompt)] \w \$ '
+    Prompt {
+        /// Wrap output in this format string with `{}` as placeholder.
+        #[arg(long = "format", default_value = "{}")]
+        format: String,
+
+        /// Output when no profile is set.
+        #[arg(long = "default", default_value = "")]
+        default: String,
+    },
 }
 
 #[cfg(test)]
@@ -110,5 +152,36 @@ mod tests {
         let args = Args::try_parse_from(["awswit", "-l", "--json"]).unwrap();
         assert!(args.list);
         assert!(args.json);
+    }
+
+    #[test]
+    fn parses_exec_subcommand() {
+        let args =
+            Args::try_parse_from(["awswit", "exec", "prod", "--", "aws", "s3", "ls"]).unwrap();
+        match args.command {
+            Some(Command::Exec { profile, cmd, .. }) => {
+                assert_eq!(profile, "prod");
+                assert_eq!(cmd, vec!["aws".to_string(), "s3".into(), "ls".into()]);
+            }
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_requires_command() {
+        let res = Args::try_parse_from(["awswit", "exec", "prod"]);
+        assert!(res.is_err(), "exec without CMD should fail");
+    }
+
+    #[test]
+    fn parses_which_and_doctor() {
+        assert!(matches!(
+            Args::try_parse_from(["awswit", "which"]).unwrap().command,
+            Some(Command::Which)
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["awswit", "doctor"]).unwrap().command,
+            Some(Command::Doctor)
+        ));
     }
 }

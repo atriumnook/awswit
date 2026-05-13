@@ -186,3 +186,156 @@ fn aws_vault_session_emits_warning_on_stderr() {
         stderr
     );
 }
+
+#[test]
+fn unknown_profile_suggests_near_matches() {
+    let home = setup_aws_home();
+    // With fuzzy disabled, a near-miss should fall through to a hard error
+    // that surfaces "did you mean…?" candidates.
+    let output = awswit_command(&home)
+        .arg("--no-interactive")
+        .arg("dvv") // close to "dev"
+        .env("AWSWIT_NO_FUZZY", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did you mean"),
+        "expected suggestion, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("dev"),
+        "expected 'dev' in suggestions: {}",
+        stderr
+    );
+}
+
+#[test]
+fn exec_runs_command_with_profile_env() {
+    let home = setup_aws_home();
+    // Use /usr/bin/env to print the env in a portable way.
+    let output = awswit_command(&home)
+        .args(["exec", "dev", "--", "/usr/bin/env"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exec exited {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWS_PROFILE=dev"));
+    // dev profile has region us-west-2 in the test fixture.
+    assert!(stdout.contains("AWS_REGION=us-west-2"));
+}
+
+#[test]
+fn exec_propagates_exit_code() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "default", "--", "sh", "-c", "exit 42"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(42));
+}
+
+#[test]
+fn which_reports_unset_when_no_profile() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .arg("which")
+        .env_remove("AWS_PROFILE")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("(unset)"), "got: {}", stdout);
+}
+
+#[test]
+fn which_reports_current_profile() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .arg("which")
+        .env("AWS_PROFILE", "dev")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWS_PROFILE: dev"));
+    assert!(stdout.contains("type:"));
+}
+
+#[test]
+fn doctor_reports_clean_config() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home).arg("doctor").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no issues found"));
+}
+
+#[test]
+fn doctor_flags_missing_source_profile() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("config");
+    fs::write(
+        &config_path,
+        r#"[profile broken]
+role_arn = arn:aws:iam::123456789012:role/X
+source_profile = nonexistent
+"#,
+    )
+    .unwrap();
+    let creds = temp_dir.path().join("credentials");
+    fs::write(&creds, "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .arg("doctor")
+        .env("HOME", temp_dir.path())
+        .env("USERPROFILE", temp_dir.path())
+        .env("AWS_CONFIG_FILE", &config_path)
+        .env("AWS_SHARED_CREDENTIALS_FILE", &creds)
+        .env_remove("AWS_PROFILE")
+        .env_remove("AWS_VAULT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("source_profile") && stdout.contains("nonexistent"),
+        "expected source_profile error, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn prompt_outputs_format_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .args(["prompt", "--format", "(aws: {})"])
+        .env("AWS_PROFILE", "prod")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "(aws: prod)");
+}
+
+#[test]
+fn prompt_accepts_percent_s_placeholder() {
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .args(["prompt", "--format", "[%s]"])
+        .env("AWS_PROFILE", "stg")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[stg]");
+}
+
+#[test]
+fn prompt_outputs_default_when_unset() {
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .args(["prompt", "--default", "(no aws)"])
+        .env_remove("AWS_PROFILE")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "(no aws)");
+}

@@ -1,46 +1,67 @@
+//! Fuzzy profile-name matching for the non-interactive (`-n`) path.
+//!
+//! Two related operations:
+//!
+//! - [`find_closest_profile`] returns a single unambiguous best match — used
+//!   when a user typed something like `prd` and we want to "did you mean
+//!   `prod`?" with high confidence (no ties, distance under a tight bound).
+//! - [`nearest_n`] returns up to N candidates ranked by combined Levenshtein
+//!   distance / LCS — used to produce a helpful error message when no
+//!   single best match exists.
+
 use std::collections::HashMap;
 use strsim::levenshtein;
 
 use crate::profile::Profile;
 
+/// Maximum edit distance we'll silently substitute through (single best).
 const LEVENSHTEIN_MAX_DISTANCE: usize = 3;
+
+/// LCS minimum overlap (as a percentage of input length) for an unambiguous
+/// LCS-based match.
 const LCS_MIN_RATIO_PERCENT: usize = 50;
 
-/// Find the closest matching profile name using fuzzy matching
+/// Return one unambiguous best match for `input` from `profiles`, or `None`
+/// if the result is ambiguous, too far, or non-existent.
 ///
-/// Uses three methods in order:
-/// 1. Prefix matching
-/// 2. Longest common subsequence
-/// 3. Levenshtein distance
+/// Used by the non-interactive path to silently correct obvious typos.
 pub fn find_closest_profile(input: &str, profiles: &HashMap<String, Profile>) -> Option<String> {
-    let profile_names: Vec<&str> = profiles.keys().map(|s| s.as_str()).collect();
-
-    if profile_names.is_empty() {
+    let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+    if names.is_empty() {
         return None;
     }
 
-    // Try prefix matching first
-    if let Some(matched) = prefix_match(input, &profile_names) {
-        tracing::debug!("Fuzzy matched '{}' using prefix match", matched);
-        return Some(matched);
+    if let Some(m) = prefix_match(input, &names) {
+        return Some(m);
     }
-
-    // Try longest common subsequence
-    if let Some(matched) = lcs_match(input, &profile_names) {
-        tracing::debug!("Fuzzy matched '{}' using LCS", matched);
-        return Some(matched);
+    if let Some(m) = lcs_match(input, &names) {
+        return Some(m);
     }
-
-    // Try Levenshtein distance
-    if let Some(matched) = levenshtein_match(input, &profile_names) {
-        tracing::debug!("Fuzzy matched '{}' using Levenshtein", matched);
-        return Some(matched);
-    }
-
-    None
+    levenshtein_match(input, &names)
 }
 
-/// Match profiles by prefix
+/// Return up to `n` candidates from `profiles` ranked by Levenshtein
+/// distance ascending (closest first). Ties are broken alphabetically so
+/// suggestions are deterministic across runs.
+///
+/// Suitable for "Profile not found — did you mean…?" hints.
+pub fn nearest_n(input: &str, profiles: &HashMap<String, Profile>, n: usize) -> Vec<String> {
+    let input_lower = input.to_lowercase();
+    let mut scored: Vec<(usize, &str)> = profiles
+        .keys()
+        .map(|name| {
+            let lower = name.to_lowercase();
+            (levenshtein(&input_lower, &lower), name.as_str())
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(n)
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
 fn prefix_match(input: &str, profiles: &[&str]) -> Option<String> {
     let input_lower = input.to_lowercase();
     let mut matches: Vec<&str> = profiles
@@ -52,69 +73,53 @@ fn prefix_match(input: &str, profiles: &[&str]) -> Option<String> {
     if matches.len() == 1 {
         return Some(matches[0].to_string());
     }
-
-    // If multiple matches, try exact prefix match
     matches.retain(|p| p.starts_with(input));
     if matches.len() == 1 {
         return Some(matches[0].to_string());
     }
-
     None
 }
 
-/// Match profiles using longest common subsequence
 fn lcs_match(input: &str, profiles: &[&str]) -> Option<String> {
     let input_lower = input.to_lowercase();
-
-    let mut best_match: Option<(&str, usize)> = None;
-    let mut is_tie = false;
+    let mut best: Option<(&str, usize)> = None;
+    let mut tie = false;
 
     for profile in profiles {
-        let profile_lower = profile.to_lowercase();
-        let lcs_len = longest_common_subsequence(&input_lower, &profile_lower);
-
-        match &best_match {
-            None => {
-                best_match = Some((profile, lcs_len));
-            }
-            Some((_, best_len)) => {
-                if lcs_len > *best_len {
-                    best_match = Some((profile, lcs_len));
-                    is_tie = false;
-                } else if lcs_len == *best_len {
-                    is_tie = true;
+        let lcs_len = longest_common_subsequence(&input_lower, &profile.to_lowercase());
+        match &best {
+            None => best = Some((profile, lcs_len)),
+            Some((_, prev)) => {
+                if lcs_len > *prev {
+                    best = Some((profile, lcs_len));
+                    tie = false;
+                } else if lcs_len == *prev {
+                    tie = true;
                 }
             }
         }
     }
-
-    if is_tie {
+    if tie {
         return None;
     }
 
-    // Require LCS length to be at least LCS_MIN_RATIO_PERCENT% of input length.
     #[allow(clippy::manual_div_ceil)]
-    let min_lcs = (input.chars().count() * LCS_MIN_RATIO_PERCENT + 99) / 100;
-    best_match
-        .filter(|(_, lcs_len)| *lcs_len >= min_lcs)
+    let min = (input.chars().count() * LCS_MIN_RATIO_PERCENT + 99) / 100;
+    best.filter(|(_, lcs)| *lcs >= min)
         .map(|(p, _)| p.to_string())
 }
 
-/// Calculate longest common subsequence length.
-/// Uses two-row rolling array for O(n) space instead of O(m*n).
+/// O(n) space LCS length using a two-row rolling buffer.
 fn longest_common_subsequence(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-
-    let m = a_chars.len();
-    let n = b_chars.len();
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
 
     let mut prev = vec![0usize; n + 1];
     let mut curr = vec![0usize; n + 1];
-
     for i in 1..=m {
         for j in 1..=n {
-            if a_chars[i - 1] == b_chars[j - 1] {
+            if a[i - 1] == b[j - 1] {
                 curr[j] = prev[j - 1] + 1;
             } else {
                 curr[j] = prev[j].max(curr[j - 1]);
@@ -123,43 +128,32 @@ fn longest_common_subsequence(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
         curr.iter_mut().for_each(|x| *x = 0);
     }
-
     prev[n]
 }
 
-/// Match profiles using Levenshtein distance
 fn levenshtein_match(input: &str, profiles: &[&str]) -> Option<String> {
     let input_lower = input.to_lowercase();
-
-    let mut best_match: Option<(&str, usize)> = None;
-    let mut is_tie = false;
+    let mut best: Option<(&str, usize)> = None;
+    let mut tie = false;
 
     for profile in profiles {
-        let profile_lower = profile.to_lowercase();
-        let distance = levenshtein(&input_lower, &profile_lower);
-
-        match &best_match {
-            None => {
-                best_match = Some((profile, distance));
-            }
-            Some((_, best_dist)) => {
-                if distance < *best_dist {
-                    best_match = Some((profile, distance));
-                    is_tie = false;
-                } else if distance == *best_dist {
-                    is_tie = true;
+        let d = levenshtein(&input_lower, &profile.to_lowercase());
+        match &best {
+            None => best = Some((profile, d)),
+            Some((_, prev)) => {
+                if d < *prev {
+                    best = Some((profile, d));
+                    tie = false;
+                } else if d == *prev {
+                    tie = true;
                 }
             }
         }
     }
-
-    // Only accept if distance is reasonable (e.g., < 3 for small typos)
-    if is_tie {
+    if tie {
         return None;
     }
-
-    best_match
-        .filter(|(_, dist)| *dist <= LEVENSHTEIN_MAX_DISTANCE)
+    best.filter(|(_, d)| *d <= LEVENSHTEIN_MAX_DISTANCE)
         .map(|(p, _)| p.to_string())
 }
 
@@ -167,55 +161,53 @@ fn levenshtein_match(input: &str, profiles: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn create_test_profiles() -> HashMap<String, Profile> {
-        let mut profiles = HashMap::new();
-        profiles.insert("dev-admin".to_string(), Profile::default());
-        profiles.insert("dev-readonly".to_string(), Profile::default());
-        profiles.insert("prod-admin".to_string(), Profile::default());
-        profiles.insert("staging".to_string(), Profile::default());
-        profiles
+    fn profiles() -> HashMap<String, Profile> {
+        ["dev-admin", "dev-readonly", "prod-admin", "staging"]
+            .into_iter()
+            .map(|n| (n.to_string(), Profile::default()))
+            .collect()
     }
 
     #[test]
-    fn test_prefix_match() {
-        let profiles = create_test_profiles();
-
-        // Unique prefix
-        let result = find_closest_profile("stag", &profiles);
-        assert_eq!(result, Some("staging".to_string()));
-
-        // Ambiguous prefix (dev- matches multiple)
-        let result = find_closest_profile("dev", &profiles);
-        // "dev" is ambiguous prefix (matches dev-admin and dev-readonly), so no match
-        assert!(result.is_none());
+    fn unique_prefix_resolves() {
+        assert_eq!(
+            find_closest_profile("stag", &profiles()),
+            Some("staging".to_string())
+        );
     }
 
     #[test]
-    fn test_typo_match() {
-        let profiles = create_test_profiles();
-
-        // Small typo
-        let result = find_closest_profile("stagin", &profiles);
-        assert_eq!(result, Some("staging".to_string()));
-
-        // Transposition
-        let result = find_closest_profile("stagign", &profiles);
-        assert_eq!(result, Some("staging".to_string()));
+    fn ambiguous_prefix_is_none() {
+        assert!(find_closest_profile("dev", &profiles()).is_none());
     }
 
     #[test]
-    fn test_lcs() {
-        assert_eq!(longest_common_subsequence("abc", "abc"), 3);
-        assert_eq!(longest_common_subsequence("abc", "def"), 0);
-        assert_eq!(longest_common_subsequence("abc", "adc"), 2);
+    fn small_typo_resolves() {
+        assert_eq!(
+            find_closest_profile("stagin", &profiles()),
+            Some("staging".to_string())
+        );
     }
 
     #[test]
-    fn test_exact_match() {
-        let profiles = create_test_profiles();
+    fn exact_match_returns_self() {
+        assert_eq!(
+            find_closest_profile("staging", &profiles()),
+            Some("staging".to_string())
+        );
+    }
 
-        // Exact match should be preferred
-        let result = find_closest_profile("staging", &profiles);
-        assert_eq!(result, Some("staging".to_string()));
+    #[test]
+    fn nearest_n_returns_ranked_candidates() {
+        let near = nearest_n("dev", &profiles(), 3);
+        assert!(near.contains(&"dev-admin".to_string()));
+        assert!(near.contains(&"dev-readonly".to_string()));
+        assert!(near.len() <= 3);
+    }
+
+    #[test]
+    fn nearest_n_empty_input_returns_lowest_distance() {
+        let near = nearest_n("staging", &profiles(), 1);
+        assert_eq!(near, vec!["staging".to_string()]);
     }
 }

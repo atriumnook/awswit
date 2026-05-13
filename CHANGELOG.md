@@ -6,6 +6,54 @@ All notable changes to this project will be documented in this file.
 
 _Released on 2026-05-13_
 
+### Features
+
+- New subcommand `awswit exec PROFILE -- CMD ARGS` runs a command with
+  `AWS_PROFILE` (and optionally `AWS_REGION`) set in the child only,
+  without mutating the parent shell. Exit code is propagated. Records
+  the use for frecency.
+- New subcommand `awswit which` reports the active profile with its
+  region / account / role / SSO status, including SSO token expiry
+  pulled from `~/.aws/sso/cache/*.json`.
+- New subcommand `awswit doctor` audits `~/.aws/config` and the SSO
+  cache for missing `source_profile` chains, expired or absent SSO
+  tokens, malformed `mfa_serial`, and role profiles without any
+  credential source. Exits non-zero on errors.
+- New subcommand `awswit prompt --format … --default …` prints the
+  current profile (or a fallback) for shell-prompt embedding. Both
+  `{}` and `%s` work as the placeholder.
+- "Did you mean …?" suggestions on `ProfileNotFound`, ranked by
+  Levenshtein distance and filtered to candidates that plausibly
+  match the typo.
+
+### Bug fixes
+
+- **TUI: favorite toggles no longer get silently overwritten.** The
+  picker previously saved on each `*` press, then `main` re-saved a
+  stale snapshot afterwards, reverting the change. The picker now
+  returns the updated history; `main` is the single save site.
+- TUI: toggling a favorite now re-sorts the list immediately so the
+  promoted/demoted profile moves into its new position visibly. The
+  cursor follows the toggled profile.
+- TUI: handles the "no profiles configured" case with a helpful
+  empty-state hint instead of a blank panel.
+
+### TUI improvements
+
+- Standard readline-style keys: `Ctrl-A` (start of line), `Ctrl-E`
+  (end of line), `Ctrl-W` (delete word backward) in the search bar.
+- Preview pane now wraps long role ARNs and SSO start URLs, shows
+  the "last used" relative timestamp, and falls back to the SSO
+  start URL row for SSO profiles.
+
+### Shell wrapper
+
+- The init snippet now passes informational subcommands and flags
+  (`exec` / `which` / `doctor` / `prompt` / `init` / `completions` /
+  `-l` / `-h` / `-v`) through to the binary directly, so their
+  output isn't accidentally `eval`'d. Only the switch path uses
+  `--shell-export`.
+
 ### Breaking changes
 
 - `awswit` now manages only `AWS_PROFILE` and `AWS_REGION`. The legacy

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
+use std::process::{Command as ProcCommand, Stdio};
 
 use clap::Parser;
 use tracing::Level;
@@ -8,8 +9,10 @@ use tracing_subscriber::FmtSubscriber;
 use awswit::cli::{Args, Command};
 use awswit::context::AppContext;
 use awswit::error::AwswitError;
+use awswit::history::ProfileHistory;
 use awswit::profile::Profile;
 use awswit::shell::ShellExporter;
+use awswit::sso;
 use awswit::{tui, utils};
 
 fn main() {
@@ -22,7 +25,6 @@ fn main() {
     } else {
         Level::WARN
     };
-
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
@@ -31,7 +33,7 @@ fn main() {
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     match run(args) {
-        Ok(_) => {}
+        Ok(code) => std::process::exit(code),
         Err(AwswitError::UserCancelled) => std::process::exit(130),
         Err(e) => {
             eprintln!("awswit: {}", e);
@@ -40,46 +42,49 @@ fn main() {
     }
 }
 
-fn run(args: Args) -> Result<(), AwswitError> {
-    // Subcommands run without touching ~/.aws.
+fn run(args: Args) -> Result<i32, AwswitError> {
     if let Some(cmd) = args.command.clone() {
         return match cmd {
-            Command::Init { shell } => print_init_script(&shell),
-            Command::Completions { shell } => print_completions(shell),
+            Command::Init { shell } => print_init_script(&shell).map(|_| 0),
+            Command::Completions { shell } => print_completions(shell).map(|_| 0),
+            Command::Exec {
+                profile,
+                region,
+                cmd,
+            } => exec_command(args, profile, region, cmd),
+            Command::Which => which(args).map(|_| 0),
+            Command::Doctor => doctor(args),
+            Command::Prompt { format, default } => prompt(&format, &default).map(|_| 0),
         };
     }
 
     if args.version {
         println!("awswit {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return Ok(0);
     }
-
     if args.unset {
-        return emit_unset(&args);
+        return emit_unset(&args).map(|_| 0);
     }
 
     let ctx = AppContext::build(args)?;
-
     if ctx.args.list {
-        return list_profiles(&ctx.profiles, ctx.args.json);
+        return list_profiles(&ctx.profiles, ctx.args.json).map(|_| 0);
     }
+    switch_profile(ctx).map(|_| 0)
+}
 
-    // Warn loudly if we're switching profile inside an aws-vault session — the
-    // resulting env is almost certainly not what the user wants.
-    if let Ok(vault_profile) = std::env::var("AWS_VAULT") {
-        eprintln!(
-            "awswit: warning: AWS_VAULT={} is set. Changing AWS_PROFILE inside an aws-vault \
-             session can leave stale session credentials in your environment.",
-            vault_profile
-        );
-    }
+// ─────────────────────────────────────────────────────────────────────
+//   Default action: switch profile in the current shell
+// ─────────────────────────────────────────────────────────────────────
 
-    let target = resolve_target_profile(&ctx)?;
+fn switch_profile(mut ctx: AppContext) -> Result<(), AwswitError> {
+    warn_if_aws_vault();
 
-    let mut history = ctx.history;
-    history.record_use(&target);
-    if let Err(e) = awswit::history::save_history(&history) {
-        tracing::warn!("Failed to persist history: {}", e);
+    let (target, history) = resolve_target_profile(&ctx)?;
+    ctx.history = history;
+    ctx.history.record_use(&target);
+    if let Err(e) = awswit::history::save_history(&ctx.history) {
+        tracing::warn!("failed to persist history: {}", e);
     }
 
     let region = ctx
@@ -91,20 +96,27 @@ fn run(args: Args) -> Result<(), AwswitError> {
     emit_export(&target, region, &ctx.args)
 }
 
-/// Decide which profile name we are switching to.
+/// Resolve the profile to switch to, returning any history updates the user
+/// made along the way (e.g. favorite toggles inside the picker).
 ///
-/// Priority: TUI / fzf if interactive → CLI arg → `$AWS_PROFILE` →
-/// `"default"`. Names that aren't an exact match fall through to fuzzy
-/// matching, which logs a WARN noting the substitution.
-fn resolve_target_profile(ctx: &AppContext) -> Result<String, AwswitError> {
+/// The two return values are kept together so the single save site in
+/// `switch_profile` always sees the latest history — previously the picker
+/// saved on-toggle while main saved a stale snapshot afterwards, silently
+/// reverting favorite changes.
+fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), AwswitError> {
     let want_picker = ctx.args.profile_name.is_none()
         && !ctx.args.no_interactive
         && std::io::stdout().is_terminal();
 
     if want_picker {
-        return pick_profile(ctx);
+        let outcome = pick_profile(ctx)?;
+        match outcome.selected {
+            Some(name) => return Ok((name, outcome.history)),
+            None => return Err(AwswitError::UserCancelled),
+        }
     }
 
+    let history = ctx.history.clone();
     let candidate = ctx
         .args
         .profile_name
@@ -113,7 +125,7 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<String, AwswitError> {
         .unwrap_or_else(|| "default".to_string());
 
     if ctx.profiles.contains_key(&candidate) {
-        return Ok(candidate);
+        return Ok((candidate, history));
     }
 
     let allow_fuzzy = std::env::var("AWSWIT_NO_FUZZY").is_err();
@@ -124,29 +136,64 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<String, AwswitError> {
             "awswit: fuzzy-matched '{}' to '{}'. Set AWSWIT_NO_FUZZY=1 to disable.",
             candidate, matched
         );
-        return Ok(matched);
+        return Ok((matched, history));
     }
 
-    Err(AwswitError::ProfileNotFound { name: candidate })
+    Err(profile_not_found_with_hint(&candidate, &ctx.profiles))
 }
 
-fn pick_profile(ctx: &AppContext) -> Result<String, AwswitError> {
+/// Build a ProfileNotFound error whose message includes up to three
+/// candidate suggestions, ranked by Levenshtein distance.
+fn profile_not_found_with_hint(name: &str, profiles: &HashMap<String, Profile>) -> AwswitError {
+    let suggestions = utils::fuzzy::nearest_n(name, profiles, 3);
+    let suggested = suggestions
+        .into_iter()
+        // Filter out anything far from the input (heuristic: more than half
+        // the input's length in edit distance is almost certainly noise).
+        .filter(|s| {
+            strsim::levenshtein(&name.to_lowercase(), &s.to_lowercase())
+                <= name.len().max(s.len()).div_ceil(2)
+        })
+        .collect::<Vec<_>>();
+
+    let hint = if suggested.is_empty() {
+        String::new()
+    } else {
+        format!(" — did you mean: {}?", suggested.join(", "))
+    };
+
+    AwswitError::ProfileNotFound {
+        name: format!("{}{}", name, hint),
+    }
+}
+
+fn pick_profile(ctx: &AppContext) -> Result<tui::picker::PickerOutcome, AwswitError> {
     let use_fzf = ctx.args.use_fzf
         || std::env::var("AWSWIT_USE_FZF")
             .map(|v| tui::fzf::is_truthy(&v))
             .unwrap_or(false);
 
     if use_fzf {
-        return tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history);
+        let name = tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history)?;
+        return Ok(tui::picker::PickerOutcome {
+            selected: Some(name),
+            history: ctx.history.clone(),
+        });
     }
 
     let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
-    match picker.run() {
-        Ok(tui::picker::PickerResult::Selected(name)) => Ok(name),
-        Ok(tui::picker::PickerResult::Cancelled) => Err(AwswitError::UserCancelled),
-        Err(e) => Err(AwswitError::ShellError {
-            message: format!("Picker error: {}", e),
-        }),
+    picker.run().map_err(|e| AwswitError::ShellError {
+        message: format!("Picker error: {}", e),
+    })
+}
+
+fn warn_if_aws_vault() {
+    if let Ok(vault_profile) = std::env::var("AWS_VAULT") {
+        eprintln!(
+            "awswit: warning: AWS_VAULT={} is set. Changing AWS_PROFILE inside an aws-vault \
+             session can leave stale session credentials in your environment.",
+            vault_profile
+        );
     }
 }
 
@@ -155,10 +202,8 @@ fn emit_export(profile: &str, region: Option<&str>, args: &Args) -> Result<(), A
     let payload = exporter.export(profile, region)?;
 
     if args.shell_export {
-        // eval-mode: payload on stdout, nothing else.
         io::stdout().write_all(payload.as_bytes())?;
     } else {
-        // Direct-invocation mode: show the user what would happen.
         eprintln!("awswit: switched to {}", profile);
         if let Some(r) = region {
             eprintln!("awswit: region {}", r);
@@ -177,6 +222,10 @@ fn emit_unset(args: &Args) -> Result<(), AwswitError> {
     io::stdout().write_all(payload.as_bytes())?;
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit -l` / `awswit -l --json`
+// ─────────────────────────────────────────────────────────────────────
 
 fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), AwswitError> {
     let mut names: Vec<&String> = profiles.keys().collect();
@@ -205,7 +254,6 @@ fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), 
     }
 
     if !out.is_terminal() {
-        // Tab-separated, no headers — easy for awk/cut.
         for name in &names {
             let p = &profiles[*name];
             writeln!(
@@ -224,7 +272,6 @@ fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), 
         return Ok(());
     }
 
-    // Pretty table.
     let name_width = names.iter().map(|n| n.len()).max().unwrap_or(7).max(7);
     writeln!(
         out,
@@ -253,6 +300,306 @@ fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), 
     }
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit exec PROFILE -- CMD ARGS...`
+// ─────────────────────────────────────────────────────────────────────
+
+fn exec_command(
+    mut args: Args,
+    profile: String,
+    region_override: Option<String>,
+    cmd: Vec<String>,
+) -> Result<i32, AwswitError> {
+    if cmd.is_empty() {
+        return Err(AwswitError::ShellError {
+            message: "exec requires a command after `--`".into(),
+        });
+    }
+    // Build ctx without a TUI ever firing.
+    args.no_interactive = true;
+    args.profile_name = Some(profile.clone());
+    let ctx = AppContext::build(args)?;
+
+    if !ctx.profiles.contains_key(&profile) {
+        return Err(profile_not_found_with_hint(&profile, &ctx.profiles));
+    }
+
+    let region =
+        region_override.or_else(|| ctx.profiles.get(&profile).and_then(|p| p.region.clone()));
+
+    let mut child = ProcCommand::new(&cmd[0]);
+    child.args(&cmd[1..]);
+    child.env("AWS_PROFILE", &profile);
+    child.env_remove("AWS_DEFAULT_PROFILE");
+    if let Some(r) = &region {
+        child.env("AWS_REGION", r);
+    } else {
+        child.env_remove("AWS_REGION");
+    }
+    child.env_remove("AWS_DEFAULT_REGION");
+
+    child.stdin(Stdio::inherit());
+    child.stdout(Stdio::inherit());
+    child.stderr(Stdio::inherit());
+
+    let status = child
+        .spawn()
+        .map_err(|e| AwswitError::ShellError {
+            message: format!("failed to spawn `{}`: {}", cmd[0], e),
+        })?
+        .wait()
+        .map_err(|e| AwswitError::ShellError {
+            message: format!("wait failed for `{}`: {}", cmd[0], e),
+        })?;
+
+    // Record the use so frecency reflects it.
+    let mut history = awswit::history::load_history().unwrap_or_default();
+    history.record_use(&profile);
+    let _ = awswit::history::save_history(&history);
+
+    Ok(status.code().unwrap_or(1))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit which`
+// ─────────────────────────────────────────────────────────────────────
+
+fn which(args: Args) -> Result<(), AwswitError> {
+    let current = std::env::var("AWS_PROFILE").ok();
+    let region_env = std::env::var("AWS_REGION").ok();
+    let vault = std::env::var("AWS_VAULT").ok();
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    let Some(profile_name) = current else {
+        writeln!(out, "AWS_PROFILE: (unset)")?;
+        return Ok(());
+    };
+
+    writeln!(out, "AWS_PROFILE: {}", profile_name)?;
+    if let Some(r) = &region_env {
+        writeln!(out, "AWS_REGION:  {}", r)?;
+    }
+    if let Some(v) = &vault {
+        writeln!(out, "AWS_VAULT:   {} (running inside aws-vault session)", v)?;
+    }
+
+    // Load profile config and annotate.
+    let ctx = match AppContext::build(args) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("which: skipping config lookup: {}", e);
+            return Ok(());
+        }
+    };
+
+    let Some(profile) = ctx.profiles.get(&profile_name) else {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "warning: profile '{}' is not defined in ~/.aws/config",
+            profile_name
+        )?;
+        return Ok(());
+    };
+
+    writeln!(out)?;
+    writeln!(out, "type:        {}", classify(profile))?;
+    if let Some(r) = &profile.region {
+        writeln!(out, "region:      {}", r)?;
+    }
+    if let Some(a) = profile.get_account_id() {
+        writeln!(out, "account:     {}", a)?;
+    }
+    if let Some(arn) = &profile.role_arn {
+        writeln!(out, "role:        {}", arn)?;
+    }
+    if let Some(src) = &profile.source_profile {
+        writeln!(out, "source:      {}", src)?;
+    }
+    if let Some(start) = &profile.sso_start_url {
+        writeln!(out, "sso_start:   {}", start)?;
+        // Check SSO token expiry.
+        let sessions = sso::load_sessions();
+        match sso::find_session(&sessions, start, profile.sso_region.as_deref()) {
+            Some(s) if !s.is_expired(chrono::Utc::now()) => {
+                writeln!(
+                    out,
+                    "sso_token:   valid until {}",
+                    s.expires_at.format("%Y-%m-%d %H:%M UTC")
+                )?;
+            }
+            Some(_) => {
+                writeln!(
+                    out,
+                    "sso_token:   EXPIRED — run `aws sso login --profile {}`",
+                    profile_name
+                )?;
+            }
+            None => {
+                writeln!(
+                    out,
+                    "sso_token:   not cached — run `aws sso login --profile {}`",
+                    profile_name
+                )?;
+            }
+        }
+    }
+    if profile.mfa_serial.is_some() {
+        writeln!(out, "mfa:         required")?;
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit doctor`
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagLevel {
+    Error,
+    Warning,
+    Info,
+}
+
+struct Diagnostic {
+    level: DiagLevel,
+    profile: Option<String>,
+    message: String,
+}
+
+fn doctor(args: Args) -> Result<i32, AwswitError> {
+    let ctx = AppContext::build(args)?;
+    let now = chrono::Utc::now();
+    let sso_sessions = sso::load_sessions();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    if ctx.profiles.is_empty() {
+        diags.push(Diagnostic {
+            level: DiagLevel::Warning,
+            profile: None,
+            message: "no profiles found in ~/.aws/config".into(),
+        });
+    }
+
+    for (name, p) in &ctx.profiles {
+        // Source-profile chain must resolve.
+        if let Some(src) = &p.source_profile
+            && !ctx.profiles.contains_key(src)
+        {
+            diags.push(Diagnostic {
+                level: DiagLevel::Error,
+                profile: Some(name.clone()),
+                message: format!(
+                    "source_profile = '{}' references a profile that does not exist",
+                    src
+                ),
+            });
+        }
+
+        // Role profile should have either source_profile or credential_source.
+        if p.role_arn.is_some() && p.source_profile.is_none() && p.credential_source.is_none() {
+            diags.push(Diagnostic {
+                level: DiagLevel::Warning,
+                profile: Some(name.clone()),
+                message: "role profile has neither source_profile nor credential_source".into(),
+            });
+        }
+
+        // MFA serial should look like an ARN.
+        if let Some(mfa) = &p.mfa_serial
+            && !mfa.starts_with("arn:")
+        {
+            diags.push(Diagnostic {
+                level: DiagLevel::Warning,
+                profile: Some(name.clone()),
+                message: format!("mfa_serial = '{}' does not look like an IAM MFA ARN", mfa),
+            });
+        }
+
+        // SSO profiles need an unexpired cached token.
+        if let Some(start) = &p.sso_start_url {
+            match sso::find_session(&sso_sessions, start, p.sso_region.as_deref()) {
+                None => diags.push(Diagnostic {
+                    level: DiagLevel::Warning,
+                    profile: Some(name.clone()),
+                    message: format!(
+                        "no SSO token cached — run `aws sso login --profile {}`",
+                        name
+                    ),
+                }),
+                Some(s) if s.is_expired(now) => diags.push(Diagnostic {
+                    level: DiagLevel::Error,
+                    profile: Some(name.clone()),
+                    message: format!(
+                        "SSO token expired at {} — run `aws sso login --profile {}`",
+                        s.expires_at.format("%Y-%m-%d %H:%M UTC"),
+                        name
+                    ),
+                }),
+                _ => {}
+            }
+        }
+    }
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    if diags.is_empty() {
+        writeln!(
+            out,
+            "awswit doctor: no issues found ({} profiles)",
+            ctx.profiles.len()
+        )?;
+        return Ok(0);
+    }
+
+    diags.sort_by_key(|d| (d.level == DiagLevel::Info, d.level == DiagLevel::Warning));
+    let mut errors = 0;
+    for d in &diags {
+        let tag = match d.level {
+            DiagLevel::Error => {
+                errors += 1;
+                "ERROR"
+            }
+            DiagLevel::Warning => "warn ",
+            DiagLevel::Info => "info ",
+        };
+        match &d.profile {
+            Some(p) => writeln!(out, "{} [{}] {}", tag, p, d.message)?,
+            None => writeln!(out, "{}        {}", tag, d.message)?,
+        }
+    }
+
+    writeln!(
+        out,
+        "\nawswit doctor: {} error(s), {} warning(s)",
+        errors,
+        diags.len() - errors
+    )?;
+    Ok(if errors > 0 { 1 } else { 0 })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit prompt`
+// ─────────────────────────────────────────────────────────────────────
+
+fn prompt(format: &str, default: &str) -> Result<(), AwswitError> {
+    let current = std::env::var("AWS_PROFILE").ok();
+    let out = match current {
+        Some(name) if !name.is_empty() => format.replace("{}", &name).replace("%s", &name),
+        _ => default.to_string(),
+    };
+    print!("{}", out);
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   Helpers
+// ─────────────────────────────────────────────────────────────────────
 
 fn classify(p: &Profile) -> &'static str {
     if p.is_sso_profile() {

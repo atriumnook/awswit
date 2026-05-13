@@ -12,7 +12,7 @@ use nucleo_matcher::{Config, Matcher};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -23,13 +23,18 @@ use super::theme::Theme;
 use crate::history::ProfileHistory;
 use crate::profile::Profile;
 
-/// Result of profile picker
-pub enum PickerResult {
-    Selected(String),
-    Cancelled,
+/// What the picker returns to the caller. The caller is responsible for
+/// persisting `history` after the picker exits — the picker never writes
+/// to disk on its own.
+pub struct PickerOutcome {
+    /// `None` when the user cancelled.
+    pub selected: Option<String>,
+    /// History updated with any favorite toggles performed in the picker.
+    pub history: ProfileHistory,
 }
 
-/// Profile entry with match score
+/// One profile rendered in the list, with its history-derived metadata
+/// frozen for the lifetime of the picker session.
 #[derive(Clone)]
 struct ProfileEntry {
     name: String,
@@ -38,7 +43,6 @@ struct ProfileEntry {
     last_used: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Interactive profile picker with fuzzy search
 pub struct ProfilePicker<'a> {
     profiles: &'a HashMap<String, Profile>,
     history: ProfileHistory,
@@ -59,29 +63,24 @@ impl<'a> ProfilePicker<'a> {
         self
     }
 
-    /// Run the interactive picker
-    pub fn run(self) -> io::Result<PickerResult> {
+    pub fn run(self) -> io::Result<PickerOutcome> {
         enable_raw_mode()?;
-        // From here on, disable_raw_mode() must run even if run_inner fails.
         let result = self.run_inner();
         let _ = disable_raw_mode();
         result
     }
 
-    fn run_inner(self) -> io::Result<PickerResult> {
+    fn run_inner(self) -> io::Result<PickerOutcome> {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // Create app state
         let mut app = PickerApp::new(self.profiles, self.history, self.theme);
 
-        // Run event loop, ensuring terminal cleanup even on panic
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
 
-        // Restore terminal — always runs regardless of panic or error
         let _ = execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
@@ -89,10 +88,11 @@ impl<'a> ProfilePicker<'a> {
         );
         let _ = terminal.show_cursor();
 
-        match result {
-            Ok(inner) => inner,
+        let outcome = match result {
+            Ok(inner) => inner?,
             Err(panic_payload) => std::panic::resume_unwind(panic_payload),
-        }
+        };
+        Ok(outcome)
     }
 }
 
@@ -109,148 +109,172 @@ struct PickerApp {
 
 impl PickerApp {
     fn new(profiles: &HashMap<String, Profile>, history: ProfileHistory, theme: Theme) -> Self {
-        let mut entries: Vec<ProfileEntry> = profiles
-            .iter()
-            .map(|(name, profile)| {
-                let history_entry = history.get(name);
-                ProfileEntry {
-                    name: name.clone(),
-                    profile: profile.clone(),
-                    is_favorite: history.is_favorite(name),
-                    last_used: history_entry.map(|h| h.last_used),
-                }
-            })
-            .collect();
-
-        // Sort: favorites first, then by frecency descending, then alphabetically
-        let now = chrono::Utc::now();
-        entries.sort_by(|a, b| history.compare_by_frecency(&a.name, &b.name, now));
-
-        let filtered: Vec<usize> = (0..entries.len()).collect();
-
-        let mut list_state = ListState::default();
-        if !filtered.is_empty() {
-            list_state.select(Some(0));
-        }
-
-        Self {
-            entries,
-            filtered,
+        let mut app = Self {
+            entries: Vec::new(),
+            filtered: Vec::new(),
             query: String::new(),
-            list_state,
+            list_state: ListState::default(),
             theme,
             history,
             cursor_pos: 0,
             show_preview: true,
+        };
+        app.rebuild_entries(profiles);
+        app
+    }
+
+    /// (Re)compute the entries vec and the initial sort.
+    fn rebuild_entries(&mut self, profiles: &HashMap<String, Profile>) {
+        self.entries = profiles
+            .iter()
+            .map(|(name, profile)| ProfileEntry {
+                name: name.clone(),
+                profile: profile.clone(),
+                is_favorite: self.history.is_favorite(name),
+                last_used: self.history.get(name).map(|h| h.last_used),
+            })
+            .collect();
+
+        let now = chrono::Utc::now();
+        self.entries
+            .sort_by(|a, b| self.history.compare_by_frecency(&a.name, &b.name, now));
+
+        self.filtered = (0..self.entries.len()).collect();
+        if !self.filtered.is_empty() {
+            self.list_state.select(Some(0));
         }
     }
 
     fn run(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> io::Result<PickerResult> {
+    ) -> io::Result<PickerOutcome> {
         loop {
             terminal.draw(|f| self.render(f))?;
 
-            // Poll for events with timeout
-            if event::poll(Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-            {
-                match key.code {
-                    // Navigation
-                    KeyCode::Up => self.move_selection(-1),
-                    KeyCode::Down => self.move_selection(1),
-                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.move_selection(-1);
-                    }
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.move_selection(1);
-                    }
-                    KeyCode::PageUp => self.move_selection(-10),
-                    KeyCode::PageDown => self.move_selection(10),
-                    KeyCode::Home => self.move_to_start(),
-                    KeyCode::End => self.move_to_end(),
+            if !event::poll(Duration::from_millis(100))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
 
-                    // Selection
-                    KeyCode::Enter => {
-                        if let Some(selected) = self.get_selected_profile() {
-                            return Ok(PickerResult::Selected(selected.name.clone()));
-                        }
-                    }
-
-                    // Toggle favorite
-                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.toggle_favorite();
-                    }
-                    KeyCode::Char('*') => {
-                        self.toggle_favorite();
-                    }
-
-                    // Toggle preview
-                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.show_preview = !self.show_preview;
-                    }
-
-                    // Cancel
-                    KeyCode::Esc => {
-                        return Ok(PickerResult::Cancelled);
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(PickerResult::Cancelled);
-                    }
-
-                    // Clear query
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.query.clear();
-                        self.cursor_pos = 0;
-                        self.update_filter();
-                    }
-
-                    // Query editing
-                    KeyCode::Char(c) => {
-                        self.query.insert(self.cursor_pos, c);
-                        self.cursor_pos += c.len_utf8();
-                        self.update_filter();
-                    }
-                    KeyCode::Backspace if self.cursor_pos > 0 => {
-                        let prev = self.query[..self.cursor_pos]
-                            .char_indices()
-                            .next_back()
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(0);
-                        self.query.remove(prev);
-                        self.cursor_pos = prev;
-                        self.update_filter();
-                    }
-                    KeyCode::Delete if self.cursor_pos < self.query.len() => {
-                        self.query.remove(self.cursor_pos);
-                        self.update_filter();
-                    }
-                    KeyCode::Left if self.cursor_pos > 0 => {
-                        self.cursor_pos = self.query[..self.cursor_pos]
-                            .char_indices()
-                            .next_back()
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(0);
-                    }
-                    KeyCode::Right if self.cursor_pos < self.query.len() => {
-                        self.cursor_pos = self.query[self.cursor_pos..]
-                            .char_indices()
-                            .nth(1)
-                            .map(|(idx, _)| self.cursor_pos + idx)
-                            .unwrap_or(self.query.len());
-                    }
-
-                    _ => {}
+            match key.code {
+                // ── navigation ───────────────────────────────────────────
+                KeyCode::Up => self.move_selection(-1),
+                KeyCode::Down => self.move_selection(1),
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.move_selection(-1);
                 }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.move_selection(1);
+                }
+                KeyCode::PageUp => self.move_selection(-10),
+                KeyCode::PageDown => self.move_selection(10),
+                KeyCode::Home => self.move_to_start(),
+                KeyCode::End => self.move_to_end(),
+
+                // ── selection / cancel ───────────────────────────────────
+                KeyCode::Enter => {
+                    let selected = self.get_selected_profile().map(|e| e.name.clone());
+                    if let Some(name) = selected {
+                        return Ok(PickerOutcome {
+                            selected: Some(name),
+                            history: std::mem::take(&mut self.history),
+                        });
+                    }
+                }
+                KeyCode::Esc => return Ok(self.cancel()),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(self.cancel());
+                }
+
+                // ── favorites / preview toggle ───────────────────────────
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.toggle_favorite();
+                }
+                KeyCode::Char('*') => self.toggle_favorite(),
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.show_preview = !self.show_preview;
+                }
+
+                // ── readline-style line editing ──────────────────────────
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.cursor_pos = 0;
+                }
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.cursor_pos = self.query.len();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.query.clear();
+                    self.cursor_pos = 0;
+                    self.update_filter();
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.delete_word_backward();
+                    self.update_filter();
+                }
+
+                // ── query editing ────────────────────────────────────────
+                KeyCode::Char(c) => {
+                    self.query.insert(self.cursor_pos, c);
+                    self.cursor_pos += c.len_utf8();
+                    self.update_filter();
+                }
+                KeyCode::Backspace if self.cursor_pos > 0 => {
+                    let prev = self.query[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    self.query.remove(prev);
+                    self.cursor_pos = prev;
+                    self.update_filter();
+                }
+                KeyCode::Delete if self.cursor_pos < self.query.len() => {
+                    self.query.remove(self.cursor_pos);
+                    self.update_filter();
+                }
+                KeyCode::Left if self.cursor_pos > 0 => {
+                    self.cursor_pos = self.query[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                }
+                KeyCode::Right if self.cursor_pos < self.query.len() => {
+                    self.cursor_pos = self.query[self.cursor_pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(idx, _)| self.cursor_pos + idx)
+                        .unwrap_or(self.query.len());
+                }
+                _ => {}
             }
         }
     }
 
+    fn cancel(&mut self) -> PickerOutcome {
+        PickerOutcome {
+            selected: None,
+            history: std::mem::take(&mut self.history),
+        }
+    }
+
+    fn delete_word_backward(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let before = &self.query[..self.cursor_pos];
+        // Skip trailing whitespace, then non-whitespace.
+        let trimmed = before.trim_end();
+        let after_ws = trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        self.query.drain(after_ws..self.cursor_pos);
+        self.cursor_pos = after_ws;
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let size = frame.size();
-
-        // Main layout
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -274,7 +298,6 @@ impl PickerApp {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Search icon and query
         let (before_cursor, after_cursor) = self.query.split_at(self.cursor_pos);
         let search_line = Line::from(vec![
             Span::styled(
@@ -285,31 +308,56 @@ impl PickerApp {
             Span::styled("│", Style::default().fg(self.theme.accent)),
             Span::raw(after_cursor.to_string()),
         ]);
+        frame.render_widget(Paragraph::new(search_line), inner);
 
-        let search_widget = Paragraph::new(search_line);
-        frame.render_widget(search_widget, inner);
-
-        // Show match count
         let count_text = format!(" {}/{} ", self.filtered.len(), self.entries.len());
         let count_x = area.right().saturating_sub(count_text.len() as u16 + 2);
         let count_area = Rect::new(count_x, area.y, count_text.len() as u16 + 2, 1);
-
-        let count_widget = Paragraph::new(Span::styled(count_text, self.theme.muted_style()));
-        frame.render_widget(count_widget, count_area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(count_text, self.theme.muted_style())),
+            count_area,
+        );
     }
 
     fn render_main_area(&mut self, frame: &mut Frame, area: Rect) {
+        if self.entries.is_empty() {
+            self.render_empty(frame, area);
+            return;
+        }
         if self.show_preview && area.width > 80 {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-
             self.render_list(frame, chunks[0]);
             self.render_preview(frame, chunks[1]);
         } else {
             self.render_list(frame, area);
         }
+    }
+
+    fn render_empty(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.muted))
+            .title(" Profiles ");
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "No AWS profiles found.",
+                self.theme.warning_style(),
+            )),
+            Line::from(""),
+            Line::from(Span::raw("Create one in ~/.aws/config, for example:")),
+            Line::from(""),
+            Line::from(Span::raw("    [profile dev]")),
+            Line::from(Span::raw("    region = us-east-1")),
+            Line::from(""),
+            Line::from(Span::raw("then re-run awswit.")),
+        ])
+        .block(block)
+        .alignment(Alignment::Left);
+        frame.render_widget(msg, area);
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -331,7 +379,6 @@ impl PickerApp {
             .block(block)
             .highlight_style(self.theme.selected_style())
             .highlight_symbol("▶ ");
-
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -364,29 +411,35 @@ impl PickerApp {
     }
 
     fn render_preview(&self, frame: &mut Frame, area: Rect) {
-        if let Some(entry) = self.get_selected_profile() {
-            let preview = super::preview::ProfilePreview::new(&entry.profile, &self.theme);
-            preview.render(frame, area);
-        } else {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.theme.muted))
-                .title(" Preview ");
-
-            let paragraph = Paragraph::new("No profile selected")
-                .block(block)
-                .style(self.theme.muted_style());
-
-            frame.render_widget(paragraph, area);
+        match self.get_selected_profile() {
+            Some(entry) => {
+                let preview = super::preview::ProfilePreview::new(
+                    &entry.profile,
+                    entry.last_used,
+                    &self.theme,
+                );
+                preview.render(frame, area);
+            }
+            None => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.muted))
+                    .title(" Preview ");
+                let paragraph = Paragraph::new("No profile selected")
+                    .block(block)
+                    .style(self.theme.muted_style());
+                frame.render_widget(paragraph, area);
+            }
         }
     }
 
     fn render_help_bar(&self, frame: &mut Frame, area: Rect) {
-        let help_items = vec![
+        let help_items = [
             ("↑↓", "navigate"),
             ("⏎", "select"),
             ("★", "favorite"),
             ("^P", "preview"),
+            ("^A/^E/^W", "edit"),
             ("Esc", "cancel"),
         ];
 
@@ -406,9 +459,7 @@ impl PickerApp {
             })
             .collect();
 
-        let help_line = Line::from(help_spans);
-        let help_widget = Paragraph::new(help_line);
-        frame.render_widget(help_widget, area);
+        frame.render_widget(Paragraph::new(Line::from(help_spans)), area);
     }
 
     fn update_filter(&mut self) {
@@ -432,14 +483,10 @@ impl PickerApp {
                     scored.push((idx, s));
                 }
             }
-
-            // Sort: fuzzy score desc, then favorite, then history, then name asc
             scored.sort_by(|a, b| Self::compare_scored_entries(&self.entries, a, b));
-
-            self.filtered = scored.iter().map(|(idx, _)| *idx).collect();
+            self.filtered = scored.into_iter().map(|(idx, _)| idx).collect();
         }
 
-        // Reset selection to first item
         if !self.filtered.is_empty() {
             self.list_state.select(Some(0));
         } else {
@@ -457,7 +504,7 @@ impl PickerApp {
         b.1.cmp(&a.1)
             .then_with(|| eb.is_favorite.cmp(&ea.is_favorite))
             .then_with(|| match (&ea.last_used, &eb.last_used) {
-                (Some(a_time), Some(b_time)) => b_time.cmp(a_time),
+                (Some(at), Some(bt)) => bt.cmp(at),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
@@ -469,16 +516,13 @@ impl PickerApp {
         if self.filtered.is_empty() {
             return;
         }
-
         let current = self.list_state.selected().unwrap_or(0);
         let len = self.filtered.len();
-
         let new_idx = if delta < 0 {
             current.saturating_sub((-delta) as usize)
         } else {
             (current + delta as usize).min(len - 1)
         };
-
         self.list_state.select(Some(new_idx));
     }
 
@@ -501,19 +545,35 @@ impl PickerApp {
             .map(|&entry_idx| &self.entries[entry_idx])
     }
 
+    /// Flip the favorite flag on the currently selected entry, then re-sort
+    /// so the visual position reflects the new ranking immediately. History
+    /// is mutated in place; persistence happens once after the picker exits.
     fn toggle_favorite(&mut self) {
-        if let Some(selected) = self.list_state.selected()
-            && let Some(&entry_idx) = self.filtered.get(selected)
-        {
-            let entry = &mut self.entries[entry_idx];
-            entry.is_favorite = !entry.is_favorite;
+        let Some(selected) = self.list_state.selected() else {
+            return;
+        };
+        let Some(&entry_idx) = self.filtered.get(selected) else {
+            return;
+        };
+        let target_name = self.entries[entry_idx].name.clone();
+        let new_state = !self.entries[entry_idx].is_favorite;
 
-            // Update history
-            self.history.set_favorite(&entry.name, entry.is_favorite);
-            if let Err(e) = crate::history::save_history(&self.history) {
-                tracing::warn!("Failed to save history: {}", e);
-                eprintln!("Warning: Failed to save history: {}", e);
-            }
+        self.entries[entry_idx].is_favorite = new_state;
+        self.history.set_favorite(&target_name, new_state);
+
+        // Re-sort entries and recompute `filtered` to match the new ranking,
+        // keeping the same profile under the cursor if possible.
+        let now = chrono::Utc::now();
+        self.entries
+            .sort_by(|a, b| self.history.compare_by_frecency(&a.name, &b.name, now));
+        self.update_filter();
+        // Try to keep the toggled profile selected.
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .position(|&i| self.entries[i].name == target_name)
+        {
+            self.list_state.select(Some(pos));
         }
     }
 }
@@ -541,10 +601,8 @@ mod tests {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
         assert_eq!(app.list_state.selected(), Some(0));
-
         app.move_selection(1);
         assert_eq!(app.list_state.selected(), Some(1));
-
         app.move_selection(-1);
         assert_eq!(app.list_state.selected(), Some(0));
     }
@@ -553,12 +611,8 @@ mod tests {
     fn move_selection_clamps_at_boundaries() {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
-
-        // Already at 0, moving up should stay at 0
         app.move_selection(-1);
         assert_eq!(app.list_state.selected(), Some(0));
-
-        // Move past the end
         app.move_selection(100);
         assert_eq!(app.list_state.selected(), Some(app.filtered.len() - 1));
     }
@@ -567,7 +621,6 @@ mod tests {
     fn move_selection_empty_list() {
         let profiles = HashMap::new();
         let mut app = make_app(&profiles);
-        // Should not panic
         app.move_selection(1);
         app.move_selection(-1);
         assert!(app.list_state.selected().is_none());
@@ -578,7 +631,6 @@ mod tests {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
         assert_eq!(app.filtered.len(), 3);
-
         app.query = "alp".to_string();
         app.update_filter();
         assert_eq!(app.filtered.len(), 1);
@@ -590,52 +642,58 @@ mod tests {
     fn update_filter_empty_query_restores_all() {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
-
         app.query = "alp".to_string();
         app.update_filter();
         assert_eq!(app.filtered.len(), 1);
-
         app.query.clear();
         app.update_filter();
         assert_eq!(app.filtered.len(), 3);
     }
 
     #[test]
-    fn toggle_favorite_via_history() {
+    fn toggle_favorite_promotes_to_top_and_persists_in_history() {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
+        app.list_state.select(Some(2)); // "gamma" by alphabetical
+        let target = app.entries[app.filtered[2]].name.clone();
 
-        let name = app.get_selected_profile().unwrap().name.clone();
-        assert!(!app.history.is_favorite(&name));
+        app.toggle_favorite();
 
-        let entry_idx = app.filtered[0];
-        app.entries[entry_idx].is_favorite = true;
-        app.history.set_favorite(&app.entries[entry_idx].name, true);
-        assert!(app.history.is_favorite(&name));
+        assert!(app.history.is_favorite(&target));
+        // After toggle, the favorited entry should be at the top.
+        assert_eq!(app.entries[app.filtered[0]].name, target);
+        // And the cursor should follow it.
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
 
-        app.entries[entry_idx].is_favorite = false;
-        app.history
-            .set_favorite(&app.entries[entry_idx].name, false);
-        assert!(!app.history.is_favorite(&name));
+    #[test]
+    fn delete_word_backward_strips_to_previous_whitespace() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        app.query = "hello world foo".to_string();
+        app.cursor_pos = app.query.len();
+        app.delete_word_backward();
+        assert_eq!(app.query, "hello world ");
+        assert_eq!(app.cursor_pos, app.query.len());
+    }
+
+    #[test]
+    fn delete_word_backward_noop_at_start() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        app.delete_word_backward();
+        assert_eq!(app.query, "");
+        assert_eq!(app.cursor_pos, 0);
     }
 
     #[test]
     fn move_to_start_and_end() {
         let profiles = test_profiles();
         let mut app = make_app(&profiles);
-
         app.move_to_end();
         assert_eq!(app.list_state.selected(), Some(app.filtered.len() - 1));
-
         app.move_to_start();
         assert_eq!(app.list_state.selected(), Some(0));
-    }
-
-    #[test]
-    fn get_selected_profile_none_when_empty() {
-        let profiles = HashMap::new();
-        let app = make_app(&profiles);
-        assert!(app.get_selected_profile().is_none());
     }
 
     #[test]
