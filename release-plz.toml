@@ -3,7 +3,46 @@
 publish = false
 # Let dist (cargo-dist) create the GitHub Release; release-plz only creates the tag.
 git_release_enable = false
-# Use keep-a-changelog format (default).
-changelog_update = true
 # Push the tag so dist's release workflow runs.
 git_tag_enable = true
+# Update CHANGELOG.md from conventional commits.
+changelog_update = true
+
+# Custom changelog template.
+# - Heading is `## v0.0.X` (no date, no markdown link), so cargo-dist parses
+#   the GitHub Release title as "v0.0.X" — matching ripgrep / fzf / eza / bat
+#   conventions.
+# - Release date moves to the body as `_Released on YYYY-MM-DD_`.
+[changelog]
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+"""
+body = """
+## v{{ version | trim_start_matches(pat="v") }}
+
+{% if timestamp -%}
+_Released on {{ timestamp | date(format="%Y-%m-%d") }}_
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{{ commit.message | upper_first }}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+commit_parsers = [
+    { message = "^feat[(:!]", group = "Features" },
+    { message = "^fix[(:!]", group = "Bug Fixes" },
+    { message = "^perf[(:!]", group = "Performance" },
+    { message = "^refactor[(:!]", group = "Refactor" },
+    { message = "^docs?[(:!]", group = "Documentation" },
+    { message = "^test[(:!]", group = "Tests" },
+    { message = "^ci[(:!]", group = "CI" },
+    { message = "^chore\\(release\\):", skip = true },
+    { message = "^chore[(:!]", group = "Miscellaneous" },
+    { message = "^review[(:!]", skip = true },
+    { message = "^Merge ", skip = true },
+]
