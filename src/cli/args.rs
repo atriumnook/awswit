@@ -70,9 +70,11 @@ pub struct Args {
 pub enum Command {
     /// Print the shell integration snippet — pipe into your rc file.
     ///
-    /// Examples:
-    ///   eval "$(awswit init bash)"
-    ///   awswit init fish | source
+    /// Examples:{n}
+    ///   eval "$(awswit init bash)"{n}
+    ///   eval "$(awswit init zsh)"{n}
+    ///   awswit init fish | source{n}
+    ///   awswit init powershell | Invoke-Expression
     Init {
         /// Shell type: bash | zsh | fish | powershell
         shell: String,
@@ -86,13 +88,14 @@ pub enum Command {
 
     /// Run a command with a specific profile, without modifying the parent shell.
     ///
-    /// Example:
-    ///   awswit exec prod -- aws s3 ls
-    ///   awswit exec prod aws s3 ls       # `--` optional when CMD has no leading flags
+    /// Examples:{n}
+    ///   awswit exec prod -- aws s3 ls{n}
+    ///   awswit exec prod aws s3 ls
     ///
-    /// Pass `--` before the command when CMD itself starts with `-`, or when
-    /// you want to be explicit. exec sets `AWS_PROFILE` and (if defined) the
-    /// profile's region for the child only — the parent shell is untouched.
+    /// `--` is optional when CMD has no leading flags. Use it (and please
+    /// do) when CMD itself starts with `-`, or when you want to be
+    /// explicit. exec sets `AWS_PROFILE` and (if defined) the profile's
+    /// region for the child only — the parent shell is untouched.
     Exec {
         /// Profile to run the command under.
         profile: String,
@@ -116,9 +119,9 @@ pub enum Command {
     /// Designed for pipeline composition — no shell mutation, no status
     /// chatter on stdout. Exits 130 if the user cancelled.
     ///
-    /// Examples:
-    ///   awswit exec "$(awswit pick)" -- aws sts get-caller-identity
-    ///   aws --profile "$(awswit pick)" s3 ls
+    /// Examples:{n}
+    ///   awswit exec "$(awswit pick)" -- aws sts get-caller-identity{n}
+    ///   aws --profile "$(awswit pick)" s3 ls{n}
     ///   aws sso login --profile "$(awswit pick)"
     Pick,
 

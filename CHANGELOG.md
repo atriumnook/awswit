@@ -11,10 +11,15 @@ _Released on 2026-05-13_
 - New subcommand `awswit exec PROFILE -- CMD ARGS` runs a command with
   `AWS_PROFILE` (and optionally `AWS_REGION`) set in the child only,
   without mutating the parent shell. Exit code is propagated. Records
-  the use for frecency.
+  the use for frecency. `--` is optional when CMD has no leading flags.
+- New subcommand `awswit pick` opens the picker (TUI or fzf) and prints
+  the chosen profile name to stdout — designed for shell substitution
+  like `awswit exec "$(awswit pick)" -- aws s3 ls`. Exits 130 on cancel.
 - New subcommand `awswit which` reports the active profile with its
   region / account / role / SSO status, including SSO token expiry
-  pulled from `~/.aws/sso/cache/*.json`.
+  pulled from `~/.aws/sso/cache/*.json`. Exits non-zero when
+  `$AWS_PROFILE` points at a profile that's not defined in
+  `~/.aws/config`, so CI/precmd guards get an actionable signal.
 - New subcommand `awswit doctor` audits `~/.aws/config` and the SSO
   cache for missing `source_profile` chains, expired or absent SSO
   tokens, malformed `mfa_serial`, and role profiles without any
@@ -22,6 +27,18 @@ _Released on 2026-05-13_
 - New subcommand `awswit prompt --format … --default …` prints the
   current profile (or a fallback) for shell-prompt embedding. Both
   `{}` and `%s` work as the placeholder.
+- New flag `awswit -l --names-only` — fast tab-completion fallback
+  path that only reads section headers from `~/.aws/config` and
+  skips history / SSO cache I/O. Used by every init script's
+  completion function.
+- Profile-name tab completion in every supported shell (bash, zsh,
+  fish, powershell). The init snippet now registers a completer that
+  shells out to `awswit -l --names-only` so tab-completion always
+  reflects the current `~/.aws/config`.
+- New env var `AWSWIT_SSO_CACHE_DIR` overrides the SSO token cache
+  directory (default `~/.aws/sso/cache`). Auto-falls-back to a
+  `sso/cache` sibling of `$AWS_CONFIG_FILE` when set, so containers
+  with `/aws-config/{config,sso/cache}` work out of the box.
 - "Did you mean …?" suggestions on `ProfileNotFound`, ranked by
   Levenshtein distance and filtered to candidates that plausibly
   match the typo.
@@ -37,6 +54,43 @@ _Released on 2026-05-13_
   cursor follows the toggled profile.
 - TUI: handles the "no profiles configured" case with a helpful
   empty-state hint instead of a blank panel.
+- **TUI: terminal no longer left in raw mode on a panic.** Replaced
+  the manual cleanup in `ProfilePicker::run` with an RAII guard so
+  any panic deep in ratatui (degenerate `Rect`, layout math on tiny
+  terminals) still restores cooked-mode input.
+- **`save_history`: durable & race-tolerant.** `fsync(2)` before
+  `rename(2)` so a power loss mid-write can't produce a zero-byte
+  history; the temp-file sweep is age-gated (>1 h) so parallel
+  awswit invocations under `xargs -P` can't delete each other's
+  in-flight temp files.
+- **Tolerant `~/.aws/config` parser.** A single malformed section
+  header (`[profile bad` missing `]`) previously took down every
+  `awswit -l` call — including tab-completion across the whole
+  shell. The new parser skips bad sections with a `tracing::warn!`
+  and keeps every other profile readable. Drops the `configparser`
+  dependency.
+- **Non-interactive paths no longer auto-fuzzy-match.** `awswit -n
+  prd` used to silently switch you to `prod`; it now errors with a
+  "did you mean…?" suggestion and exit 1. Interactive bare-arg
+  invocation still auto-corrects for convenience.
+- `-n` without a PROFILE arg or `$AWS_PROFILE` set now errors
+  instead of silently falling back to `default`.
+- `exec` accepts profile-name typos and routes them through the
+  same "did you mean…?" suggestion path as the switch command.
+- `name.len()` byte-vs-char bug in the "did you mean…?" threshold:
+  for non-ASCII profile names the suggestion list previously
+  degraded silently. Fixed to compare in `chars().count()`.
+- `picker.run()` no longer flattens `io::Error` into a `ShellError`
+  string — `PermissionDenied` on `/dev/tty` etc. now surface with
+  their kind preserved.
+
+### Doctor / messages
+
+- `doctor` summary uses integer-aware plurals (`1 error, 0 warnings`)
+  instead of `0 error(s), 1 warning(s)`.
+- `doctor`'s "role profile has neither source_profile nor
+  credential_source" warning includes a concrete fix hint with the
+  three valid `credential_source` values.
 
 ### TUI improvements
 
@@ -56,11 +110,13 @@ _Released on 2026-05-13_
 
 ### Breaking changes
 
-- `awswit` now manages only `AWS_PROFILE` and `AWS_REGION`. The legacy
-  `AWS_DEFAULT_PROFILE`, `AWS_DEFAULT_REGION`, and the awswit-private
-  `AWSWIT_PROFILE` variables are no longer set; the modern AWS SDK does
-  not need them, and removing them avoids leaving stale state in your
-  environment.
+- `awswit` now *sets* only `AWS_PROFILE` and `AWS_REGION`, and *clears*
+  the legacy `AWS_DEFAULT_PROFILE`/`AWS_DEFAULT_REGION` on every switch
+  (and on `awswit -u`). The modern AWS SDK prefers the non-DEFAULT form;
+  clearing the legacy variables prevents a previous shell session, CI
+  image, or `aws configure` run from leaving a stale fallback that
+  silently re-routes credentials to the wrong account. The awswit-
+  private `AWSWIT_PROFILE` is gone entirely.
 - The shell wrapper protocol (`AWSWIT_UNSET=1` sentinel, line-by-line
   key/value parsing in `bash.sh` / `zsh.sh` / `fish.fish` /
   `powershell.ps1`) is gone. The init snippet is now ~5 lines that does

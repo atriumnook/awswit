@@ -71,39 +71,45 @@ cancel.
 
 ## What awswit does, exactly
 
-When you pick a profile, awswit emits two `export` (or `set`/`set -gx`)
-statements that the shell function evaluates:
+When you pick a profile, awswit emits a small block of `export` and
+`unset` statements that the shell function evaluates. For `awswit prod`
+against a profile with region `ap-northeast-1`:
 
 ```sh
 export AWS_PROFILE='prod'
+unset AWS_DEFAULT_PROFILE
 export AWS_REGION='ap-northeast-1'
+unset AWS_DEFAULT_REGION
 ```
 
-That's it. The AWS SDK resolves credentials from there — IAM keys, SSO,
-role assumption, `credential_process`, anything you've already
-configured. **awswit never reads or stores credential material.**
+We **set** the modern `AWS_PROFILE` / `AWS_REGION` variables, and
+explicitly **clear** the legacy `AWS_DEFAULT_*` fallbacks so a stale
+value left over from a CI image, a corporate dotfile, or a previous
+`aws configure` run can't silently re-route credentials to the wrong
+account. If the profile has no region, `AWS_REGION` is also unset and
+the SDK falls back to its own resolution.
 
-If the profile has no region, awswit emits `unset AWS_REGION` so the SDK
-falls back to its own resolution.
+The AWS SDK resolves credentials from there — IAM keys, SSO, role
+assumption, `credential_process`, anything you've already configured.
+**awswit never reads or stores credential material.**
 
 ## Comparison
 
 | | **awswit** | **aws-vault** | **awsume** | `export AWS_PROFILE` + `fzf` |
 |---|---|---|---|---|
-| Pick a profile interactively | ✅ TUI + fzf | ✅ via `aws-vault list` | ✅ TUI | ✅ |
-| Fuzzy matching | ✅ | — | partial | ✅ |
+| Pick a profile interactively | ✅ TUI + fzf | — (`list` is read-only) | ✅ TUI | ✅ |
+| Fuzzy matching | ✅ (built-in) | — | ✅ (built-in) | ✅ |
 | Frecency sorting + favorites | ✅ | — | — | — |
 | Auto-suggest on typo | ✅ "did you mean…?" | — | — | — |
 | TUI preview (region / account / role ARN / MFA / last-used) | ✅ | — | — | — |
 | One-off `exec` without mutating shell | ✅ `awswit exec` | ✅ `aws-vault exec` | ✅ | — |
 | `which` (current profile + SSO token status) | ✅ | partial | partial | — |
 | `doctor` (broken source chains, expired SSO tokens, missing MFA) | ✅ | — | — | — |
-| Machine-readable list output (TSV / JSON) | ✅ | partial | — | n/a |
+| Machine-readable list output (TSV / JSON / names-only) | ✅ | partial | — | n/a |
 | Shell prompt integration helper | ✅ `awswit prompt` | — | — | — |
 | Manages credentials / STS / MFA | — by design | ✅ | ✅ | — |
 | Token caching, auto-refresh | — | ✅ | ✅ | — |
 | Single static binary | ✅ Rust | ✅ Go | — Python | n/a |
-| Cold-start time | ~5 ms | ~30 ms | ~250 ms | ~5 ms |
 
 awswit is the **profile switcher**: best-in-class at picking, inspecting,
 and scripting profiles. It doesn't do STS / MFA / token caching — that's
@@ -145,6 +151,7 @@ awswit completions <shell>       print a tab-completion script
 | `-u`, `--unset`          | unset every awswit-managed variable                                        |
 | `-l`, `--list`           | list profiles (TSV if piped, table if tty)                                 |
 | `--json`                 | with `-l`, emit JSON                                                       |
+| `--names-only`           | with `-l`, emit one profile name per line — fast path for completion       |
 | `-n`, `--no-interactive` | skip the picker; resolve PROFILE by name or `$AWS_PROFILE`                 |
 | `--fzf`                  | use external `fzf` instead of the built-in TUI                             |
 | `--region <REGION>`      | override the region                                                        |
@@ -229,9 +236,10 @@ awswit -l --json | jq '.[] | select(.type == "Role")'
 # Run a shell with a temporary profile (good for ad-hoc tasks):
 awswit exec prod -- bash
 
-# Compose pick with other tools — no shell mutation:
-aws --profile "$(awswit pick)" sts get-caller-identity
-awswit exec "$(awswit pick)" -- aws s3 ls
+# Compose pick with other tools — no shell mutation.
+# `pick` exits 130 on cancel, so guard with || to avoid running with "":
+P=$(awswit pick) || exit 130
+aws --profile "$P" sts get-caller-identity
 
 # Wire into CI: fail the job if any profile has an expired SSO token.
 awswit doctor
