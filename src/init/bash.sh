@@ -21,8 +21,9 @@ _awswit_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     subs="exec pick which doctor prompt init completions"
 
-    # Lazily fetch profile names (TSV first column).
-    profiles=$(command awswit -l 2>/dev/null | cut -f1)
+    # Fast path: skips history + SSO cache I/O so tab-completion stays
+    # snappy on NFS-mounted $HOME.
+    profiles=$(command awswit -l --names-only 2>/dev/null)
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "${subs} ${profiles}" -- "${cur}") )

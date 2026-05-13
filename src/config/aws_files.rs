@@ -89,6 +89,43 @@ impl AwsFiles {
         })
     }
 
+    /// Cheap path: walk `config_path` and return just the profile names,
+    /// skipping `[sso-session …]` / `[services …]` / other non-profile
+    /// sections and never reading `~/.aws/credentials`, history, or the
+    /// SSO cache.
+    ///
+    /// Used by tab-completion and any other latency-critical caller.
+    /// Returns an empty vec if the file is missing or unreadable — at the
+    /// shell-prompt level, we should never make tab-completion hang because
+    /// of a transient I/O issue.
+    pub fn fast_profile_names(config_path: &str) -> Vec<String> {
+        let expanded = shellexpand::tilde(config_path).to_string();
+        let Ok(content) = fs::read_to_string(&expanded) else {
+            return Vec::new();
+        };
+
+        let mut names = Vec::new();
+        for raw in content.lines() {
+            let line = raw.trim();
+            let Some(rest) = line.strip_prefix('[') else {
+                continue;
+            };
+            let Some(name) = rest.strip_suffix(']') else {
+                continue;
+            };
+            let name = name.trim();
+            if name == "default" {
+                names.push("default".to_string());
+            } else if let Some(p) = name.strip_prefix("profile ") {
+                names.push(p.to_string());
+            }
+            // sso-session / services / other sections: ignored.
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Merge config and credentials profiles.
     ///
     /// Profiles defined only in `~/.aws/credentials` are exposed by name so

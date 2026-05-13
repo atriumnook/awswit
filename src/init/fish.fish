@@ -16,7 +16,7 @@ end
 
 # Fish tab completion: profile names + subcommands.
 function __awswit_profiles
-    command awswit -l 2>/dev/null | cut -f1
+    command awswit -l --names-only 2>/dev/null
 end
 
 complete -c awswit -f

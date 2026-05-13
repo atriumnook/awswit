@@ -36,7 +36,7 @@ Register-ArgumentCompleter -Native -CommandName awswit -ScriptBlock {
     $profiles = @()
     try {
         $binary = (Get-Command awswit -CommandType Application).Source
-        $profiles = (& $binary -l 2>$null) | ForEach-Object { ($_ -split "`t")[0] }
+        $profiles = (& $binary -l --names-only 2>$null)
     } catch {}
 
     if ($position -eq 1) {

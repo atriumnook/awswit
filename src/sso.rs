@@ -35,8 +35,26 @@ struct RawCacheEntry {
     expires_at: Option<String>,
 }
 
-/// Path to the AWS SSO cache directory (`~/.aws/sso/cache`).
+/// Path to the AWS SSO cache directory.
+///
+/// Resolution order:
+///   1. `$AWSWIT_SSO_CACHE_DIR` — explicit override for containers / CI
+///      where the cache lives outside `~/.aws/`.
+///   2. `${AWS_CONFIG_FILE%/config}/sso/cache` when `$AWS_CONFIG_FILE` is
+///      set, so a self-contained `aws-config` directory works as expected.
+///   3. `~/.aws/sso/cache`.
 fn sso_cache_dir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("AWSWIT_SSO_CACHE_DIR").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(v));
+    }
+    if let Ok(cfg) = std::env::var("AWS_CONFIG_FILE")
+        && let Some(parent) = std::path::Path::new(&cfg).parent()
+    {
+        let candidate = parent.join("sso").join("cache");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
     dirs::home_dir().map(|h| h.join(".aws").join("sso").join("cache"))
 }
 

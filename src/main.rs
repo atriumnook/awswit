@@ -67,11 +67,41 @@ fn run(args: Args) -> Result<i32, AwswitError> {
         return emit_unset(&args).map(|_| 0);
     }
 
+    // Fast path for shell tab-completion: only read section headers from
+    // ~/.aws/config, skip history and SSO cache. Tab-completion is invoked
+    // on every keystroke and ran the full AppContext::build before this,
+    // which made every TAB hit NFS / large SSO cache directories.
+    if args.list && args.names_only {
+        return list_names_only(&args).map(|_| 0);
+    }
+
     let ctx = AppContext::build(args)?;
     if ctx.args.list {
         return list_profiles(&ctx.profiles, ctx.args.json).map(|_| 0);
     }
     switch_profile(ctx).map(|_| 0)
+}
+
+/// Tab-completion fast path. Avoid `AppContext::build` so we never touch
+/// history or the SSO cache here.
+fn list_names_only(args: &Args) -> Result<(), AwswitError> {
+    let config_path = args
+        .config_file
+        .clone()
+        .or_else(|| std::env::var("AWS_CONFIG_FILE").ok())
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".aws").join("config").to_string_lossy().to_string())
+                .unwrap_or_else(|| "~/.aws/config".to_string())
+        });
+
+    let names = awswit::config::AwsFiles::fast_profile_names(&config_path);
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for name in names {
+        writeln!(out, "{}", name)?;
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────

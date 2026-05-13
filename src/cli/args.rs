@@ -36,6 +36,11 @@ pub struct Args {
     #[arg(long = "json")]
     pub json: bool,
 
+    /// With --list, emit only profile names, one per line — a fast path for
+    /// shell tab-completion. Skips history and SSO-cache I/O.
+    #[arg(long = "names-only")]
+    pub names_only: bool,
+
     /// AWS config file path (defaults to $AWS_CONFIG_FILE or ~/.aws/config).
     #[arg(long = "config-file", value_name = "PATH")]
     pub config_file: Option<String>,

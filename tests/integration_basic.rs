@@ -87,6 +87,20 @@ fn list_profiles_tsv_when_piped() {
 }
 
 #[test]
+fn list_profiles_names_only_emits_one_name_per_line() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["-l", "--names-only"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut names: Vec<&str> = stdout.lines().collect();
+    names.sort();
+    assert_eq!(names, vec!["default", "dev"]);
+}
+
+#[test]
 fn list_profiles_json() {
     let home = setup_aws_home();
     let output = awswit_command(&home)

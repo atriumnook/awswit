@@ -18,7 +18,7 @@ awswit() {
 _awswit() {
     local -a subs profiles
     subs=(exec pick which doctor prompt init completions help)
-    profiles=(${(f)"$(command awswit -l 2>/dev/null | cut -f1)"})
+    profiles=(${(f)"$(command awswit -l --names-only 2>/dev/null)"})
 
     if (( CURRENT == 2 )); then
         _alternative "subcommand:subcommand:(${subs})" "profile:profile:(${profiles})"

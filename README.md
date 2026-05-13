@@ -165,6 +165,7 @@ awswit completions <shell>       print a tab-completion script
 | `AWSWIT_USE_FZF`              | use external `fzf` (same as `--fzf`)                                    |
 | `AWSWIT_FZF_OPTS`             | extra options for `fzf` (dangerous options are stripped)                |
 | `AWSWIT_SHELL`                | force a shell flavor (`bash` / `zsh` / `fish` / `powershell`)           |
+| `AWSWIT_SSO_CACHE_DIR`        | override the AWS SSO token cache dir (default `~/.aws/sso/cache`)       |
 | `XDG_DATA_HOME`               | overrides where history lives (default `~/.local/share/awswit/`)        |
 
 awswit deliberately does **not** read a config file of its own — every
