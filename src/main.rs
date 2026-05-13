@@ -146,13 +146,17 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), 
 /// candidate suggestions, ranked by Levenshtein distance.
 fn profile_not_found_with_hint(name: &str, profiles: &HashMap<String, Profile>) -> AwswitError {
     let suggestions = utils::fuzzy::nearest_n(name, profiles, 3);
+    // Filter out anything far from the input (heuristic: more than half the
+    // input's length in edit distance is almost certainly noise). Compare in
+    // *character* counts, not bytes — `levenshtein` counts chars, so using
+    // `str::len()` here is wrong for non-ASCII names (a Japanese profile
+    // like "プロ" has byte len 6 but only 2 chars).
+    let name_chars = name.chars().count();
     let suggested = suggestions
         .into_iter()
-        // Filter out anything far from the input (heuristic: more than half
-        // the input's length in edit distance is almost certainly noise).
         .filter(|s| {
-            strsim::levenshtein(&name.to_lowercase(), &s.to_lowercase())
-                <= name.len().max(s.len()).div_ceil(2)
+            let threshold = name_chars.max(s.chars().count()).div_ceil(2);
+            strsim::levenshtein(&name.to_lowercase(), &s.to_lowercase()) <= threshold
         })
         .collect::<Vec<_>>();
 
@@ -182,9 +186,10 @@ fn pick_profile(ctx: &AppContext) -> Result<tui::picker::PickerOutcome, AwswitEr
     }
 
     let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
-    picker.run().map_err(|e| AwswitError::ShellError {
-        message: format!("Picker error: {}", e),
-    })
+    // `io::Error` already converts via `#[from]`; forwarding it preserves
+    // the kind (`PermissionDenied`, `NotConnected`, etc.) so users can tell
+    // "no /dev/tty" from "the picker crashed".
+    picker.run().map_err(AwswitError::from)
 }
 
 fn warn_if_aws_vault() {
@@ -328,6 +333,16 @@ fn exec_command(
     let region =
         region_override.or_else(|| ctx.profiles.get(&profile).and_then(|p| p.region.clone()));
 
+    // Record frecency *before* spawning the child: a long-running or killed
+    // command (an hour-long `aws s3 sync`, a Ctrl-C'd shell) should still
+    // bump usage stats — otherwise frecency only records commands that
+    // ran to completion, which defeats its purpose.
+    let mut history = ctx.history;
+    history.record_use(&profile);
+    if let Err(e) = awswit::history::save_history(&history) {
+        tracing::warn!("failed to persist history: {}", e);
+    }
+
     let mut child = ProcCommand::new(&cmd[0]);
     child.args(&cmd[1..]);
     child.env("AWS_PROFILE", &profile);
@@ -352,11 +367,6 @@ fn exec_command(
         .map_err(|e| AwswitError::ShellError {
             message: format!("wait failed for `{}`: {}", cmd[0], e),
         })?;
-
-    // Record the use so frecency reflects it.
-    let mut history = awswit::history::load_history().unwrap_or_default();
-    history.record_use(&profile);
-    let _ = awswit::history::save_history(&history);
 
     Ok(status.code().unwrap_or(1))
 }

@@ -80,20 +80,44 @@ pub fn load_history() -> Result<ProfileHistory, AwswitError> {
     }
 }
 
-/// Persist history atomically: write to a sibling temp file, then rename.
+/// Persist history atomically: write to a sibling temp file, fsync it, then
+/// rename onto the final path.
 ///
-/// File permissions are left to the user's umask — the contents are profile
-/// names, timestamps, and favorite flags, not secrets.
+/// - Sweep any orphaned `history.json.*.tmp` siblings before writing so a
+///   prior crash doesn't accrete junk in the data directory.
+/// - `sync_all()` the temp file before rename so a power-loss between
+///   write and rename doesn't leave a zero-byte file post-rename.
+/// - File permissions are left to the user's umask — the contents are
+///   profile names, timestamps, and favorite flags, not secrets.
 pub fn save_history(history: &ProfileHistory) -> Result<(), AwswitError> {
+    use std::io::Write;
+
     let path = history_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        // Best-effort: clean up stale temp files left behind by previous
+        // crashes. Don't propagate errors — this is a sweep, not a barrier.
+        if let Ok(read_dir) = fs::read_dir(parent) {
+            for entry in read_dir.flatten() {
+                let p = entry.path();
+                if p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with("history.json.") && s.ends_with(".tmp"))
+                {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
     }
 
     let body = serde_json::to_string_pretty(history)?;
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
 
-    fs::write(&tmp, body)?;
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
     if let Err(e) = fs::rename(&tmp, &path) {
         let _ = fs::remove_file(&tmp);
         return Err(e.into());

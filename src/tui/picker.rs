@@ -64,10 +64,21 @@ impl<'a> ProfilePicker<'a> {
     }
 
     pub fn run(self) -> io::Result<PickerOutcome> {
+        // Drop-guard: `disable_raw_mode` must run on *every* exit path —
+        // normal return, `?`-propagated I/O error, or panic from deep inside
+        // ratatui (degenerate `Rect`, layout math on tiny terminals).
+        // Without this, a panic during render leaves the user's terminal
+        // swallowing keystrokes silently.
+        struct RawModeGuard;
+        impl Drop for RawModeGuard {
+            fn drop(&mut self) {
+                let _ = disable_raw_mode();
+            }
+        }
+
         enable_raw_mode()?;
-        let result = self.run_inner();
-        let _ = disable_raw_mode();
-        result
+        let _guard = RawModeGuard;
+        self.run_inner()
     }
 
     fn run_inner(self) -> io::Result<PickerOutcome> {
