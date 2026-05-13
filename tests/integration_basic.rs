@@ -375,6 +375,72 @@ fn doctor_reports_clean_config() {
 }
 
 #[test]
+fn doctor_flags_source_profile_cycle() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("config");
+    fs::write(
+        &config_path,
+        r#"[profile a]
+role_arn = arn:aws:iam::1:role/A
+source_profile = b
+
+[profile b]
+role_arn = arn:aws:iam::2:role/B
+source_profile = a
+"#,
+    )
+    .unwrap();
+    let creds = temp_dir.path().join("credentials");
+    fs::write(&creds, "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .arg("doctor")
+        .env("HOME", temp_dir.path())
+        .env("USERPROFILE", temp_dir.path())
+        .env("AWS_CONFIG_FILE", &config_path)
+        .env("AWS_SHARED_CREDENTIALS_FILE", &creds)
+        .env_remove("AWS_PROFILE")
+        .env_remove("AWS_VAULT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cycle") && stdout.contains("loop forever"),
+        "expected cycle error, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn doctor_flags_region_that_is_actually_an_az() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("config");
+    fs::write(&config_path, "[profile az]\nregion = us-east-1a\n").unwrap();
+    let creds = temp_dir.path().join("credentials");
+    fs::write(&creds, "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .arg("doctor")
+        .env("HOME", temp_dir.path())
+        .env("USERPROFILE", temp_dir.path())
+        .env("AWS_CONFIG_FILE", &config_path)
+        .env("AWS_SHARED_CREDENTIALS_FILE", &creds)
+        .env_remove("AWS_PROFILE")
+        .env_remove("AWS_VAULT")
+        .output()
+        .unwrap();
+    // Region warning isn't an error, so exit 0.
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("us-east-1a") && stdout.contains("does not look like"),
+        "expected region warning, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn doctor_flags_missing_source_profile() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("config");

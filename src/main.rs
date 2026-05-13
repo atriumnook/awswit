@@ -575,18 +575,43 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
     }
 
     for (name, p) in &ctx.profiles {
-        // Source-profile chain must resolve.
-        if let Some(src) = &p.source_profile
-            && !ctx.profiles.contains_key(src)
-        {
+        // Shell-unsafe profile name — these get filtered out of
+        // --names-only and the tab-completion wordlist, but they're
+        // also a sign that another tool wrote the file with an
+        // unrendered template variable or worse. Surface them as errors.
+        if !is_safe_profile_name(name) {
             diags.push(Diagnostic {
                 level: DiagLevel::Error,
                 profile: Some(name.clone()),
-                message: format!(
-                    "source_profile = '{}' references a profile that does not exist",
-                    src
-                ),
+                message: "profile name contains characters that are unsafe in shell \
+                          contexts (`$`, backtick, whitespace, etc.) — rename the section \
+                          header in ~/.aws/config; tab-completion silently skips this name"
+                    .into(),
             });
+        }
+
+        // Source-profile chain must resolve and must not loop.
+        if let Some(src) = &p.source_profile {
+            if !ctx.profiles.contains_key(src) {
+                diags.push(Diagnostic {
+                    level: DiagLevel::Error,
+                    profile: Some(name.clone()),
+                    message: format!(
+                        "source_profile = '{}' references a profile that does not exist",
+                        src
+                    ),
+                });
+            } else if let Some(cycle) = find_source_profile_cycle(name, &ctx.profiles) {
+                diags.push(Diagnostic {
+                    level: DiagLevel::Error,
+                    profile: Some(name.clone()),
+                    message: format!(
+                        "source_profile chain forms a cycle: {} — the AWS SDK will loop \
+                         forever resolving credentials",
+                        cycle.join(" -> ")
+                    ),
+                });
+            }
         }
 
         // Role profile should have either source_profile or credential_source.
@@ -609,6 +634,22 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
                 level: DiagLevel::Warning,
                 profile: Some(name.clone()),
                 message: format!("mfa_serial = '{}' does not look like an IAM MFA ARN", mfa),
+            });
+        }
+
+        // Region format sanity-check — catches `us-east-1a` (AZ instead of
+        // region), `eu-west` (missing trailing digit), and other typos.
+        if let Some(region) = &p.region
+            && !looks_like_aws_region(region)
+        {
+            diags.push(Diagnostic {
+                level: DiagLevel::Warning,
+                profile: Some(name.clone()),
+                message: format!(
+                    "region = '{}' does not look like an AWS region (expected e.g. \
+                     us-east-1, ap-northeast-3, eu-central-1)",
+                    region
+                ),
             });
         }
 
@@ -680,6 +721,65 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
 
 fn pluralize(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
     if n == 1 { singular } else { plural }
+}
+
+/// Profile-name safety check used by `doctor`. Mirrors the filter in
+/// `AwsFiles::fast_profile_names` so the two paths agree about what is
+/// surfaceable as a candidate.
+fn is_safe_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '@' | '+' | '=')
+        })
+}
+
+/// Walk the source_profile chain from `start` and detect a cycle. Returns
+/// the cycle path as a vec of profile names if one exists.
+fn find_source_profile_cycle(
+    start: &str,
+    profiles: &HashMap<String, Profile>,
+) -> Option<Vec<String>> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut cursor = start;
+    while seen.insert(cursor) {
+        path.push(cursor.to_string());
+        match profiles
+            .get(cursor)
+            .and_then(|p| p.source_profile.as_deref())
+        {
+            Some(next) if profiles.contains_key(next) => cursor = next,
+            _ => return None,
+        }
+    }
+    // We re-entered a profile — append the closing edge to make the cycle
+    // visible: a -> b -> a.
+    path.push(cursor.to_string());
+    Some(path)
+}
+
+/// True if `r` looks like an AWS region identifier: `<two letters>-<word>-<digit>`.
+///
+/// Catches accidental Availability Zones (`us-east-1a`), missing trailing
+/// digits (`eu-west`), and outright typos (`useast1`). Permissive enough
+/// to admit every real region AWS has shipped (gov, cn, isob partitions).
+fn looks_like_aws_region(r: &str) -> bool {
+    let parts: Vec<&str> = r.split('-').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let last = parts[parts.len() - 1];
+    // Last token must be one or more digits and nothing else (the AZ form
+    // `us-east-1a` ends in `1a`, which fails this check).
+    if last.is_empty() || !last.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // All other tokens are lowercase alphanumerics — also catches mixed
+    // case typos like "US-East-1".
+    parts[..parts.len() - 1]
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase()))
 }
 
 // ─────────────────────────────────────────────────────────────────────
