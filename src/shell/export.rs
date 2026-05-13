@@ -23,12 +23,24 @@ fn validate_shell_value(label: &str, value: &str) -> Result<(), crate::error::Aw
 
 /// Environment variables awswit manages.
 ///
-/// We deliberately set only the two variables the modern AWS SDK reads
-/// first: `AWS_PROFILE` and `AWS_REGION`. The legacy `AWS_DEFAULT_*`
-/// variants are intentionally not touched — the SDK prefers the
-/// non-`DEFAULT` versions, and leaving the legacy ones alone avoids
-/// surprising users who set them by hand.
-pub const MANAGED_VARS: &[&str] = &["AWS_PROFILE", "AWS_REGION"];
+/// We deliberately *set* only `AWS_PROFILE` and `AWS_REGION` — the modern
+/// AWS SDK prefers the non-`DEFAULT` form and we don't want to introduce
+/// new variables onto the user's environment.
+///
+/// We *clear* the legacy `AWS_DEFAULT_*` variants on every switch (and on
+/// `awswit -u`), because the SDK falls back to them when the modern
+/// variables are missing or unset. CI images, corporate dotfiles, and
+/// previous `aws configure` runs frequently leave them set; without
+/// clearing, `awswit -u && aws ...` can silently hit the previous account.
+///
+/// The set kept here drives `--unset` (`unset_all`); the per-switch path
+/// uses the same list to emit "unset" lines after the "export" lines.
+pub const MANAGED_VARS: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+];
 
 #[derive(Debug, Clone, Copy)]
 pub enum ShellType {
@@ -85,7 +97,14 @@ impl ShellExporter {
         Self { shell }
     }
 
-    /// Emit `set` commands for the selected profile and (optional) region.
+    /// Emit `set` commands for the selected profile and (optional) region,
+    /// plus `unset` for the legacy `AWS_DEFAULT_*` fallbacks.
+    ///
+    /// Without explicitly unsetting `AWS_DEFAULT_PROFILE` and
+    /// `AWS_DEFAULT_REGION`, the AWS SDK can still resolve credentials/region
+    /// from them, so `awswit prod` followed by `aws sts get-caller-identity`
+    /// could silently hit the previous account if it had `AWS_DEFAULT_PROFILE`
+    /// set. See the `MANAGED_VARS` doc-comment.
     pub fn export(
         &self,
         profile: &str,
@@ -98,10 +117,12 @@ impl ShellExporter {
 
         let mut out = String::new();
         out.push_str(&self.set("AWS_PROFILE", profile));
+        out.push_str(&self.unset("AWS_DEFAULT_PROFILE"));
         match region {
             Some(r) => out.push_str(&self.set("AWS_REGION", r)),
             None => out.push_str(&self.unset("AWS_REGION")),
         }
+        out.push_str(&self.unset("AWS_DEFAULT_REGION"));
         Ok(out)
     }
 
@@ -146,22 +167,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn export_bash_with_region() {
+    fn export_bash_with_region_also_clears_legacy_defaults() {
         let out = ShellExporter::for_shell(ShellType::Bash)
             .export("prod", Some("ap-northeast-1"))
             .unwrap();
         assert_eq!(
             out,
-            "export AWS_PROFILE='prod'\nexport AWS_REGION='ap-northeast-1'\n"
+            "export AWS_PROFILE='prod'\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             export AWS_REGION='ap-northeast-1'\n\
+             unset AWS_DEFAULT_REGION\n"
         );
     }
 
     #[test]
-    fn export_bash_without_region_unsets_region() {
+    fn export_bash_without_region_unsets_region_and_legacy_defaults() {
         let out = ShellExporter::for_shell(ShellType::Bash)
             .export("prod", None)
             .unwrap();
-        assert_eq!(out, "export AWS_PROFILE='prod'\nunset AWS_REGION\n");
+        assert_eq!(
+            out,
+            "export AWS_PROFILE='prod'\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             unset AWS_REGION\n\
+             unset AWS_DEFAULT_REGION\n"
+        );
     }
 
     #[test]
@@ -169,10 +199,10 @@ mod tests {
         let out = ShellExporter::for_shell(ShellType::Fish)
             .export("prod", Some("us-east-1"))
             .unwrap();
-        assert_eq!(
-            out,
-            "set -gx AWS_PROFILE 'prod'\nset -gx AWS_REGION 'us-east-1'\n"
-        );
+        assert!(out.contains("set -gx AWS_PROFILE 'prod'"));
+        assert!(out.contains("set -gx AWS_REGION 'us-east-1'"));
+        assert!(out.contains("set -e AWS_DEFAULT_PROFILE"));
+        assert!(out.contains("set -e AWS_DEFAULT_REGION"));
     }
 
     #[test]
@@ -180,29 +210,42 @@ mod tests {
         let out = ShellExporter::for_shell(ShellType::PowerShell)
             .export("prod", Some("us-east-1"))
             .unwrap();
-        assert_eq!(
-            out,
-            "$env:AWS_PROFILE = 'prod'\n$env:AWS_REGION = 'us-east-1'\n"
-        );
+        assert!(out.contains("$env:AWS_PROFILE = 'prod'"));
+        assert!(out.contains("$env:AWS_REGION = 'us-east-1'"));
+        assert!(out.contains("Remove-Item Env:\\AWS_DEFAULT_PROFILE"));
+        assert!(out.contains("Remove-Item Env:\\AWS_DEFAULT_REGION"));
     }
 
     #[test]
-    fn unset_all_bash() {
+    fn unset_all_bash_clears_all_managed_vars() {
         let out = ShellExporter::for_shell(ShellType::Bash).unset_all();
-        assert_eq!(out, "unset AWS_PROFILE\nunset AWS_REGION\n");
+        assert_eq!(
+            out,
+            "unset AWS_PROFILE\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             unset AWS_REGION\n\
+             unset AWS_DEFAULT_REGION\n"
+        );
     }
 
     #[test]
     fn unset_all_fish() {
         let out = ShellExporter::for_shell(ShellType::Fish).unset_all();
-        assert_eq!(out, "set -e AWS_PROFILE\nset -e AWS_REGION\n");
+        for v in MANAGED_VARS {
+            assert!(out.contains(&format!("set -e {}", v)), "missing {}", v);
+        }
     }
 
     #[test]
     fn unset_all_powershell() {
         let out = ShellExporter::for_shell(ShellType::PowerShell).unset_all();
-        assert!(out.contains("Remove-Item Env:\\AWS_PROFILE"));
-        assert!(out.contains("Remove-Item Env:\\AWS_REGION"));
+        for v in MANAGED_VARS {
+            assert!(
+                out.contains(&format!("Remove-Item Env:\\{}", v)),
+                "missing {}",
+                v
+            );
+        }
     }
 
     #[test]

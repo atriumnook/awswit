@@ -80,30 +80,52 @@ pub fn load_history() -> Result<ProfileHistory, AwswitError> {
     }
 }
 
+/// How old a leftover `history.json.<pid>.tmp` must be before we sweep it.
+///
+/// One hour is comfortably longer than any plausible awswit invocation. The
+/// previous implementation swept every tmp sibling unconditionally, which
+/// raced with concurrent saves: a second awswit running `xargs -P` could
+/// delete the first one's tmp file mid-flight and turn its `rename` into a
+/// silent ENOENT.
+const STALE_TMP_AGE_SECS: u64 = 60 * 60;
+
 /// Persist history atomically: write to a sibling temp file, fsync it, then
 /// rename onto the final path.
 ///
-/// - Sweep any orphaned `history.json.*.tmp` siblings before writing so a
-///   prior crash doesn't accrete junk in the data directory.
-/// - `sync_all()` the temp file before rename so a power-loss between
-///   write and rename doesn't leave a zero-byte file post-rename.
-/// - File permissions are left to the user's umask — the contents are
+/// - `sync_all()` the temp file before rename so a power-loss between write
+///   and rename doesn't leave a zero-byte file post-rename.
+/// - Sweep `history.json.*.tmp` siblings older than [`STALE_TMP_AGE_SECS`]
+///   so a prior crash doesn't accrete junk — but only those siblings,
+///   never the ones currently in flight on a parallel awswit.
+/// - File permissions are left to the user's umask. The contents are
 ///   profile names, timestamps, and favorite flags, not secrets.
 pub fn save_history(history: &ProfileHistory) -> Result<(), AwswitError> {
     use std::io::Write;
+    use std::time::SystemTime;
 
     let path = history_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-        // Best-effort: clean up stale temp files left behind by previous
-        // crashes. Don't propagate errors — this is a sweep, not a barrier.
+        // Best-effort age-gated sweep of crash-orphaned temp files. Never
+        // touches a tmp belonging to a currently-running sibling process.
         if let Ok(read_dir) = fs::read_dir(parent) {
+            let now = SystemTime::now();
             for entry in read_dir.flatten() {
                 let p = entry.path();
-                if p.file_name()
+                let name_matches = p
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.starts_with("history.json.") && s.ends_with(".tmp"))
-                {
+                    .is_some_and(|s| s.starts_with("history.json.") && s.ends_with(".tmp"));
+                if !name_matches {
+                    continue;
+                }
+                let stale = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_some_and(|d| d.as_secs() >= STALE_TMP_AGE_SECS);
+                if stale {
                     let _ = fs::remove_file(&p);
                 }
             }

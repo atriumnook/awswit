@@ -148,15 +148,19 @@ fn shell_export_emits_export_lines_to_stdout_only() {
             line
         );
     }
-    // The legacy variables are gone.
-    assert!(!stdout.contains("AWS_DEFAULT_PROFILE"));
-    assert!(!stdout.contains("AWS_DEFAULT_REGION"));
+    // We *clear* the legacy AWS_DEFAULT_* variables so the SDK can't fall
+    // back to a stale value, but we never SET them — and we never set the
+    // awswit-private marker variables.
+    assert!(stdout.contains("unset AWS_DEFAULT_PROFILE"));
+    assert!(stdout.contains("unset AWS_DEFAULT_REGION"));
+    assert!(!stdout.contains("export AWS_DEFAULT_PROFILE"));
+    assert!(!stdout.contains("export AWS_DEFAULT_REGION"));
     assert!(!stdout.contains("AWSWIT_PROFILE"));
     assert!(!stdout.contains("AWSWIT_UNSET"));
 }
 
 #[test]
-fn unset_emits_unset_lines() {
+fn unset_emits_unset_lines_for_every_managed_var() {
     let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
         .arg("--unset")
         .env("AWSWIT_SHELL", "bash")
@@ -164,8 +168,18 @@ fn unset_emits_unset_lines() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("unset AWS_PROFILE"));
-    assert!(stdout.contains("unset AWS_REGION"));
+    for v in [
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    ] {
+        assert!(
+            stdout.contains(&format!("unset {}", v)),
+            "missing unset for {}",
+            v
+        );
+    }
     assert!(!stdout.contains("AWSWIT_UNSET"));
 }
 
@@ -402,7 +416,7 @@ fn pick_with_fzf_returns_profile_name_only() {
     }
     use std::process::Stdio;
 
-    let mut child = awswit_command(&home)
+    let child = awswit_command(&home)
         .arg("pick")
         .env("AWSWIT_USE_FZF", "1")
         .env("AWSWIT_FZF_OPTS", "--filter=dev")
