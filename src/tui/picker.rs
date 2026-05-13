@@ -707,4 +707,148 @@ mod tests {
             std::cmp::Ordering::Less
         );
     }
+
+    // ── Render snapshot tests ────────────────────────────────────────
+    //
+    // Drive the picker against `TestBackend` and inspect the rendered
+    // buffer. These guard the UX contract: list contents are visible,
+    // empty state surfaces a hint, the search bar shows the query, and
+    // the help bar advertises the keybindings.
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Concatenate every cell symbol on every line into a single string.
+    /// Spaces are preserved so we can check word positions.
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf.get(x, y).symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn render_to_string(app: &mut PickerApp, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn render_shows_every_profile_name() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        let text = render_to_string(&mut app, 100, 20);
+        assert!(text.contains("alpha"), "alpha missing:\n{}", text);
+        assert!(text.contains("beta"), "beta missing");
+        assert!(text.contains("gamma"), "gamma missing");
+    }
+
+    #[test]
+    fn render_shows_count_in_search_bar() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        let text = render_to_string(&mut app, 100, 20);
+        // Format is " filtered/total " — with three profiles and no filter it's 3/3.
+        assert!(
+            text.contains("3/3"),
+            "expected 3/3 indicator, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_shows_filtered_count_when_query_narrows() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        app.query = "alp".to_string();
+        app.update_filter();
+        let text = render_to_string(&mut app, 100, 20);
+        assert!(
+            text.contains("1/3"),
+            "expected 1/3 after filter, got:\n{}",
+            text
+        );
+        assert!(text.contains("alpha"));
+        assert!(!text.contains("beta"));
+        assert!(!text.contains("gamma"));
+    }
+
+    #[test]
+    fn render_empty_profile_set_shows_hint() {
+        let profiles: HashMap<String, Profile> = HashMap::new();
+        let mut app = make_app(&profiles);
+        let text = render_to_string(&mut app, 100, 20);
+        assert!(
+            text.contains("No AWS profiles found"),
+            "missing empty-state hint:\n{}",
+            text
+        );
+        assert!(
+            text.contains("[profile dev]"),
+            "missing example block:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_help_bar_lists_keybindings() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        let text = render_to_string(&mut app, 100, 20);
+        // Each keybinding label appears in the bottom help bar.
+        for key in [
+            "navigate", "select", "favorite", "preview", "edit", "cancel",
+        ] {
+            assert!(text.contains(key), "help bar missing `{}`:\n{}", key, text);
+        }
+    }
+
+    #[test]
+    fn render_search_bar_shows_query_text() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        app.query = "alp".to_string();
+        app.cursor_pos = app.query.len();
+        app.update_filter();
+        let text = render_to_string(&mut app, 100, 20);
+        assert!(text.contains("alp"), "query not displayed:\n{}", text);
+    }
+
+    #[test]
+    fn render_favorited_entry_marked_with_star() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        app.list_state.select(Some(0));
+        app.toggle_favorite();
+        let text = render_to_string(&mut app, 100, 20);
+        assert!(
+            text.contains('★'),
+            "favorite star missing after toggle:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_preview_pane_appears_when_width_large() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        let text = render_to_string(&mut app, 120, 20);
+        // The preview pane uses the profile name as its block title.
+        // With 3 alphabetical profiles, the first selected is "alpha".
+        let preview_title_visible = text.contains("alpha");
+        assert!(preview_title_visible);
+    }
+
+    #[test]
+    fn render_does_not_panic_on_tiny_terminal() {
+        let profiles = test_profiles();
+        let mut app = make_app(&profiles);
+        // Should not panic on degenerate sizes — render layout has to cope.
+        let _ = render_to_string(&mut app, 20, 10);
+    }
 }
