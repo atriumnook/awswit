@@ -265,6 +265,79 @@ fn which_reports_current_profile() {
 }
 
 #[test]
+fn which_exits_nonzero_when_aws_profile_unknown() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .arg("which")
+        .env("AWS_PROFILE", "ghost")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "which should signal mis-config in CI / precmd guards"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("warning"));
+}
+
+#[test]
+fn no_interactive_without_profile_or_env_errors() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home).arg("-n").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no-interactive") || stderr.contains("PROFILE"),
+        "expected a usage error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn no_interactive_does_not_silently_fuzzy_match() {
+    let home = setup_aws_home();
+    // `dvv` is one edit from `dev` in the test fixture, but in
+    // non-interactive mode we must NOT auto-substitute — instead emit a
+    // "did you mean?" error and exit 1.
+    let output = awswit_command(&home).arg("-n").arg("dvv").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did you mean") && stderr.contains("dev"),
+        "expected did-you-mean for dev, got: {}",
+        stderr
+    );
+    // And no shell-export should have been emitted.
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+}
+
+#[test]
+fn exec_works_without_dashdash_separator() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "dev", "/usr/bin/env"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWS_PROFILE=dev"));
+}
+
+#[test]
+fn exec_with_typo_suggests_correct_profile() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "dvv", "--", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("did you mean"));
+    assert!(stderr.contains("dev"));
+}
+
+#[test]
 fn doctor_reports_clean_config() {
     let home = setup_aws_home();
     let output = awswit_command(&home).arg("doctor").output().unwrap();

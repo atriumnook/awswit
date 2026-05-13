@@ -52,7 +52,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
                 region,
                 cmd,
             } => exec_command(args, profile, region, cmd),
-            Command::Which => which(args).map(|_| 0),
+            Command::Which => which(args),
             Command::Doctor => doctor(args),
             Command::Prompt { format, default } => prompt(&format, &default).map(|_| 0),
         };
@@ -117,18 +117,37 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), 
     }
 
     let history = ctx.history.clone();
-    let candidate = ctx
-        .args
-        .profile_name
-        .clone()
-        .or_else(|| std::env::var("AWS_PROFILE").ok())
-        .unwrap_or_else(|| "default".to_string());
+
+    // In scripted / `-n` mode we refuse to invent a target: a stray `awswit -n`
+    // in a CI step or with `$AWS_PROFILE` accidentally unset would otherwise
+    // silently switch you to `default`, which is often the root/admin account.
+    // Interactive bare invocation on a non-tty (output piped) still gets the
+    // `default` fallback, matching what AWS SDKs themselves do.
+    let candidate = match (
+        ctx.args.profile_name.clone(),
+        std::env::var("AWS_PROFILE").ok(),
+        ctx.args.no_interactive,
+    ) {
+        (Some(p), _, _) => p,
+        (None, Some(env), _) => env,
+        (None, None, true) => {
+            return Err(AwswitError::ShellError {
+                message: "-n / --no-interactive requires a PROFILE argument or $AWS_PROFILE".into(),
+            });
+        }
+        (None, None, false) => "default".to_string(),
+    };
 
     if ctx.profiles.contains_key(&candidate) {
         return Ok((candidate, history));
     }
 
-    let allow_fuzzy = std::env::var("AWSWIT_NO_FUZZY").is_err();
+    // Auto-fuzzy substitution is a convenience for interactive use. In
+    // scripted / `-n` mode it's a footgun — a CI typo would silently target
+    // a different AWS account — so we surface "did you mean…?" suggestions
+    // instead of substituting.
+    let interactive_mode = !ctx.args.no_interactive;
+    let allow_fuzzy = interactive_mode && std::env::var("AWSWIT_NO_FUZZY").is_err();
     if allow_fuzzy
         && let Some(matched) = utils::fuzzy::find_closest_profile(&candidate, &ctx.profiles)
     {
@@ -375,7 +394,7 @@ fn exec_command(
 //   `awswit which`
 // ─────────────────────────────────────────────────────────────────────
 
-fn which(args: Args) -> Result<(), AwswitError> {
+fn which(args: Args) -> Result<i32, AwswitError> {
     let current = std::env::var("AWS_PROFILE").ok();
     let region_env = std::env::var("AWS_REGION").ok();
     let vault = std::env::var("AWS_VAULT").ok();
@@ -385,7 +404,7 @@ fn which(args: Args) -> Result<(), AwswitError> {
 
     let Some(profile_name) = current else {
         writeln!(out, "AWS_PROFILE: (unset)")?;
-        return Ok(());
+        return Ok(0);
     };
 
     writeln!(out, "AWS_PROFILE: {}", profile_name)?;
@@ -401,7 +420,7 @@ fn which(args: Args) -> Result<(), AwswitError> {
         Ok(c) => c,
         Err(e) => {
             tracing::debug!("which: skipping config lookup: {}", e);
-            return Ok(());
+            return Ok(0);
         }
     };
 
@@ -412,7 +431,9 @@ fn which(args: Args) -> Result<(), AwswitError> {
             "warning: profile '{}' is not defined in ~/.aws/config",
             profile_name
         )?;
-        return Ok(());
+        // Surface this to CI / precmd guards — `which` exits non-zero when
+        // the environment claims a profile the config doesn't define.
+        return Ok(1);
     };
 
     writeln!(out)?;
@@ -460,7 +481,7 @@ fn which(args: Args) -> Result<(), AwswitError> {
     if profile.mfa_serial.is_some() {
         writeln!(out, "mfa:         required")?;
     }
-    Ok(())
+    Ok(0)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -515,7 +536,10 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
             diags.push(Diagnostic {
                 level: DiagLevel::Warning,
                 profile: Some(name.clone()),
-                message: "role profile has neither source_profile nor credential_source".into(),
+                message: "role profile has neither source_profile nor credential_source — \
+                          add e.g. `source_profile = main` or \
+                          `credential_source = Environment|Ec2InstanceMetadata|EcsContainer`"
+                    .into(),
             });
         }
 
@@ -584,13 +608,20 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
         }
     }
 
+    let warnings = diags.len() - errors;
     writeln!(
         out,
-        "\nawswit doctor: {} error(s), {} warning(s)",
+        "\nawswit doctor: {} {}, {} {}",
         errors,
-        diags.len() - errors
+        pluralize(errors, "error", "errors"),
+        warnings,
+        pluralize(warnings, "warning", "warnings"),
     )?;
     Ok(if errors > 0 { 1 } else { 0 })
+}
+
+fn pluralize(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if n == 1 { singular } else { plural }
 }
 
 // ─────────────────────────────────────────────────────────────────────

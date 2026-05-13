@@ -83,9 +83,11 @@ pub enum Command {
     ///
     /// Example:
     ///   awswit exec prod -- aws s3 ls
+    ///   awswit exec prod aws s3 ls       # `--` optional when CMD has no leading flags
     ///
-    /// The `--` separator is required when passing flags to the inner command,
-    /// otherwise they'll be parsed as awswit's own flags.
+    /// Pass `--` before the command when CMD itself starts with `-`, or when
+    /// you want to be explicit. exec sets `AWS_PROFILE` and (if defined) the
+    /// profile's region for the child only — the parent shell is untouched.
     Exec {
         /// Profile to run the command under.
         profile: String,
@@ -95,7 +97,12 @@ pub enum Command {
         region: Option<String>,
 
         /// Command and arguments to execute.
-        #[arg(last = true, required = true, value_name = "CMD")]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            required = true,
+            value_name = "CMD"
+        )]
         cmd: Vec<String>,
     },
 
@@ -109,10 +116,17 @@ pub enum Command {
 
     /// Print just the current profile name (for shell prompt integration).
     ///
+    /// Both `{}` and `%s` work as the placeholder in --format.
+    ///
+    /// `prompt` writes its output with no trailing newline — your shell's
+    /// PS1 / RPROMPT is expected to render it inline. To inspect the value
+    /// interactively, run `awswit prompt; echo`.
+    ///
     /// Example bash PS1:
-    ///   PS1='[\u@\h $(awswit prompt)] \w \$ '
+    ///   PS1='[\u@\h $(awswit prompt --format "{} " --default "")] \w \$ '
     Prompt {
-        /// Wrap output in this format string with `{}` as placeholder.
+        /// Format string. `{}` and `%s` are both interpolated with the
+        /// current profile name.
         #[arg(long = "format", default_value = "{}")]
         format: String,
 
