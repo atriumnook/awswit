@@ -1,70 +1,81 @@
-//! Frecency scoring boundary tests and favorite priority verification.
+//! Frecency scoring properties under the continuous-decay model.
+//!
+//! Score = `use_count * 2^(-age_hours / 72)`. We verify monotonicity, the
+//! halving property at the half-life boundary, and edge cases rather than
+//! pinning specific numeric values which would over-constrain future tuning.
 
 use awswit::history::HistoryEntry;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
+
+fn entry(hours_ago: i64, use_count: u32) -> HistoryEntry {
+    HistoryEntry {
+        name: "p".into(),
+        last_used: Utc::now() - Duration::hours(hours_ago),
+        use_count,
+        is_favorite: false,
+    }
+}
+
+fn score(e: &HistoryEntry) -> f64 {
+    e.frecency_score(Utc::now())
+}
 
 #[test]
-fn score_zero_use_count_is_zero() {
-    let now = Utc::now();
-    let entry = HistoryEntry {
-        name: "test".to_string(),
-        last_used: now,
+fn zero_use_count_scores_zero() {
+    let e = HistoryEntry {
+        name: "p".into(),
+        last_used: Utc::now(),
         use_count: 0,
         is_favorite: false,
     };
-    assert!((entry.frecency_score(now) - 0.0).abs() < f64::EPSILON);
+    assert_eq!(score(&e), 0.0);
 }
 
 #[test]
-fn score_boundary_exactly_one_hour() {
-    let now = Utc::now();
-    let entry = HistoryEntry {
-        name: "test".to_string(),
-        last_used: now - Duration::hours(1),
-        use_count: 1,
-        is_favorite: false,
-    };
-    // Exactly 1 hour → falls in the 1-24h bucket → weight 2.0
-    assert!((entry.frecency_score(now) - 2.0).abs() < f64::EPSILON);
+fn score_is_monotonically_decreasing_in_age() {
+    let s0 = score(&entry(0, 1));
+    let s1 = score(&entry(1, 1));
+    let s24 = score(&entry(24, 1));
+    let s168 = score(&entry(168, 1));
+    let s720 = score(&entry(720, 1));
+    assert!(s0 > s1, "{} not > {}", s0, s1);
+    assert!(s1 > s24);
+    assert!(s24 > s168);
+    assert!(s168 > s720);
+    assert!(s720 > 0.0);
 }
 
 #[test]
-fn score_boundary_exactly_24_hours() {
-    let now = Utc::now();
-    let entry = HistoryEntry {
-        name: "test".to_string(),
-        last_used: now - Duration::hours(24),
-        use_count: 1,
-        is_favorite: false,
-    };
-    // Exactly 24h → falls in the 24h-168h bucket → weight 1.0
-    assert!((entry.frecency_score(now) - 1.0).abs() < f64::EPSILON);
+fn score_halves_at_72_hour_half_life() {
+    let fresh = score(&entry(0, 10));
+    let halved = score(&entry(72, 10));
+    // ~5% tolerance to absorb timing jitter between Utc::now() calls.
+    assert!(
+        (halved - fresh / 2.0).abs() / fresh < 0.05,
+        "fresh={}, halved={}",
+        fresh,
+        halved
+    );
 }
 
 #[test]
-fn score_boundary_exactly_one_week() {
-    let now = Utc::now();
-    let entry = HistoryEntry {
-        name: "test".to_string(),
-        last_used: now - Duration::hours(168),
-        use_count: 1,
-        is_favorite: false,
-    };
-    // Exactly 168h → falls in the >168h bucket → weight 0.5
-    assert!((entry.frecency_score(now) - 0.5).abs() < f64::EPSILON);
+fn score_scales_linearly_with_use_count() {
+    let one = score(&entry(10, 1));
+    let ten = score(&entry(10, 10));
+    assert!((ten - 10.0 * one).abs() < 1e-9);
 }
 
 #[test]
-fn recent_high_frequency_beats_old_high_frequency() {
-    let now = Utc::now();
+fn recent_use_outranks_old_use_at_same_frequency() {
+    let now: DateTime<Utc> = Utc::now();
     let recent = HistoryEntry {
-        name: "recent".to_string(),
+        name: "recent".into(),
         last_used: now - Duration::minutes(30),
         use_count: 5,
         is_favorite: false,
     };
     let old = HistoryEntry {
-        name: "old".to_string(),
+        name: "old".into(),
         last_used: now - Duration::days(30),
         use_count: 5,
         is_favorite: false,
@@ -73,39 +84,14 @@ fn recent_high_frequency_beats_old_high_frequency() {
 }
 
 #[test]
-fn favorite_sorting_priority() {
-    // Favorites should sort before non-favorites regardless of score.
-    // This tests the contract used by fzf.rs and picker.rs sorting.
+fn future_timestamps_are_clamped_to_now() {
     let now = Utc::now();
-    let fav = HistoryEntry {
-        name: "fav".to_string(),
-        last_used: now - Duration::days(30),
-        use_count: 1,
-        is_favorite: true,
-    };
-    let non_fav = HistoryEntry {
-        name: "non_fav".to_string(),
-        last_used: now,
-        use_count: 100,
-        is_favorite: false,
-    };
-
-    // Even though non_fav has much higher frecency, favorite flag takes precedence in sort
-    assert!(fav.is_favorite);
-    assert!(!non_fav.is_favorite);
-    // The actual sort comparison (favorite first) is in picker/fzf, but we verify the data here
-    assert!(non_fav.frecency_score(now) > fav.frecency_score(now));
-}
-
-#[test]
-fn future_last_used_does_not_panic() {
-    let now = Utc::now();
-    let entry = HistoryEntry {
-        name: "future".to_string(),
+    let future = HistoryEntry {
+        name: "future".into(),
         last_used: now + Duration::hours(1),
         use_count: 1,
         is_favorite: false,
     };
-    // Should not panic, hours difference clamped to 0 → weight 4.0
-    assert!((entry.frecency_score(now) - 4.0).abs() < f64::EPSILON);
+    // No panic, score equals fresh-now score (clamped age = 0).
+    assert!((future.frecency_score(now) - 1.0).abs() < 1e-9);
 }

@@ -1,93 +1,83 @@
 use clap::{Parser, Subcommand};
 
-/// awswit: A fast, modern AWS profile switcher with interactive TUI
+/// Interactive AWS profile switcher with fuzzy search and frecency sorting.
 #[derive(Parser, Clone, Default, Debug)]
-#[command(name = "awswit")]
-#[command(author, about, long_about = None, disable_version_flag = true)]
-#[command(after_help = "Thank you for using awswit!")]
+#[command(name = "awswit", version, about)]
+#[command(disable_version_flag = true)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// The target profile name
-    #[arg(value_name = "profile_name")]
+    /// Profile to switch to. Omit for the interactive picker.
+    #[arg(value_name = "PROFILE")]
     pub profile_name: Option<String>,
 
-    /// Display the current version of awswit
+    /// Print the awswit version and exit.
     #[arg(short = 'v', long = "version")]
     pub version: bool,
 
-    /// Show the commands to set the credentials
-    #[arg(short = 's', long = "show-commands")]
-    pub show_commands: bool,
+    /// Emit shell `export` / `unset` lines on stdout for `eval`.
+    ///
+    /// This is what the shell wrapper (`awswit init <shell>`) uses internally.
+    /// You can also call it directly: `eval "$(awswit --shell-export prod)"`.
+    #[arg(long = "shell-export", short = 's')]
+    pub shell_export: bool,
 
-    /// Unset your AWS environment variables
+    /// Unset every AWS_* variable awswit manages.
     #[arg(short = 'u', long = "unset")]
     pub unset: bool,
 
-    /// List available profiles
-    #[arg(short = 'l', long = "list-profiles")]
-    pub list_profiles: bool,
+    /// List profiles. Default: human-readable when stdout is a terminal, TSV otherwise.
+    #[arg(short = 'l', long = "list")]
+    pub list: bool,
 
-    /// Path to config file
-    #[arg(long = "config-file", value_name = "config_file")]
+    /// With --list, emit JSON instead of TSV / pretty output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// AWS config file path (defaults to $AWS_CONFIG_FILE or ~/.aws/config).
+    #[arg(long = "config-file", value_name = "PATH")]
     pub config_file: Option<String>,
 
-    /// AWS region to use
-    #[arg(long = "region", value_name = "region")]
+    /// Override the region exported with the selected profile.
+    #[arg(long = "region", value_name = "REGION")]
     pub region: Option<String>,
 
-    /// Display INFO level logs
-    #[arg(long = "info")]
-    pub info: bool,
-
-    /// Display DEBUG level logs
-    #[arg(long = "debug")]
-    pub debug: bool,
-
-    /// Disable interactive mode (use when piping or scripting)
+    /// Skip the interactive picker; resolve the profile by name or $AWS_PROFILE.
     #[arg(long = "no-interactive", short = 'n')]
     pub no_interactive: bool,
 
-    /// Use external fzf for profile selection
+    /// Use external `fzf` for selection instead of the built-in TUI.
     #[arg(long = "fzf")]
     pub use_fzf: bool,
+
+    /// Verbose logging (INFO).
+    #[arg(long = "verbose")]
+    pub verbose: bool,
+
+    /// Debug logging.
+    #[arg(long = "debug")]
+    pub debug: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Output shell integration script
+    /// Print the shell integration snippet — pipe into your rc file.
     ///
-    /// Usage:
+    /// Examples:
     ///   eval "$(awswit init bash)"
-    ///   eval "$(awswit init zsh)"
     ///   awswit init fish | source
-    ///   awswit init powershell | Invoke-Expression
     Init {
-        /// Shell type (bash, zsh, fish, powershell)
+        /// Shell type: bash | zsh | fish | powershell
         shell: String,
     },
 
-    /// Generate static shell completions
-    ///
-    /// This generates tab-completion scripts for your shell.
-    ///
-    /// Usage:
-    ///   awswit completions bash > /etc/bash_completion.d/awswit
-    ///   awswit completions zsh > ~/.zfunc/_awswit
-    ///   awswit completions fish > ~/.config/fish/completions/awswit.fish
+    /// Generate static shell completion scripts.
     Completions {
         /// Shell type
         shell: clap_complete::Shell,
     },
-}
-
-impl Args {
-    /// Check if interactive mode is disabled
-    pub fn interactive_disabled(&self) -> bool {
-        self.no_interactive
-    }
 }
 
 #[cfg(test)]
@@ -96,7 +86,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn test_parse_defaults() {
+    fn parses_defaults() {
         let args = Args::try_parse_from(["awswit"]).unwrap();
         assert!(!args.version);
         assert!(!args.unset);
@@ -104,20 +94,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_profile_name() {
+    fn parses_profile_name_positional() {
         let args = Args::try_parse_from(["awswit", "prod"]).unwrap();
-        assert_eq!(args.profile_name, Some("prod".to_string()));
+        assert_eq!(args.profile_name.as_deref(), Some("prod"));
     }
 
     #[test]
-    fn test_parse_unset() {
-        let args = Args::try_parse_from(["awswit", "--unset"]).unwrap();
-        assert!(args.unset);
+    fn parses_shell_export_short() {
+        let args = Args::try_parse_from(["awswit", "-s", "prod"]).unwrap();
+        assert!(args.shell_export);
     }
 
     #[test]
-    fn test_parse_fzf() {
-        let args = Args::try_parse_from(["awswit", "--fzf"]).unwrap();
-        assert!(args.use_fzf);
+    fn parses_list_json() {
+        let args = Args::try_parse_from(["awswit", "-l", "--json"]).unwrap();
+        assert!(args.list);
+        assert!(args.json);
     }
 }

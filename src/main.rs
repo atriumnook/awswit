@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 
 use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use awswit::cli::{Args, Command};
-use awswit::config::AwswitConfig;
 use awswit::context::AppContext;
 use awswit::error::AwswitError;
 use awswit::profile::Profile;
@@ -18,7 +17,7 @@ fn main() {
 
     let level = if args.debug {
         Level::DEBUG
-    } else if args.info {
+    } else if args.verbose {
         Level::INFO
     } else {
         Level::WARN
@@ -27,266 +26,262 @@ fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
+        .with_writer(io::stderr)
         .finish();
-
-    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
-        eprintln!("Warning: Failed to set tracing subscriber: {}", e);
-    }
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
     match run(args) {
-        Ok(code) => {
-            if code != 0 {
-                std::process::exit(code);
-            }
-        }
+        Ok(_) => {}
+        Err(AwswitError::UserCancelled) => std::process::exit(130),
         Err(e) => {
-            if matches!(e, AwswitError::UserCancelled) {
-                std::process::exit(130);
-            }
-            eprintln!("{}", e);
+            eprintln!("awswit: {}", e);
             std::process::exit(1);
         }
     }
 }
 
-fn run(args: Args) -> Result<i32, AwswitError> {
-    tracing::debug!("Starting awswit with args: {:?}", args);
-
-    // Handle subcommands
-    if let Some(ref command) = args.command {
-        match command {
-            Command::Init { shell } => {
-                handle_init(shell)?;
-                return Ok(0);
-            }
-            Command::Completions { shell } => {
-                handle_completions(*shell)?;
-                return Ok(0);
-            }
-        }
+fn run(args: Args) -> Result<(), AwswitError> {
+    // Subcommands run without touching ~/.aws.
+    if let Some(cmd) = args.command.clone() {
+        return match cmd {
+            Command::Init { shell } => print_init_script(&shell),
+            Command::Completions { shell } => print_completions(shell),
+        };
     }
 
-    // Handle version flag early
     if args.version {
         println!("awswit {}", env!("CARGO_PKG_VERSION"));
-        return Ok(0);
+        return Ok(());
     }
 
-    // Early-exit: unset
     if args.unset {
-        handle_unset(&args)?;
-        return Ok(0);
+        return emit_unset(&args);
     }
 
-    // Build full application context
-    let mut ctx = AppContext::build(args)?;
+    let ctx = AppContext::build(args)?;
 
-    // Handle list profiles
-    if ctx.args.list_profiles {
-        handle_list_profiles(&ctx.profiles, &ctx.config)?;
-        return Ok(0);
+    if ctx.args.list {
+        return list_profiles(&ctx.profiles, ctx.args.json);
     }
 
-    // Determine target profile
+    // Warn loudly if we're switching profile inside an aws-vault session — the
+    // resulting env is almost certainly not what the user wants.
+    if let Ok(vault_profile) = std::env::var("AWS_VAULT") {
+        eprintln!(
+            "awswit: warning: AWS_VAULT={} is set. Changing AWS_PROFILE inside an aws-vault \
+             session can leave stale session credentials in your environment.",
+            vault_profile
+        );
+    }
+
+    let target = resolve_target_profile(&ctx)?;
+
+    let mut history = ctx.history;
+    history.record_use(&target);
+    if let Err(e) = awswit::history::save_history(&history) {
+        tracing::warn!("Failed to persist history: {}", e);
+    }
+
+    let region = ctx
+        .args
+        .region
+        .as_deref()
+        .or_else(|| ctx.profiles.get(&target).and_then(|p| p.region.as_deref()));
+
+    emit_export(&target, region, &ctx.args)
+}
+
+/// Decide which profile name we are switching to.
+///
+/// Priority: TUI / fzf if interactive → CLI arg → `$AWS_PROFILE` →
+/// `"default"`. Names that aren't an exact match fall through to fuzzy
+/// matching, which logs a WARN noting the substitution.
+fn resolve_target_profile(ctx: &AppContext) -> Result<String, AwswitError> {
+    let want_picker = ctx.args.profile_name.is_none()
+        && !ctx.args.no_interactive
+        && std::io::stdout().is_terminal();
+
+    if want_picker {
+        return pick_profile(ctx);
+    }
+
+    let candidate = ctx
+        .args
+        .profile_name
+        .clone()
+        .or_else(|| std::env::var("AWS_PROFILE").ok())
+        .unwrap_or_else(|| "default".to_string());
+
+    if ctx.profiles.contains_key(&candidate) {
+        return Ok(candidate);
+    }
+
+    let allow_fuzzy = std::env::var("AWSWIT_NO_FUZZY").is_err();
+    if allow_fuzzy
+        && let Some(matched) = utils::fuzzy::find_closest_profile(&candidate, &ctx.profiles)
+    {
+        eprintln!(
+            "awswit: fuzzy-matched '{}' to '{}'. Set AWSWIT_NO_FUZZY=1 to disable.",
+            candidate, matched
+        );
+        return Ok(matched);
+    }
+
+    Err(AwswitError::ProfileNotFound { name: candidate })
+}
+
+fn pick_profile(ctx: &AppContext) -> Result<String, AwswitError> {
     let use_fzf = ctx.args.use_fzf
         || std::env::var("AWSWIT_USE_FZF")
             .map(|v| tui::fzf::is_truthy(&v))
             .unwrap_or(false);
 
-    let target_profile_name = if ctx.args.profile_name.is_none()
-        && !ctx.args.interactive_disabled()
-        && std::io::stdout().is_terminal()
-    {
-        if use_fzf {
-            tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history)?
-        } else {
-            let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
+    if use_fzf {
+        return tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history);
+    }
 
-            match picker.run() {
-                Ok(tui::picker::PickerResult::Selected(name)) => name,
-                Ok(tui::picker::PickerResult::Cancelled) => {
-                    return Err(AwswitError::UserCancelled);
-                }
-                Err(e) => {
-                    return Err(AwswitError::ShellError {
-                        message: format!("Picker error: {}", e),
-                    });
-                }
-            }
+    let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
+    match picker.run() {
+        Ok(tui::picker::PickerResult::Selected(name)) => Ok(name),
+        Ok(tui::picker::PickerResult::Cancelled) => Err(AwswitError::UserCancelled),
+        Err(e) => Err(AwswitError::ShellError {
+            message: format!("Picker error: {}", e),
+        }),
+    }
+}
+
+fn emit_export(profile: &str, region: Option<&str>, args: &Args) -> Result<(), AwswitError> {
+    let exporter = ShellExporter::new();
+    let payload = exporter.export(profile, region)?;
+
+    if args.shell_export {
+        // eval-mode: payload on stdout, nothing else.
+        io::stdout().write_all(payload.as_bytes())?;
+    } else {
+        // Direct-invocation mode: show the user what would happen.
+        eprintln!("awswit: switched to {}", profile);
+        if let Some(r) = region {
+            eprintln!("awswit: region {}", r);
         }
-    } else {
-        determine_target_profile(&ctx.args, &ctx.profiles, &ctx.config)?
-    };
-
-    tracing::info!("Target profile: {}", target_profile_name);
-
-    // Record usage in history
-    ctx.history.record_use(&target_profile_name);
-    if let Err(e) = awswit::history::save_history(&ctx.history) {
-        tracing::warn!("Failed to save profile history: {}", e);
-        eprintln!("Warning: Failed to save profile history: {}", e);
+        io::stdout().write_all(payload.as_bytes())?;
     }
-
-    // Look up the profile to get its region
-    let profile_region = ctx
-        .profiles
-        .get(&target_profile_name)
-        .and_then(|p| p.region.as_deref());
-
-    // Use --region flag if provided, then profile's region, then config region
-    let region = ctx
-        .args
-        .region
-        .as_deref()
-        .or(profile_region)
-        .or(ctx.config.region.as_deref());
-
-    // Emit profile selection
-    emit_profile(&target_profile_name, region, &ctx.args)?;
-
-    Ok(0)
+    Ok(())
 }
 
-/// Emit profile selection as shell output or export commands
-fn emit_profile(profile_name: &str, region: Option<&str>, args: &Args) -> Result<(), AwswitError> {
+fn emit_unset(args: &Args) -> Result<(), AwswitError> {
     let exporter = ShellExporter::new();
-    if args.show_commands {
-        print!(
-            "{}",
-            exporter.generate_export_commands(profile_name, region)?
-        );
-    } else {
-        tui::StatusLine::profile_switched(profile_name);
-        print!("{}", exporter.generate_shell_output(profile_name, region)?);
+    let payload = exporter.unset_all();
+    if !args.shell_export {
+        eprintln!("awswit: unset");
     }
-
+    io::stdout().write_all(payload.as_bytes())?;
     Ok(())
 }
 
-fn handle_unset(args: &Args) -> Result<(), AwswitError> {
-    let exporter = ShellExporter::new();
-    if args.show_commands {
-        print!("{}", exporter.generate_unset_commands());
-    } else {
-        print!("{}", exporter.generate_unset_output());
+fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), AwswitError> {
+    let mut names: Vec<&String> = profiles.keys().collect();
+    names.sort();
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    if json {
+        let entries: Vec<_> = names
+            .iter()
+            .map(|n| {
+                let p = &profiles[*n];
+                serde_json::json!({
+                    "name": n,
+                    "type": classify(p),
+                    "source": p.source_profile.as_deref().or(p.credential_source.as_deref()),
+                    "region": p.region,
+                    "account": p.get_account_id(),
+                })
+            })
+            .collect();
+        serde_json::to_writer_pretty(&mut out, &entries)?;
+        writeln!(out)?;
+        return Ok(());
+    }
+
+    if !out.is_terminal() {
+        // Tab-separated, no headers — easy for awk/cut.
+        for name in &names {
+            let p = &profiles[*name];
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}",
+                name,
+                classify(p),
+                p.source_profile
+                    .as_deref()
+                    .or(p.credential_source.as_deref())
+                    .unwrap_or(""),
+                p.region.as_deref().unwrap_or(""),
+                p.get_account_id().unwrap_or_default(),
+            )?;
+        }
+        return Ok(());
+    }
+
+    // Pretty table.
+    let name_width = names.iter().map(|n| n.len()).max().unwrap_or(7).max(7);
+    writeln!(
+        out,
+        "{:<width$}  {:<5}  {:<20}  {:<14}  ACCOUNT",
+        "PROFILE",
+        "TYPE",
+        "SOURCE",
+        "REGION",
+        width = name_width
+    )?;
+    for name in &names {
+        let p = &profiles[*name];
+        writeln!(
+            out,
+            "{:<width$}  {:<5}  {:<20}  {:<14}  {}",
+            name,
+            classify(p),
+            p.source_profile
+                .as_deref()
+                .or(p.credential_source.as_deref())
+                .unwrap_or("-"),
+            p.region.as_deref().unwrap_or("-"),
+            p.get_account_id().unwrap_or_else(|| "-".into()),
+            width = name_width,
+        )?;
     }
     Ok(())
 }
 
-fn handle_list_profiles(
-    profiles: &HashMap<String, Profile>,
-    config: &AwswitConfig,
-) -> Result<(), AwswitError> {
-    use crossterm::style::Stylize;
-
-    let use_colors = config.colors && !cfg!(windows);
-
-    println!();
-    let header = "========================AWS Profiles==========================";
-    if use_colors {
-        println!("{}", header.cyan().bold());
+fn classify(p: &Profile) -> &'static str {
+    if p.is_sso_profile() {
+        "SSO"
+    } else if p.is_role_profile() {
+        "Role"
     } else {
-        println!("{}", header);
-    }
-
-    let header_line = format!(
-        "{:<20} {:<8} {:<15} {:<12} {}",
-        "PROFILE", "TYPE", "SOURCE", "REGION", "ACCOUNT"
-    );
-    if use_colors {
-        println!("{}", header_line.white().bold());
-    } else {
-        println!("{}", header_line);
-    }
-
-    let mut profile_names: Vec<_> = profiles.keys().collect();
-    profile_names.sort();
-
-    for name in profile_names {
-        let profile = &profiles[name];
-        let profile_type = if profile.role_arn.is_some() {
-            "Role"
-        } else {
-            "User"
-        };
-        let source = profile
-            .source_profile
-            .as_deref()
-            .or(profile.credential_source.as_deref())
-            .unwrap_or("None");
-        let region = profile.region.as_deref().unwrap_or("-");
-        let account = profile.get_account_id().unwrap_or_else(|| "-".to_string());
-
-        let line = format!(
-            "{:<20} {:<8} {:<15} {:<12} {}",
-            truncate(name, 20),
-            profile_type,
-            truncate(source, 15),
-            truncate(region, 12),
-            account
-        );
-        println!("{}", line);
-    }
-
-    Ok(())
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() > max_len {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
+        "User"
     }
 }
 
-fn determine_target_profile(
-    args: &Args,
-    profiles: &HashMap<String, Profile>,
-    config: &AwswitConfig,
-) -> Result<String, AwswitError> {
-    let profile_name = args
-        .profile_name
-        .clone()
-        .or_else(|| std::env::var("AWS_PROFILE").ok())
-        .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
-        .unwrap_or_else(|| "default".to_string());
-
-    if profiles.contains_key(&profile_name) {
-        return Ok(profile_name);
-    }
-
-    if config.fuzzy_match
-        && let Some(matched) = utils::fuzzy::find_closest_profile(&profile_name, profiles)
-    {
-        tracing::info!("Fuzzy matched '{}' to '{}'", profile_name, matched);
-        return Ok(matched);
-    }
-
-    Err(AwswitError::ProfileNotFound { name: profile_name })
-}
-
-fn handle_completions(shell: clap_complete::Shell) -> Result<(), AwswitError> {
+fn print_completions(shell: clap_complete::Shell) -> Result<(), AwswitError> {
     use clap::CommandFactory;
     let mut cmd = Args::command();
-    clap_complete::generate(shell, &mut cmd, "awswit", &mut std::io::stdout());
+    clap_complete::generate(shell, &mut cmd, "awswit", &mut io::stdout());
     Ok(())
 }
 
-fn handle_init(shell: &str) -> Result<(), AwswitError> {
+fn print_init_script(shell: &str) -> Result<(), AwswitError> {
     let script = match shell.to_lowercase().as_str() {
         "bash" => include_str!("init/bash.sh"),
         "zsh" => include_str!("init/zsh.sh"),
         "fish" => include_str!("init/fish.fish"),
         "powershell" | "pwsh" => include_str!("init/powershell.ps1"),
-        _ => {
+        other => {
             return Err(AwswitError::ShellError {
                 message: format!(
-                    "Unsupported shell: {}. Supported shells: bash, zsh, fish, powershell",
-                    shell
+                    "unsupported shell '{}' (expected: bash, zsh, fish, powershell)",
+                    other
                 ),
             });
         }
