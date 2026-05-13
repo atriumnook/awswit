@@ -54,7 +54,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
             } => exec_command(args, profile, region, cmd),
             Command::Pick => pick(args),
             Command::Which => which(args),
-            Command::Doctor => doctor(args),
+            Command::Doctor { json } => doctor(args, json),
             Command::Prompt { format, default } => prompt(&format, &default).map(|_| 0),
         };
     }
@@ -77,7 +77,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
 
     let ctx = AppContext::build(args)?;
     if ctx.args.list {
-        return list_profiles(&ctx.profiles, ctx.args.json).map(|_| 0);
+        return list_profiles(&ctx.profiles, &ctx.history, ctx.args.json).map(|_| 0);
     }
     switch_profile(ctx).map(|_| 0)
 }
@@ -282,7 +282,11 @@ fn emit_unset(args: &Args) -> Result<(), AwswitError> {
 //   `awswit -l` / `awswit -l --json`
 // ─────────────────────────────────────────────────────────────────────
 
-fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), AwswitError> {
+fn list_profiles(
+    profiles: &HashMap<String, Profile>,
+    history: &awswit::history::ProfileHistory,
+    json: bool,
+) -> Result<(), AwswitError> {
     let mut names: Vec<&String> = profiles.keys().collect();
     names.sort();
 
@@ -294,12 +298,16 @@ fn list_profiles(profiles: &HashMap<String, Profile>, json: bool) -> Result<(), 
             .iter()
             .map(|n| {
                 let p = &profiles[*n];
+                let h = history.get(n);
                 serde_json::json!({
                     "name": n,
                     "type": classify(p),
                     "source": p.source_profile.as_deref().or(p.credential_source.as_deref()),
                     "region": p.region,
                     "account": p.get_account_id(),
+                    "favorite": history.is_favorite(n),
+                    "use_count": h.map(|e| e.use_count).unwrap_or(0),
+                    "last_used": h.map(|e| e.last_used.to_rfc3339()),
                 })
             })
             .collect();
@@ -559,7 +567,7 @@ struct Diagnostic {
     message: String,
 }
 
-fn doctor(args: Args) -> Result<i32, AwswitError> {
+fn doctor(args: Args, json: bool) -> Result<i32, AwswitError> {
     let ctx = AppContext::build(args)?;
     let now = chrono::Utc::now();
     let sso_sessions = sso::load_sessions();
@@ -678,8 +686,35 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
         }
     }
 
+    diags.sort_by_key(|d| (d.level == DiagLevel::Info, d.level == DiagLevel::Warning));
+    let errors = diags.iter().filter(|d| d.level == DiagLevel::Error).count();
+    let warnings = diags
+        .iter()
+        .filter(|d| d.level == DiagLevel::Warning)
+        .count();
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    if json {
+        let payload = serde_json::json!({
+            "profiles_checked": ctx.profiles.len(),
+            "errors": errors,
+            "warnings": warnings,
+            "diagnostics": diags.iter().map(|d| serde_json::json!({
+                "level": match d.level {
+                    DiagLevel::Error => "error",
+                    DiagLevel::Warning => "warning",
+                    DiagLevel::Info => "info",
+                },
+                "profile": d.profile,
+                "message": d.message,
+            })).collect::<Vec<_>>(),
+        });
+        serde_json::to_writer_pretty(&mut out, &payload)?;
+        writeln!(out)?;
+        return Ok(if errors > 0 { 1 } else { 0 });
+    }
 
     if diags.is_empty() {
         writeln!(
@@ -690,14 +725,9 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
         return Ok(0);
     }
 
-    diags.sort_by_key(|d| (d.level == DiagLevel::Info, d.level == DiagLevel::Warning));
-    let mut errors = 0;
     for d in &diags {
         let tag = match d.level {
-            DiagLevel::Error => {
-                errors += 1;
-                "ERROR"
-            }
+            DiagLevel::Error => "ERROR",
             DiagLevel::Warning => "warn ",
             DiagLevel::Info => "info ",
         };
@@ -707,7 +737,6 @@ fn doctor(args: Args) -> Result<i32, AwswitError> {
         }
     }
 
-    let warnings = diags.len() - errors;
     writeln!(
         out,
         "\nawswit doctor: {} {}, {} {}",

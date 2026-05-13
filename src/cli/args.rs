@@ -131,7 +131,11 @@ pub enum Command {
     /// Audit ~/.aws/config and SSO token cache for common breakage.
     ///
     /// Exits non-zero when at least one error-level issue is found.
-    Doctor,
+    Doctor {
+        /// Emit findings as a JSON array on stdout (for CI integration).
+        #[arg(long = "json")]
+        json: bool,
+    },
 
     /// Print just the current profile name (for shell prompt integration).
     ///
@@ -214,7 +218,13 @@ mod tests {
         ));
         assert!(matches!(
             Args::try_parse_from(["awswit", "doctor"]).unwrap().command,
-            Some(Command::Doctor)
+            Some(Command::Doctor { json: false })
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["awswit", "doctor", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor { json: true })
         ));
     }
 }
