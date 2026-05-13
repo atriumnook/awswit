@@ -240,10 +240,12 @@ fn unknown_profile_suggests_near_matches() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn exec_runs_command_with_profile_env() {
     let home = setup_aws_home();
-    // Use /usr/bin/env to print the env in a portable way.
+    // /usr/bin/env is Unix-only; the Windows test below covers the same
+    // behavior via the awswit binary itself.
     let output = awswit_command(&home)
         .args(["exec", "dev", "--", "/usr/bin/env"])
         .output()
@@ -256,6 +258,26 @@ fn exec_runs_command_with_profile_env() {
 }
 
 #[test]
+fn exec_sets_aws_profile_via_self_invocation() {
+    // Portable variant: exec the awswit binary itself with `which`, which
+    // reads $AWS_PROFILE from the environment and echoes it. Works on
+    // every platform we ship for.
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "dev", "--", env!("CARGO_BIN_EXE_awswit"), "which"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exec exited {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("AWS_PROFILE: dev"),
+        "expected AWS_PROFILE: dev in:\n{}",
+        stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn exec_propagates_exit_code() {
     let home = setup_aws_home();
     let output = awswit_command(&home)
@@ -263,6 +285,26 @@ fn exec_propagates_exit_code() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(42));
+}
+
+#[test]
+fn exec_propagates_exit_code_portable() {
+    // Use the awswit binary itself with an argument that's guaranteed to
+    // produce exit 1 on every platform. This complements the Unix-only
+    // `sh -c 'exit 42'` test above.
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args([
+            "exec",
+            "default",
+            "--",
+            env!("CARGO_BIN_EXE_awswit"),
+            "-n",
+            "definitely-nonexistent-profile",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
@@ -340,6 +382,7 @@ fn no_interactive_does_not_silently_fuzzy_match() {
     assert!(String::from_utf8_lossy(&output.stdout).is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn exec_works_without_dashdash_separator() {
     let home = setup_aws_home();
@@ -350,6 +393,20 @@ fn exec_works_without_dashdash_separator() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("AWS_PROFILE=dev"));
+}
+
+#[test]
+fn exec_works_without_dashdash_separator_portable() {
+    // Same contract as the Unix test above but via self-invocation so it
+    // runs on Windows too.
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "dev", env!("CARGO_BIN_EXE_awswit"), "which"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWS_PROFILE: dev"));
 }
 
 #[test]
