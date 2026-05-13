@@ -1,16 +1,30 @@
 use std::path::{Path, PathBuf};
 
-/// XDG-compliant directory for awswit state (history.json lives here).
+/// Directory for awswit state (history.json lives here).
 ///
 /// Resolution order:
-///   1. `$XDG_DATA_HOME/awswit/`
-///   2. `~/.local/share/awswit/`
+///   1. `$XDG_DATA_HOME/awswit/` — explicit override, honored everywhere
+///      so container/CI overrides work cross-platform.
+///   2. Platform default:
+///      - Linux / *BSD: `~/.local/share/awswit/`
+///      - macOS:        `~/.local/share/awswit/` (matches XDG conventions
+///        that tools like cargo/zoxide use; avoids
+///        `~/Library/Application Support/` which is GUI-oriented and gets
+///        backed up to iCloud)
+///      - Windows:      `%LOCALAPPDATA%\awswit\` — the standard location
+///        for per-user CLI state, not subject to roaming profile sync
 ///
 /// If a pre-0.1.0 file exists at `~/.awswit/`, callers may migrate it on
 /// first access via [`migrate_legacy_into`].
 pub fn data_dir() -> Result<PathBuf, std::io::Error> {
     if let Some(p) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(p).join("awswit"));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            return Ok(local.join("awswit"));
+        }
     }
     let home = home_dir()?;
     Ok(home.join(".local").join("share").join("awswit"))

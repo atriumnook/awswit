@@ -47,12 +47,16 @@ fn sso_cache_dir() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os("AWSWIT_SSO_CACHE_DIR").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(v));
     }
-    if let Ok(cfg) = std::env::var("AWS_CONFIG_FILE")
-        && let Some(parent) = std::path::Path::new(&cfg).parent()
-    {
-        let candidate = parent.join("sso").join("cache");
-        if candidate.is_dir() {
-            return Some(candidate);
+    if let Ok(cfg) = std::env::var("AWS_CONFIG_FILE") {
+        // Expand `~` so a user-style `AWS_CONFIG_FILE=~/.aws/config` works
+        // on every platform — `Path::parent()` would otherwise return
+        // `~/.aws` which `is_dir()` rejects.
+        let expanded = shellexpand::tilde(&cfg).to_string();
+        if let Some(parent) = std::path::Path::new(&expanded).parent() {
+            let candidate = parent.join("sso").join("cache");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
     dirs::home_dir().map(|h| h.join(".aws").join("sso").join("cache"))

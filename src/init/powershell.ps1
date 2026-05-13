@@ -25,6 +25,13 @@ function awswit {
 }
 
 # PowerShell tab completion: profile names + subcommands.
+#
+# Notes:
+# - Match with `StartsWith` (ordinal, case-insensitive) instead of `-like`
+#   so profile names containing PowerShell wildcard characters (`*`, `?`,
+#   `[`, `]`) match literally rather than being interpreted as patterns.
+# - Names captured from the binary are TrimEnd'd of `\r` because on Windows
+#   the parent process may CRLF-translate stdout.
 Register-ArgumentCompleter -Native -CommandName awswit -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
@@ -36,7 +43,9 @@ Register-ArgumentCompleter -Native -CommandName awswit -ScriptBlock {
     $profiles = @()
     try {
         $binary = (Get-Command awswit -CommandType Application).Source
-        $profiles = (& $binary -l --names-only 2>$null)
+        $profiles = (& $binary -l --names-only 2>$null) |
+            ForEach-Object { $_.TrimEnd("`r") } |
+            Where-Object { $_ -ne '' }
     } catch {}
 
     if ($position -eq 1) {
@@ -46,7 +55,9 @@ Register-ArgumentCompleter -Native -CommandName awswit -ScriptBlock {
     } else {
         return
     }
-    $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    $candidates | Where-Object {
+        $_.StartsWith($wordToComplete, [System.StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }

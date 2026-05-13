@@ -82,8 +82,23 @@ impl<'a> ProfilePicker<'a> {
     }
 
     fn run_inner(self) -> io::Result<PickerOutcome> {
+        // Drop-guard for the alt-screen + mouse-capture pair. A panic
+        // between EnterAlternateScreen and the explicit `execute!` cleanup
+        // below would otherwise leave the user's terminal in a wedged
+        // state on Windows Terminal / conhost (mouse capture eats
+        // selection clicks, alt-screen hides the prior buffer) and on
+        // any tty where the unwind tears down stdout before the cleanup
+        // line runs.
+        struct ScreenGuard;
+        impl Drop for ScreenGuard {
+            fn drop(&mut self) {
+                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            }
+        }
+
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        let _screen = ScreenGuard;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -91,12 +106,6 @@ impl<'a> ProfilePicker<'a> {
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
-
-        let _ = execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
         let _ = terminal.show_cursor();
 
         let outcome = match result {
