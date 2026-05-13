@@ -51,8 +51,9 @@ awswit init powershell | Invoke-Expression
 ### Usage at a glance
 
 ```text
-awswit                       # interactive picker
+awswit                       # interactive picker — sets AWS_PROFILE in the shell
 awswit prod                  # switch directly
+awswit pick                  # interactive picker — prints selection to stdout
 awswit which                 # what's active right now?
 awswit doctor                # audit ~/.aws/config and SSO tokens
 awswit exec prod -- aws s3 ls   # one-off command, no shell mutation
@@ -126,6 +127,7 @@ awswit exec staging -- aws s3 ls s3://bucket
 
 ```text
 awswit [PROFILE]                 pick a profile (TUI if no PROFILE and stdout is a tty)
+awswit pick                      open the picker, print selection to stdout (no shell mutation)
 awswit exec PROFILE -- CMD ...   run CMD with AWS_PROFILE set, without touching the shell
 awswit which                     show current profile + SSO expiry / aws-vault status
 awswit doctor                    audit ~/.aws/config + SSO cache; exits non-zero on errors
@@ -225,6 +227,10 @@ awswit -l --json | jq '.[] | select(.type == "Role")'
 
 # Run a shell with a temporary profile (good for ad-hoc tasks):
 awswit exec prod -- bash
+
+# Compose pick with other tools — no shell mutation:
+aws --profile "$(awswit pick)" sts get-caller-identity
+awswit exec "$(awswit pick)" -- aws s3 ls
 
 # Wire into CI: fail the job if any profile has an expired SSO token.
 awswit doctor

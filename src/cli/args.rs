@@ -106,6 +106,17 @@ pub enum Command {
         cmd: Vec<String>,
     },
 
+    /// Open the picker and print only the selected profile name to stdout.
+    ///
+    /// Designed for pipeline composition — no shell mutation, no status
+    /// chatter on stdout. Exits 130 if the user cancelled.
+    ///
+    /// Examples:
+    ///   awswit exec "$(awswit pick)" -- aws sts get-caller-identity
+    ///   aws --profile "$(awswit pick)" s3 ls
+    ///   aws sso login --profile "$(awswit pick)"
+    Pick,
+
     /// Show the currently active AWS profile and its details.
     Which,
 

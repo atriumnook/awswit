@@ -52,6 +52,7 @@ fn run(args: Args) -> Result<i32, AwswitError> {
                 region,
                 cmd,
             } => exec_command(args, profile, region, cmd),
+            Command::Pick => pick(args),
             Command::Which => which(args),
             Command::Doctor => doctor(args),
             Command::Prompt { format, default } => prompt(&format, &default).map(|_| 0),
@@ -388,6 +389,33 @@ fn exec_command(
         })?;
 
     Ok(status.code().unwrap_or(1))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   `awswit pick`
+// ─────────────────────────────────────────────────────────────────────
+
+/// Open the picker, print the selection to stdout, exit 130 on cancel.
+///
+/// This is the pipeline-composition entry point — it never touches the
+/// parent shell's environment. The status chatter we emit for the
+/// default switch path is suppressed here so `$(awswit pick)` captures
+/// only the profile name.
+fn pick(args: Args) -> Result<i32, AwswitError> {
+    let ctx = AppContext::build(args)?;
+    let outcome = pick_profile(&ctx)?;
+    match outcome.selected {
+        Some(name) => {
+            let mut history = outcome.history;
+            history.record_use(&name);
+            if let Err(e) = awswit::history::save_history(&history) {
+                tracing::warn!("failed to persist history: {}", e);
+            }
+            println!("{}", name);
+            Ok(0)
+        }
+        None => Err(AwswitError::UserCancelled),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ set -gx AWSWIT_SHELL fish
 
 function awswit
     switch $argv[1]
-        case exec which doctor init completions prompt help -h --help -v --version -l --list
+        case exec pick which doctor init completions prompt help -h --help -v --version -l --list
             command awswit $argv
             return
     end
@@ -20,6 +20,6 @@ function __awswit_profiles
 end
 
 complete -c awswit -f
-complete -c awswit -n __fish_use_subcommand -a 'exec which doctor prompt init completions help'
+complete -c awswit -n __fish_use_subcommand -a 'exec pick which doctor prompt init completions help'
 complete -c awswit -n __fish_use_subcommand -a '(__awswit_profiles)'
 complete -c awswit -n '__fish_seen_subcommand_from exec' -a '(__awswit_profiles)'

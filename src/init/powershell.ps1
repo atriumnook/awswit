@@ -9,7 +9,7 @@ function awswit {
     $binary = (Get-Command awswit -CommandType Application).Source
     if ($Arguments.Count -ge 1) {
         switch -Regex ($Arguments[0]) {
-            '^(exec|which|doctor|init|completions|prompt|help|-h|--help|-v|--version|-l|--list)$' {
+            '^(exec|pick|which|doctor|init|completions|prompt|help|-h|--help|-v|--version|-l|--list)$' {
                 & $binary @Arguments
                 return
             }
@@ -32,7 +32,7 @@ Register-ArgumentCompleter -Native -CommandName awswit -ScriptBlock {
     $position = $tokens.Count
     if ($wordToComplete) { $position -= 1 }
 
-    $subs = @('exec', 'which', 'doctor', 'prompt', 'init', 'completions', 'help')
+    $subs = @('exec', 'pick', 'which', 'doctor', 'prompt', 'init', 'completions', 'help')
     $profiles = @()
     try {
         $binary = (Get-Command awswit -CommandType Application).Source
