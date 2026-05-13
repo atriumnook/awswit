@@ -1,12 +1,27 @@
 export AWSWIT_SHELL=zsh
 
+# True iff `$@` contains a token that means "the binary's own output is for
+# the user, not for `eval`". Scans every arg so flag order doesn't matter:
+# `awswit -l --json` and `awswit --json -l` both bypass the eval path.
+_awswit_is_info() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+            exec|pick|which|doctor|init|completions|prompt|help|\
+            -h|--help|-v|--version|-l|--list|--json|--names-only|\
+            -s|--shell-export)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 awswit() {
-    case "$1" in
-        exec|pick|which|doctor|init|completions|prompt|help|-h|--help|-v|--version|-l|--list)
-            command awswit "$@"
-            return
-            ;;
-    esac
+    if _awswit_is_info "$@"; then
+        command awswit "$@"
+        return
+    fi
     local _out _rc
     _out=$(command awswit --shell-export "$@")
     _rc=$?

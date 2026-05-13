@@ -7,12 +7,19 @@ function awswit {
     )
 
     $binary = (Get-Command awswit -CommandType Application).Source
-    if ($Arguments.Count -ge 1) {
-        switch -Regex ($Arguments[0]) {
-            '^(exec|pick|which|doctor|init|completions|prompt|help|-h|--help|-v|--version|-l|--list)$' {
-                & $binary @Arguments
-                return
-            }
+
+    # Scan every arg so flag order doesn't matter — `awswit -l --json` and
+    # `awswit --json -l` both bypass the Invoke-Expression path.
+    $infoTokens = @(
+        'exec', 'pick', 'which', 'doctor', 'init', 'completions', 'prompt',
+        'help', '-h', '--help', '-v', '--version',
+        '-l', '--list', '--json', '--names-only',
+        '-s', '--shell-export'
+    )
+    foreach ($arg in $Arguments) {
+        if ($infoTokens -contains $arg) {
+            & $binary @Arguments
+            return
         }
     }
 

@@ -412,8 +412,18 @@ fn exec_works_without_dashdash_separator_portable() {
 #[test]
 fn exec_with_typo_suggests_correct_profile() {
     let home = setup_aws_home();
+    // `exec` errors out on the unknown profile *before* spawning the
+    // command, so what CMD we pass is irrelevant — but use the awswit
+    // binary itself rather than `true` so the test is valid on Windows
+    // runners (where `true` isn't on PATH).
     let output = awswit_command(&home)
-        .args(["exec", "dvv", "--", "true"])
+        .args([
+            "exec",
+            "dvv",
+            "--",
+            env!("CARGO_BIN_EXE_awswit"),
+            "--version",
+        ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));

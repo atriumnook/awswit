@@ -141,6 +141,23 @@ pub fn save_history(history: &ProfileHistory) -> Result<(), AwswitError> {
         f.sync_all()?;
     }
     if let Err(e) = fs::rename(&tmp, &path) {
+        // On Windows, `std::fs::rename` is generally atomic-replace on NTFS
+        // via MoveFileExW(REPLACE_EXISTING), but some filesystems (FAT32,
+        // network shares) and older runtimes refuse to overwrite. Fall back
+        // to delete-then-rename on AlreadyExists rather than leak the user's
+        // history. The window between delete and rename is small and the
+        // worst case is a missing file briefly, never a corrupted one.
+        #[cfg(windows)]
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&path);
+            return match fs::rename(&tmp, &path) {
+                Ok(()) => Ok(()),
+                Err(e2) => {
+                    let _ = fs::remove_file(&tmp);
+                    Err(e2.into())
+                }
+            };
+        }
         let _ = fs::remove_file(&tmp);
         return Err(e.into());
     }
