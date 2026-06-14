@@ -11,5 +11,6 @@ pub mod error;
 pub mod history;
 pub mod profile;
 pub mod shell;
+pub mod sso;
 pub mod tui;
 pub mod utils;

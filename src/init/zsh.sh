@@ -1,48 +1,47 @@
 export AWSWIT_SHELL=zsh
-awswit() {
-    local output
-    local exit_code
 
-    # Run awswit binary and capture output
-    output=$(command awswit "$@")
-    exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-        printf '%s\n' "$output" >&2
-        return $exit_code
-    fi
-
-    # Parse and export variables from output
-    while IFS= read -r line; do
-        # Split on first '=' only
-        key="${line%%=*}"
-        value="${line#*=}"
-        # If no '=' was found, key equals the whole line and value equals the whole line
-        if [ "$key" = "$line" ]; then
-            value=""
-        fi
-        case "$key" in
-            AWS_PROFILE|AWS_DEFAULT_PROFILE|AWS_REGION|AWS_DEFAULT_REGION|AWSWIT_PROFILE)
-                if [ -n "$value" ]; then
-                    export "$key=$value"
-                else
-                    unset "$key"
-                fi
-                ;;
-            AWSWIT_UNSET)
-                unset AWS_PROFILE AWS_DEFAULT_PROFILE
-                unset AWS_REGION AWS_DEFAULT_REGION
-                unset AWSWIT_PROFILE
-                ;;
-            *)
-                # Print non-variable output
-                [ -n "$line" ] && printf '%s\n' "$line"
+# True iff `$@` contains a token that means "the binary's own output is for
+# the user, not for `eval`". Scans every arg so flag order doesn't matter:
+# `awswit -l --json` and `awswit --json -l` both bypass the eval path.
+_awswit_is_info() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+            exec|pick|which|doctor|init|completions|prompt|help|\
+            -h|--help|-v|--version|-l|--list|--json|--names-only|\
+            -s|--shell-export)
+                return 0
                 ;;
         esac
-    done <<< "$output"
+    done
+    return 1
 }
 
-# Register zsh completion for the awswit function
-if type compdef &>/dev/null; then
-    compdef _awswit awswit
-fi
+awswit() {
+    if _awswit_is_info "$@"; then
+        command awswit "$@"
+        return
+    fi
+    local _out _rc
+    _out=$(command awswit --shell-export "$@")
+    _rc=$?
+    [ $_rc -eq 0 ] && [ -n "$_out" ] && eval "$_out"
+    return $_rc
+}
+
+# Zsh tab completion: profile names + subcommands.
+_awswit() {
+    local -a subs profiles
+    subs=(exec pick which doctor prompt init completions help)
+    profiles=(${(f)"$(command awswit -l --names-only 2>/dev/null)"})
+
+    if (( CURRENT == 2 )); then
+        _alternative "subcommand:subcommand:(${subs})" "profile:profile:(${profiles})"
+        return
+    fi
+    if (( CURRENT == 3 )) && [[ "$words[2]" == exec ]]; then
+        compadd -- "${profiles[@]}"
+        return
+    fi
+}
+compdef _awswit awswit

@@ -1,9 +1,14 @@
-/// Shell-quote a value by wrapping in single quotes and escaping embedded single quotes
-fn shell_quote(s: &str) -> String {
+/// Shell-quote a value by wrapping in single quotes and escaping embedded single quotes.
+fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Validate that a value is safe for shell output (no newlines or carriage returns).
+/// PowerShell-quote a value by wrapping in single quotes and escaping embedded ones.
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Reject values that would break the shell line protocol.
 fn validate_shell_value(label: &str, value: &str) -> Result<(), crate::error::AwswitError> {
     if value.contains('\n') || value.contains('\r') {
         return Err(crate::error::AwswitError::ShellError {
@@ -16,39 +21,26 @@ fn validate_shell_value(label: &str, value: &str) -> Result<(), crate::error::Aw
     Ok(())
 }
 
-/// All environment variable names managed by awswit.
+/// Environment variables awswit manages.
 ///
-/// These must be kept in sync with the variable lists in:
-/// - src/init/bash.sh (case statement + AWSWIT_UNSET handler)
-/// - src/init/zsh.sh (case statement + AWSWIT_UNSET handler)
-/// - src/init/fish.fish (switch statement + AWSWIT_UNSET handler)
-/// - src/init/powershell.ps1 (switch statement + AWSWIT_UNSET handler)
-const MANAGED_VARS: &[&str] = &[
+/// We deliberately *set* only `AWS_PROFILE` and `AWS_REGION` — the modern
+/// AWS SDK prefers the non-`DEFAULT` form and we don't want to introduce
+/// new variables onto the user's environment.
+///
+/// We *clear* the legacy `AWS_DEFAULT_*` variants on every switch (and on
+/// `awswit -u`), because the SDK falls back to them when the modern
+/// variables are missing or unset. CI images, corporate dotfiles, and
+/// previous `aws configure` runs frequently leave them set; without
+/// clearing, `awswit -u && aws ...` can silently hit the previous account.
+///
+/// The set kept here drives `--unset` (`unset_all`); the per-switch path
+/// uses the same list to emit "unset" lines after the "export" lines.
+pub const MANAGED_VARS: &[&str] = &[
     "AWS_PROFILE",
     "AWS_DEFAULT_PROFILE",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
-    "AWSWIT_PROFILE",
 ];
-
-/// Bindings for profile selection output.
-fn profile_bindings(
-    profile_name: &str,
-    region: Option<&str>,
-) -> Vec<(&'static str, Option<String>)> {
-    vec![
-        ("AWS_PROFILE", Some(profile_name.to_string())),
-        ("AWS_DEFAULT_PROFILE", Some(profile_name.to_string())),
-        ("AWS_REGION", region.map(|r| r.to_string())),
-        ("AWS_DEFAULT_REGION", region.map(|r| r.to_string())),
-        ("AWSWIT_PROFILE", Some(profile_name.to_string())),
-    ]
-}
-
-/// Handles exporting profile selection to shell environment
-pub struct ShellExporter {
-    shell_type: ShellType,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ShellType {
@@ -58,40 +50,21 @@ pub enum ShellType {
     PowerShell,
 }
 
-impl ShellExporter {
-    /// Create a new shell exporter, detecting the current shell
-    pub fn new() -> Self {
-        let shell_type = Self::detect_shell();
-        Self { shell_type }
-    }
-
-    /// Create exporter for a specific shell
-    pub fn for_shell(shell_type: ShellType) -> Self {
-        Self { shell_type }
-    }
-
-    /// Detect the current shell type
-    fn detect_shell() -> ShellType {
-        if let Ok(shell) = std::env::var("AWSWIT_SHELL") {
-            return Self::parse_shell_name(&shell);
+impl ShellType {
+    pub fn detect() -> Self {
+        if let Ok(name) = std::env::var("AWSWIT_SHELL") {
+            return Self::from_name(&name);
         }
-
-        if let Ok(shell) = std::env::var("SHELL") {
-            return Self::parse_shell_name(&shell);
+        if let Ok(name) = std::env::var("SHELL") {
+            return Self::from_name(&name);
         }
-
-        if std::env::var("PSModulePath").is_ok() {
+        if std::env::var("PSModulePath").is_ok() || cfg!(windows) {
             return ShellType::PowerShell;
         }
-
-        if cfg!(windows) {
-            return ShellType::PowerShell;
-        }
-
         ShellType::Bash
     }
 
-    fn parse_shell_name(name: &str) -> ShellType {
+    fn from_name(name: &str) -> Self {
         let lower = name.to_lowercase();
         if lower.contains("fish") {
             ShellType::Fish
@@ -100,101 +73,82 @@ impl ShellExporter {
         } else if lower.contains("powershell") || lower.contains("pwsh") {
             ShellType::PowerShell
         } else {
-            if !lower.contains("bash") && !lower.contains("sh") {
-                tracing::warn!("Unknown shell '{}', falling back to Bash", name);
-            }
             ShellType::Bash
         }
     }
+}
 
-    /// Generate bindings with validation and a formatting function.
-    fn generate_bindings<F>(
-        profile_name: &str,
+/// Emit shell commands to set / unset awswit-managed environment variables.
+///
+/// Output is exclusively `set` / `unset` statements safe for `eval` — one per
+/// line. Status messages are the caller's job to write to stderr.
+pub struct ShellExporter {
+    shell: ShellType,
+}
+
+impl ShellExporter {
+    pub fn new() -> Self {
+        Self {
+            shell: ShellType::detect(),
+        }
+    }
+
+    pub fn for_shell(shell: ShellType) -> Self {
+        Self { shell }
+    }
+
+    /// Emit `set` commands for the selected profile and (optional) region,
+    /// plus `unset` for the legacy `AWS_DEFAULT_*` fallbacks.
+    ///
+    /// Without explicitly unsetting `AWS_DEFAULT_PROFILE` and
+    /// `AWS_DEFAULT_REGION`, the AWS SDK can still resolve credentials/region
+    /// from them, so `awswit prod` followed by `aws sts get-caller-identity`
+    /// could silently hit the previous account if it had `AWS_DEFAULT_PROFILE`
+    /// set. See the `MANAGED_VARS` doc-comment.
+    pub fn export(
+        &self,
+        profile: &str,
         region: Option<&str>,
-        format_fn: F,
-    ) -> Result<String, crate::error::AwswitError>
-    where
-        F: Fn(&str, Option<&str>) -> String,
-    {
-        validate_shell_value("Profile name", profile_name)?;
+    ) -> Result<String, crate::error::AwswitError> {
+        validate_shell_value("Profile name", profile)?;
         if let Some(r) = region {
             validate_shell_value("Region", r)?;
         }
 
-        let bindings = profile_bindings(profile_name, region);
-        let mut output = String::new();
-        for (name, value) in &bindings {
-            output.push_str(&format_fn(name, value.as_deref()));
+        let mut out = String::new();
+        out.push_str(&self.set("AWS_PROFILE", profile));
+        out.push_str(&self.unset("AWS_DEFAULT_PROFILE"));
+        match region {
+            Some(r) => out.push_str(&self.set("AWS_REGION", r)),
+            None => out.push_str(&self.unset("AWS_REGION")),
         }
-        Ok(output)
+        out.push_str(&self.unset("AWS_DEFAULT_REGION"));
+        Ok(out)
     }
 
-    /// Generate export commands that can be displayed to the user (--show-commands).
-    pub fn generate_export_commands(
-        &self,
-        profile_name: &str,
-        region: Option<&str>,
-    ) -> Result<String, crate::error::AwswitError> {
-        Self::generate_bindings(profile_name, region, |name, value| match value {
-            Some(val) => self.format_set(name, val),
-            None => self.format_unset(name),
-        })
-    }
-
-    /// Generate output for shell wrapper to eval.
-    ///
-    /// Values are validated to reject newlines and carriage returns, which could
-    /// inject extra KEY=VALUE lines and corrupt the shell wrapper's parsing.
-    pub fn generate_shell_output(
-        &self,
-        profile_name: &str,
-        region: Option<&str>,
-    ) -> Result<String, crate::error::AwswitError> {
-        Self::generate_bindings(profile_name, region, |name, value| match value {
-            Some(val) => format!("{}={}\n", name, val),
-            None => format!("{}=\n", name),
-        })
-    }
-
-    /// Generate unset commands for display
-    pub fn generate_unset_commands(&self) -> String {
-        let mut output = String::new();
+    /// Emit `unset` commands for every managed variable.
+    pub fn unset_all(&self) -> String {
+        let mut out = String::new();
         for var in MANAGED_VARS {
-            output.push_str(&self.format_unset(var));
+            out.push_str(&self.unset(var));
         }
-        output
+        out
     }
 
-    /// Generate unset output for shell wrapper
-    pub fn generate_unset_output(&self) -> String {
-        "AWSWIT_UNSET=1\n".to_string()
-    }
-
-    /// Format a set/export command for the detected shell
-    fn format_set(&self, name: &str, value: &str) -> String {
-        match self.shell_type {
+    fn set(&self, name: &str, value: &str) -> String {
+        match self.shell {
             ShellType::Bash | ShellType::Zsh => {
-                format!("export {}={}\n", name, shell_quote(value))
+                format!("export {}={}\n", name, posix_quote(value))
             }
-            ShellType::Fish => {
-                format!("set -gx {} {}\n", name, shell_quote(value))
-            }
-            ShellType::PowerShell => {
-                let ps_value = format!("'{}'", value.replace('\'', "''"));
-                format!("$env:{} = {}\n", name, ps_value)
-            }
+            ShellType::Fish => format!("set -gx {} {}\n", name, posix_quote(value)),
+            ShellType::PowerShell => format!("$env:{} = {}\n", name, ps_quote(value)),
         }
     }
 
-    /// Format an unset command for the detected shell
-    fn format_unset(&self, name: &str) -> String {
-        match self.shell_type {
-            ShellType::Bash | ShellType::Zsh => {
-                format!("unset {}\n", name)
-            }
-            ShellType::Fish => {
-                format!("set -e {}\n", name)
-            }
+    fn unset(&self, name: &str) -> String {
+        match self.shell {
+            ShellType::Bash | ShellType::Zsh => format!("unset {}\n", name),
+            ShellType::Fish => format!("set -e {}\n", name),
             ShellType::PowerShell => {
                 format!("Remove-Item Env:\\{} -ErrorAction SilentlyContinue\n", name)
             }
@@ -213,201 +167,140 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_posix_export() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter
-            .generate_export_commands("test-profile", Some("us-west-2"))
+    fn export_bash_with_region_also_clears_legacy_defaults() {
+        let out = ShellExporter::for_shell(ShellType::Bash)
+            .export("prod", Some("ap-northeast-1"))
             .unwrap();
-
-        assert!(output.contains("export AWS_PROFILE='test-profile'"));
-        assert!(output.contains("export AWS_DEFAULT_PROFILE='test-profile'"));
-        assert!(output.contains("export AWS_REGION='us-west-2'"));
-        assert!(output.contains("export AWSWIT_PROFILE='test-profile'"));
+        assert_eq!(
+            out,
+            "export AWS_PROFILE='prod'\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             export AWS_REGION='ap-northeast-1'\n\
+             unset AWS_DEFAULT_REGION\n"
+        );
     }
 
     #[test]
-    fn test_fish_export() {
-        let exporter = ShellExporter::for_shell(ShellType::Fish);
-        let output = exporter
-            .generate_export_commands("test-profile", Some("us-west-2"))
+    fn export_bash_without_region_unsets_region_and_legacy_defaults() {
+        let out = ShellExporter::for_shell(ShellType::Bash)
+            .export("prod", None)
             .unwrap();
-
-        assert!(output.contains("set -gx AWS_PROFILE 'test-profile'"));
+        assert_eq!(
+            out,
+            "export AWS_PROFILE='prod'\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             unset AWS_REGION\n\
+             unset AWS_DEFAULT_REGION\n"
+        );
     }
 
     #[test]
-    fn test_powershell_export() {
-        let exporter = ShellExporter::for_shell(ShellType::PowerShell);
-        let output = exporter
-            .generate_export_commands("test-profile", Some("us-west-2"))
+    fn export_fish() {
+        let out = ShellExporter::for_shell(ShellType::Fish)
+            .export("prod", Some("us-east-1"))
             .unwrap();
-
-        assert!(output.contains("$env:AWS_PROFILE = 'test-profile'"));
+        assert!(out.contains("set -gx AWS_PROFILE 'prod'"));
+        assert!(out.contains("set -gx AWS_REGION 'us-east-1'"));
+        assert!(out.contains("set -e AWS_DEFAULT_PROFILE"));
+        assert!(out.contains("set -e AWS_DEFAULT_REGION"));
     }
 
     #[test]
-    fn test_no_region_emits_unset() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_export_commands("test", None).unwrap();
-        assert!(output.contains("unset AWS_REGION"));
-        assert!(output.contains("unset AWS_DEFAULT_REGION"));
-
-        let exporter = ShellExporter::for_shell(ShellType::Fish);
-        let output = exporter.generate_export_commands("test", None).unwrap();
-        assert!(output.contains("set -e AWS_REGION"));
-
-        let exporter = ShellExporter::for_shell(ShellType::PowerShell);
-        let output = exporter.generate_export_commands("test", None).unwrap();
-        assert!(output.contains("Remove-Item Env:\\AWS_REGION"));
+    fn export_powershell() {
+        let out = ShellExporter::for_shell(ShellType::PowerShell)
+            .export("prod", Some("us-east-1"))
+            .unwrap();
+        assert!(out.contains("$env:AWS_PROFILE = 'prod'"));
+        assert!(out.contains("$env:AWS_REGION = 'us-east-1'"));
+        assert!(out.contains("Remove-Item Env:\\AWS_DEFAULT_PROFILE"));
+        assert!(out.contains("Remove-Item Env:\\AWS_DEFAULT_REGION"));
     }
 
     #[test]
-    fn test_unset_commands_all_shells() {
-        for shell in [ShellType::Bash, ShellType::Fish, ShellType::PowerShell] {
-            let exporter = ShellExporter::for_shell(shell);
-            let output = exporter.generate_unset_commands();
-            for var in MANAGED_VARS {
-                assert!(output.contains(var), "Missing {} in {:?} unset", var, shell);
-            }
+    fn unset_all_bash_clears_all_managed_vars() {
+        let out = ShellExporter::for_shell(ShellType::Bash).unset_all();
+        assert_eq!(
+            out,
+            "unset AWS_PROFILE\n\
+             unset AWS_DEFAULT_PROFILE\n\
+             unset AWS_REGION\n\
+             unset AWS_DEFAULT_REGION\n"
+        );
+    }
+
+    #[test]
+    fn unset_all_fish() {
+        let out = ShellExporter::for_shell(ShellType::Fish).unset_all();
+        for v in MANAGED_VARS {
+            assert!(out.contains(&format!("set -e {}", v)), "missing {}", v);
         }
     }
 
     #[test]
-    fn test_shell_output_format() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter
-            .generate_shell_output("prod", Some("ap-northeast-1"))
-            .unwrap();
-        assert!(output.contains("AWS_PROFILE=prod\n"));
-        assert!(output.contains("AWS_DEFAULT_PROFILE=prod\n"));
-        assert!(output.contains("AWS_REGION=ap-northeast-1\n"));
-        assert!(output.contains("AWS_DEFAULT_REGION=ap-northeast-1\n"));
-        assert!(output.contains("AWSWIT_PROFILE=prod\n"));
-    }
-
-    #[test]
-    fn test_shell_output_no_region() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_shell_output("prod", None).unwrap();
-        assert!(output.contains("AWS_PROFILE=prod\n"));
-        assert!(output.contains("AWS_REGION=\n"));
-    }
-
-    #[test]
-    fn test_shell_output_rejects_newline_in_profile() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let result = exporter.generate_shell_output("test\ninjected", None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shell_output_rejects_carriage_return_in_profile() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let result = exporter.generate_shell_output("test\rinjected", None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shell_output_rejects_newline_in_region() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let result = exporter.generate_shell_output("prod", Some("us-east-1\nMALICIOUS=evil"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_export_commands_rejects_newline_in_profile() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let result = exporter.generate_export_commands("test\ninjected", None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_export_commands_rejects_newline_in_region() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let result = exporter.generate_export_commands("prod", Some("us-east-1\nMALICIOUS=evil"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unset_output() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_unset_output();
-        assert!(output.contains("AWSWIT_UNSET=1"));
-    }
-
-    #[test]
-    fn test_shell_quote_empty_string() {
-        assert_eq!(shell_quote(""), "''");
-    }
-
-    #[test]
-    fn test_shell_quote_with_single_quote() {
-        let result = shell_quote("it's");
-        assert_eq!(result, "'it'\\''s'");
-    }
-
-    #[test]
-    fn test_shell_quote_special_chars() {
-        let result = shell_quote("$HOME");
-        assert_eq!(result, "'$HOME'");
-    }
-
-    #[test]
-    fn test_init_scripts_contain_all_managed_vars() {
-        let bash = include_str!("../init/bash.sh");
-        let zsh = include_str!("../init/zsh.sh");
-        let fish = include_str!("../init/fish.fish");
-        let ps1 = include_str!("../init/powershell.ps1");
-
-        for var in MANAGED_VARS {
-            assert!(bash.contains(var), "bash.sh missing {}", var);
-            assert!(zsh.contains(var), "zsh.sh missing {}", var);
-            assert!(fish.contains(var), "fish.fish missing {}", var);
-            assert!(ps1.contains(var), "powershell.ps1 missing {}", var);
+    fn unset_all_powershell() {
+        let out = ShellExporter::for_shell(ShellType::PowerShell).unset_all();
+        for v in MANAGED_VARS {
+            assert!(
+                out.contains(&format!("Remove-Item Env:\\{}", v)),
+                "missing {}",
+                v
+            );
         }
     }
 
     #[test]
-    fn test_powershell_single_quote_escaped() {
-        let exporter = ShellExporter::for_shell(ShellType::PowerShell);
-        let output = exporter.format_set("TEST", "it's a test");
-        assert!(output.contains("it''s a test"));
+    fn rejects_newline_in_profile() {
+        let r = ShellExporter::for_shell(ShellType::Bash).export("a\nb", None);
+        assert!(r.is_err());
     }
 
     #[test]
-    fn test_bash_single_quote_escaped() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.format_set("TEST", "it's a test");
-        assert!(output.contains("'\\''"));
+    fn rejects_carriage_return_in_region() {
+        let r = ShellExporter::for_shell(ShellType::Bash).export("a", Some("us\r"));
+        assert!(r.is_err());
     }
 
     #[test]
-    fn test_command_substitution_characters_are_quoted() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        // $() and backticks should be safely quoted inside single quotes
-        let output = exporter
-            .generate_export_commands("$(whoami)", Some("us-east-1"))
+    fn single_quote_escaped_posix() {
+        let out = ShellExporter::for_shell(ShellType::Bash)
+            .export("it's", None)
             .unwrap();
-        assert!(output.contains("'$(whoami)'"));
-
-        let output = exporter.generate_export_commands("`whoami`", None).unwrap();
-        assert!(output.contains("'`whoami`'"));
+        assert!(out.contains("'it'\\''s'"));
     }
 
     #[test]
-    fn test_unicode_profile_name() {
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter
-            .generate_export_commands("プロファイル", Some("ap-northeast-1"))
+    fn single_quote_escaped_powershell() {
+        let out = ShellExporter::for_shell(ShellType::PowerShell)
+            .export("it's", None)
             .unwrap();
-        assert!(output.contains("'プロファイル'"));
+        assert!(out.contains("'it''s'"));
     }
 
     #[test]
-    fn test_long_profile_name() {
-        let long_name: String = "a".repeat(256);
-        let exporter = ShellExporter::for_shell(ShellType::Bash);
-        let output = exporter.generate_export_commands(&long_name, None).unwrap();
-        assert!(output.contains(&long_name));
+    fn dollar_substitution_is_quoted() {
+        let out = ShellExporter::for_shell(ShellType::Bash)
+            .export("$(whoami)", None)
+            .unwrap();
+        assert!(out.contains("'$(whoami)'"));
+    }
+
+    #[test]
+    fn unicode_profile_name() {
+        let out = ShellExporter::for_shell(ShellType::Bash)
+            .export("プロファイル", Some("ap-northeast-1"))
+            .unwrap();
+        assert!(out.contains("'プロファイル'"));
+    }
+
+    #[test]
+    fn shell_detect_from_env() {
+        // AWSWIT_SHELL takes precedence.
+        unsafe {
+            std::env::set_var("AWSWIT_SHELL", "fish");
+        }
+        assert!(matches!(ShellType::detect(), ShellType::Fish));
+        unsafe {
+            std::env::remove_var("AWSWIT_SHELL");
+        }
     }
 }

@@ -1,43 +1,67 @@
 export AWSWIT_SHELL=bash
-awswit() {
-    local output
-    local exit_code
 
-    # Run awswit binary and capture output
-    output=$(command awswit "$@")
-    exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-        printf '%s\n' "$output" >&2
-        return $exit_code
-    fi
-
-    # Parse and export variables from output
-    while IFS= read -r line; do
-        # Split on first '=' only
-        key="${line%%=*}"
-        value="${line#*=}"
-        # If no '=' was found, key equals the whole line and value equals the whole line
-        if [ "$key" = "$line" ]; then
-            value=""
-        fi
-        case "$key" in
-            AWS_PROFILE|AWS_DEFAULT_PROFILE|AWS_REGION|AWS_DEFAULT_REGION|AWSWIT_PROFILE)
-                if [ -n "$value" ]; then
-                    export "$key=$value"
-                else
-                    unset "$key"
-                fi
-                ;;
-            AWSWIT_UNSET)
-                unset AWS_PROFILE AWS_DEFAULT_PROFILE
-                unset AWS_REGION AWS_DEFAULT_REGION
-                unset AWSWIT_PROFILE
-                ;;
-            *)
-                # Print non-variable output
-                [ -n "$line" ] && printf '%s\n' "$line"
+# True iff `$@` contains a token that means "the binary's own output is for
+# the user, not for `eval`" — any subcommand, list/help/version flag, or
+# completion-fast-path flag. Scans every arg so flag order doesn't matter:
+# `awswit -l --json` and `awswit --json -l` both bypass the eval path.
+_awswit_is_info() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+            exec|pick|which|doctor|init|completions|prompt|help|\
+            -h|--help|-v|--version|-l|--list|--json|--names-only|\
+            -s|--shell-export)
+                return 0
                 ;;
         esac
-    done <<< "$output"
+    done
+    return 1
 }
+
+awswit() {
+    if _awswit_is_info "$@"; then
+        command awswit "$@"
+        return
+    fi
+    local _out _rc
+    _out=$(command awswit --shell-export "$@")
+    _rc=$?
+    [ $_rc -eq 0 ] && [ -n "$_out" ] && eval "$_out"
+    return $_rc
+}
+
+# Bash tab completion: profile names + subcommands.
+#
+# IMPORTANT: profile names are read into an array and quoted via `printf %q`
+# before being handed to `compgen -W`. `compgen -W "$WORDLIST"` interprets
+# its argument as a shell wordlist and performs `$(...)`, `` `...` ``, and
+# variable expansion on it. Although the binary already filters out
+# shell-unsafe profile names (see fast_profile_names() in src/config/),
+# we re-quote here as defense in depth: a future change to that filter
+# must not silently turn into a shell-injection hole through a hostile
+# ~/.aws/config.
+_awswit_complete() {
+    local cur prev subs
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    subs="exec pick which doctor prompt init completions"
+
+    local -a _awswit_profiles=()
+    while IFS= read -r line; do
+        _awswit_profiles+=("$line")
+    done < <(command awswit -l --names-only 2>/dev/null)
+    local quoted=""
+    if [ ${#_awswit_profiles[@]} -gt 0 ]; then
+        printf -v quoted '%q ' "${_awswit_profiles[@]}"
+    fi
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "${subs} ${quoted}" -- "${cur}") )
+    elif [ "$COMP_CWORD" -eq 2 ] && [ "${prev}" = "exec" ]; then
+        COMPREPLY=( $(compgen -W "${quoted}" -- "${cur}") )
+    else
+        COMPREPLY=()
+    fi
+    return 0
+}
+complete -F _awswit_complete awswit

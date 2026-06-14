@@ -7,14 +7,16 @@ installers = ["shell", "powershell"]
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
 
 [package]
 name = "awswit"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 description = "Interactive AWS profile switcher with fuzzy search"
@@ -40,9 +42,6 @@ clap_complete = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
-
-# INI file parsing
-configparser = "3.0"
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }

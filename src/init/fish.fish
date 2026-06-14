@@ -1,35 +1,40 @@
 set -gx AWSWIT_SHELL fish
-function awswit
-    set -l output (command awswit $argv)
-    set -l exit_code $status
 
-    if test $exit_code -ne 0
-        echo $output >&2
-        return $exit_code
-    end
-
-    for line in $output
-        set -l parts (string split -m1 '=' $line)
-        set -l key $parts[1]
-        set -l value $parts[2]
-
-        switch $key
-            case AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION AWSWIT_PROFILE
-                if test -n "$value"
-                    set -gx $key $value
-                else
-                    set -e $key
-                end
-            case AWSWIT_UNSET
-                set -e AWS_PROFILE
-                set -e AWS_DEFAULT_PROFILE
-                set -e AWS_REGION
-                set -e AWS_DEFAULT_REGION
-                set -e AWSWIT_PROFILE
-            case '*'
-                if test -n "$key"
-                    echo $line
-                end
+# True iff `$argv` contains a token that means "the binary's own output is
+# for the user, not for `source`". Scans every arg so flag order doesn't
+# matter: `awswit -l --json` and `awswit --json -l` both bypass the
+# source path.
+function __awswit_is_info
+    for a in $argv
+        switch $a
+            case exec pick which doctor init completions prompt help \
+                 -h --help -v --version -l --list --json --names-only \
+                 -s --shell-export
+                return 0
         end
     end
+    return 1
 end
+
+function awswit
+    if __awswit_is_info $argv
+        command awswit $argv
+        return
+    end
+    set -l _out (command awswit --shell-export $argv)
+    set -l _rc $status
+    if test $_rc -eq 0; and test -n "$_out"
+        echo $_out | source
+    end
+    return $_rc
+end
+
+# Fish tab completion: profile names + subcommands.
+function __awswit_profiles
+    command awswit -l --names-only 2>/dev/null
+end
+
+complete -c awswit -f
+complete -c awswit -n __fish_use_subcommand -a 'exec pick which doctor prompt init completions help'
+complete -c awswit -n __fish_use_subcommand -a '(__awswit_profiles)'
+complete -c awswit -n '__fish_seen_subcommand_from exec' -a '(__awswit_profiles)'
