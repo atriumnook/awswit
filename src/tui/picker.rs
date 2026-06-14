@@ -92,14 +92,17 @@ impl<'a> ProfilePicker<'a> {
         struct ScreenGuard;
         impl Drop for ScreenGuard {
             fn drop(&mut self) {
-                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = execute!(io::stderr(), LeaveAlternateScreen, DisableMouseCapture);
             }
         }
 
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        // Render to stderr: the shell wrapper captures stdout via `$(...)`, so
+        // the TUI must not write there or it corrupts the export payload that
+        // gets `eval`ed by the parent shell.
+        let mut stderr = io::stderr();
+        execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
         let _screen = ScreenGuard;
-        let backend = CrosstermBackend::new(stdout);
+        let backend = CrosstermBackend::new(stderr);
         let mut terminal = Terminal::new(backend)?;
 
         let mut app = PickerApp::new(self.profiles, self.history, self.theme);
@@ -167,7 +170,7 @@ impl PickerApp {
 
     fn run(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     ) -> io::Result<PickerOutcome> {
         loop {
             terminal.draw(|f| self.render(f))?;
@@ -332,11 +335,16 @@ impl PickerApp {
 
         let count_text = format!(" {}/{} ", self.filtered.len(), self.entries.len());
         let count_x = area.right().saturating_sub(count_text.len() as u16 + 2);
-        let count_area = Rect::new(count_x, area.y, count_text.len() as u16 + 2, 1);
-        frame.render_widget(
-            Paragraph::new(Span::styled(count_text, self.theme.muted_style())),
-            count_area,
-        );
+        // Clamp to the frame: on a very narrow terminal an out-of-bounds Rect
+        // makes ratatui panic during render.
+        let count_area =
+            Rect::new(count_x, area.y, count_text.len() as u16 + 2, 1).intersection(area);
+        if count_area.width > 0 && count_area.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(count_text, self.theme.muted_style())),
+                count_area,
+            );
+        }
     }
 
     fn render_main_area(&mut self, frame: &mut Frame, area: Rect) {
