@@ -80,6 +80,11 @@ export AWS_PROFILE='prod'
 unset AWS_DEFAULT_PROFILE
 export AWS_REGION='ap-northeast-1'
 unset AWS_DEFAULT_REGION
+unset AWS_ACCESS_KEY_ID
+unset AWS_SECRET_ACCESS_KEY
+unset AWS_SESSION_TOKEN
+unset AWS_SECURITY_TOKEN
+unset AWS_CREDENTIAL_EXPIRATION
 ```
 
 We **set** the modern `AWS_PROFILE` / `AWS_REGION` variables, and
@@ -89,9 +94,19 @@ value left over from a CI image, a corporate dotfile, or a previous
 account. If the profile has no region, `AWS_REGION` is also unset and
 the SDK falls back to its own resolution.
 
+We also **clear inherited credential variables** (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and friends). These outrank
+`AWS_PROFILE` in the SDK resolution chain, so without clearing them a
+left-over key or session token from a previous `aws sso login`,
+aws-vault subshell, or awsume run would silently win — `awswit prod`
+would set the profile yet `aws s3 ls` would keep hitting the old
+account. Clearing them makes awswit a drop-in switcher: **after
+`awswit prod`, plain `aws ...` just works as the prod profile.**
+
 The AWS SDK resolves credentials from there — IAM keys, SSO, role
 assumption, `credential_process`, anything you've already configured.
-**awswit never reads or stores credential material.**
+**awswit never reads, fetches, or stores credential material itself** —
+it only removes conflicting variables and lets the SDK do the rest.
 
 ## Comparison
 

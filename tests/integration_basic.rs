@@ -174,6 +174,37 @@ fn shell_export_emits_export_lines_to_stdout_only() {
 }
 
 #[test]
+fn shell_export_clears_inherited_credentials() {
+    // awsume-style guarantee: after switching, inherited env credentials must
+    // be cleared so the selected profile wins the SDK resolution chain and
+    // plain `aws ...` runs as that profile.
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["--shell-export", "--no-interactive", "default"])
+        .env("AWSWIT_SHELL", "bash")
+        .env("AWS_ACCESS_KEY_ID", "AKIA_STALE")
+        .env("AWS_SECRET_ACCESS_KEY", "stale_secret")
+        .env("AWS_SESSION_TOKEN", "stale_token")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for v in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CREDENTIAL_EXPIRATION",
+    ] {
+        assert!(
+            stdout.contains(&format!("unset {}", v)),
+            "missing unset for inherited credential {}",
+            v
+        );
+    }
+}
+
+#[test]
 fn unset_emits_unset_lines_for_every_managed_var() {
     let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
         .arg("--unset")

@@ -42,6 +42,31 @@ pub const MANAGED_VARS: &[&str] = &[
     "AWS_DEFAULT_REGION",
 ];
 
+/// Credential variables that the AWS SDK reads *before* it ever looks at
+/// `AWS_PROFILE`. We clear these on every switch (and on `awswit -u`) so the
+/// selected profile actually takes effect.
+///
+/// In the SDK / CLI credential-resolution chain, explicit environment
+/// credentials win over `AWS_PROFILE`. So if a previous `aws sso login`,
+/// aws-vault subshell, or awsume run left `AWS_ACCESS_KEY_ID` /
+/// `AWS_SESSION_TOKEN` in the environment, then `awswit prod` would set
+/// `AWS_PROFILE=prod` yet `aws s3 ls` would silently keep using the *stale*
+/// credentials. Clearing them makes awswit a drop-in awsume-style switcher:
+/// after `awswit prod`, plain `aws ...` runs as the prod profile.
+///
+/// awswit still never *creates* credentials — it only removes conflicting
+/// ones and lets the SDK resolve the profile (IAM keys, SSO, role assumption,
+/// `credential_process`, …) on the next call. `AWS_SECURITY_TOKEN` is the
+/// legacy alias for `AWS_SESSION_TOKEN` still honored by some SDKs;
+/// `AWS_CREDENTIAL_EXPIRATION` is informational metadata some tools export.
+pub const CREDENTIAL_VARS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CREDENTIAL_EXPIRATION",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub enum ShellType {
     Bash,
@@ -98,13 +123,16 @@ impl ShellExporter {
     }
 
     /// Emit `set` commands for the selected profile and (optional) region,
-    /// plus `unset` for the legacy `AWS_DEFAULT_*` fallbacks.
+    /// plus `unset` for the legacy `AWS_DEFAULT_*` fallbacks and any inherited
+    /// credential variables.
     ///
     /// Without explicitly unsetting `AWS_DEFAULT_PROFILE` and
     /// `AWS_DEFAULT_REGION`, the AWS SDK can still resolve credentials/region
     /// from them, so `awswit prod` followed by `aws sts get-caller-identity`
     /// could silently hit the previous account if it had `AWS_DEFAULT_PROFILE`
-    /// set. See the `MANAGED_VARS` doc-comment.
+    /// set. Likewise, inherited `AWS_ACCESS_KEY_ID` / `AWS_SESSION_TOKEN`
+    /// outrank `AWS_PROFILE`, so we clear them too — see the `MANAGED_VARS` and
+    /// `CREDENTIAL_VARS` doc-comments.
     pub fn export(
         &self,
         profile: &str,
@@ -123,13 +151,19 @@ impl ShellExporter {
             None => out.push_str(&self.unset("AWS_REGION")),
         }
         out.push_str(&self.unset("AWS_DEFAULT_REGION"));
+        // Clear inherited credentials so the freshly selected profile wins the
+        // SDK resolution chain (env credentials outrank AWS_PROFILE).
+        for var in CREDENTIAL_VARS {
+            out.push_str(&self.unset(var));
+        }
         Ok(out)
     }
 
-    /// Emit `unset` commands for every managed variable.
+    /// Emit `unset` commands for every managed variable, including inherited
+    /// credentials, so `awswit -u` returns to a clean, unauthenticated state.
     pub fn unset_all(&self) -> String {
         let mut out = String::new();
-        for var in MANAGED_VARS {
+        for var in MANAGED_VARS.iter().chain(CREDENTIAL_VARS) {
             out.push_str(&self.unset(var));
         }
         out
@@ -167,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn export_bash_with_region_also_clears_legacy_defaults() {
+    fn export_bash_with_region_also_clears_legacy_defaults_and_credentials() {
         let out = ShellExporter::for_shell(ShellType::Bash)
             .export("prod", Some("ap-northeast-1"))
             .unwrap();
@@ -176,12 +210,17 @@ mod tests {
             "export AWS_PROFILE='prod'\n\
              unset AWS_DEFAULT_PROFILE\n\
              export AWS_REGION='ap-northeast-1'\n\
-             unset AWS_DEFAULT_REGION\n"
+             unset AWS_DEFAULT_REGION\n\
+             unset AWS_ACCESS_KEY_ID\n\
+             unset AWS_SECRET_ACCESS_KEY\n\
+             unset AWS_SESSION_TOKEN\n\
+             unset AWS_SECURITY_TOKEN\n\
+             unset AWS_CREDENTIAL_EXPIRATION\n"
         );
     }
 
     #[test]
-    fn export_bash_without_region_unsets_region_and_legacy_defaults() {
+    fn export_bash_without_region_unsets_region_legacy_defaults_and_credentials() {
         let out = ShellExporter::for_shell(ShellType::Bash)
             .export("prod", None)
             .unwrap();
@@ -190,8 +229,25 @@ mod tests {
             "export AWS_PROFILE='prod'\n\
              unset AWS_DEFAULT_PROFILE\n\
              unset AWS_REGION\n\
-             unset AWS_DEFAULT_REGION\n"
+             unset AWS_DEFAULT_REGION\n\
+             unset AWS_ACCESS_KEY_ID\n\
+             unset AWS_SECRET_ACCESS_KEY\n\
+             unset AWS_SESSION_TOKEN\n\
+             unset AWS_SECURITY_TOKEN\n\
+             unset AWS_CREDENTIAL_EXPIRATION\n"
         );
+    }
+
+    #[test]
+    fn export_clears_inherited_credentials_for_all_shells() {
+        for shell in [ShellType::Bash, ShellType::Fish, ShellType::PowerShell] {
+            let out = ShellExporter::for_shell(shell)
+                .export("prod", Some("us-east-1"))
+                .unwrap();
+            for v in CREDENTIAL_VARS {
+                assert!(out.contains(v), "{:?} export missing clear of {}", shell, v);
+            }
+        }
     }
 
     #[test]
@@ -217,21 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn unset_all_bash_clears_all_managed_vars() {
+    fn unset_all_bash_clears_managed_vars_and_credentials() {
         let out = ShellExporter::for_shell(ShellType::Bash).unset_all();
         assert_eq!(
             out,
             "unset AWS_PROFILE\n\
              unset AWS_DEFAULT_PROFILE\n\
              unset AWS_REGION\n\
-             unset AWS_DEFAULT_REGION\n"
+             unset AWS_DEFAULT_REGION\n\
+             unset AWS_ACCESS_KEY_ID\n\
+             unset AWS_SECRET_ACCESS_KEY\n\
+             unset AWS_SESSION_TOKEN\n\
+             unset AWS_SECURITY_TOKEN\n\
+             unset AWS_CREDENTIAL_EXPIRATION\n"
         );
     }
 
     #[test]
     fn unset_all_fish() {
         let out = ShellExporter::for_shell(ShellType::Fish).unset_all();
-        for v in MANAGED_VARS {
+        for v in MANAGED_VARS.iter().chain(CREDENTIAL_VARS) {
             assert!(out.contains(&format!("set -e {}", v)), "missing {}", v);
         }
     }
@@ -239,7 +300,7 @@ mod tests {
     #[test]
     fn unset_all_powershell() {
         let out = ShellExporter::for_shell(ShellType::PowerShell).unset_all();
-        for v in MANAGED_VARS {
+        for v in MANAGED_VARS.iter().chain(CREDENTIAL_VARS) {
             assert!(
                 out.contains(&format!("Remove-Item Env:\\{}", v)),
                 "missing {}",

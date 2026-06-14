@@ -135,9 +135,14 @@ fn switch_profile(mut ctx: AppContext) -> Result<(), AwswitError> {
 /// saved on-toggle while main saved a stale snapshot afterwards, silently
 /// reverting favorite changes.
 fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), AwswitError> {
+    // The shell wrapper runs `awswit --shell-export` inside `$(...)`, so stdout
+    // is a pipe even in interactive use. Gate the picker on stdin/stderr being
+    // a terminal instead — the picker renders to stderr, leaving stdout for the
+    // `eval`-able export payload.
     let want_picker = ctx.args.profile_name.is_none()
         && !ctx.args.no_interactive
-        && std::io::stdout().is_terminal();
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
 
     if want_picker {
         let outcome = pick_profile(ctx)?;
