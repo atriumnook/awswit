@@ -14,10 +14,18 @@
 # title/body based on your changelogs.
 
 name: Release
+# BEGIN AWSWIT LEAST-PRIVILEGE DEFAULT
 permissions:
-  "contents": "write"
+  "contents": "read"
+# END AWSWIT LEAST-PRIVILEGE DEFAULT
 
-# This task will run whenever you push a git tag that looks like a version
+# BEGIN AWSWIT RELEASE CONCURRENCY
+concurrency:
+  group: release-${{ github.workflow }}-${{ inputs.tag }}
+  cancel-in-progress: false
+# END AWSWIT RELEASE CONCURRENCY
+
+# This task will run whenever you workflow_dispatch with a tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
 # Various formats will be parsed into a VERSION and an optional PACKAGE_NAME, where
 # PACKAGE_NAME must be the name of a Cargo package in your workspace, and VERSION
@@ -39,10 +47,13 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
-  pull_request:
-  push:
-    tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release Tag
+        required: true
+        default: dry-run
+        type: string
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
@@ -50,26 +61,60 @@ jobs:
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ (inputs.tag != 'dry-run' && inputs.tag) || '' }}
+      tag-flag: ${{ inputs.tag && inputs.tag != 'dry-run' && format('--tag={0}', inputs.tag) || '' }}
+      publishing: ${{ inputs.tag && inputs.tag != 'dry-run' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      # BEGIN AWSWIT RELEASE INPUT GUARD
+      - name: Validate release request
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TAG" == "dry-run" ]]; then
+            exit 0
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Releases must be dispatched from main" >&2
+            exit 1
+          fi
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if [[ ! "$RELEASE_TAG" =~ $semver ]]; then
+            echo "Release tag must be v-prefixed SemVer" >&2
+            exit 1
+          fi
+      # END AWSWIT RELEASE INPUT GUARD
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+      # BEGIN AWSWIT RELEASE REPOSITORY POLICY (PLAN)
+      - name: Verify immutable releases and protected release tags
+        if: ${{ inputs.tag != 'dry-run' }}
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: bash .github/scripts/check-release-repository-policy.sh "$RELEASE_TAG"
+      # END AWSWIT RELEASE REPOSITORY POLICY (PLAN)
+      # BEGIN AWSWIT VERIFIED DIST INSTALL (PLAN)
+      - name: Install verified cargo-dist
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
-      - name: Cache dist
-        uses: actions/upload-artifact@v6
-        with:
-          name: cargo-dist-cache
-          path: ~/.cargo/bin/dist
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-dist"
+          target="x86_64-unknown-linux-gnu"
+          archive="cargo-dist-$target.tar.xz"
+          expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
+          printf '%s  %s\n' "$expected_hash" "$tool_root/$archive" | sha256sum --check --strict
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-dist-$target" >> "$GITHUB_PATH"
+      # END AWSWIT VERIFIED DIST INSTALL (PLAN)
       # sure would be cool if github gave us proper conditionals...
       # so here's a doubly-nested ternary-via-truthiness to try to provide the best possible
       # functionality based on whether this is a pull_request, and whether it's from a fork.
@@ -77,12 +122,12 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          dist ${{ (inputs.tag && inputs.tag != 'dry-run' && format('host --steps=create --tag={0}', inputs.tag)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
@@ -93,7 +138,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') || inputs.tag == 'dry-run' }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -116,7 +161,7 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           submodules: recursive
@@ -125,13 +170,71 @@ jobs:
         run: |
           if ! command -v cargo > /dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            # BEGIN AWSWIT GENERATED SHELL LINT (RUSTUP PATH)
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            # END AWSWIT GENERATED SHELL LINT (RUSTUP PATH)
           fi
-      - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+      # BEGIN AWSWIT VERIFIED DIST INSTALL (BUILD)
+      - name: Install verified cargo-dist
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          DIST_TARGET: ${{ join(matrix.targets, '') }}
+        run: |
+          set -euo pipefail
+          case "$DIST_TARGET" in
+            aarch64-apple-darwin)
+              expected_hash="decb01c64c12501931c3cac3111b368a7f48adf8d9e65455c08e5757b9a1fd6f"
+              ;;
+            aarch64-unknown-linux-gnu)
+              expected_hash="382cc29ff91ef12a5bf78ad8ee1804661d24e2fbe64b1bdedd6078723b677ae5"
+              ;;
+            x86_64-apple-darwin)
+              expected_hash="fd4d8f9f07802359cbcdc52bac3abd7d5201c4b73a7cbcdd6faca2232a389f0c"
+              ;;
+            x86_64-unknown-linux-gnu)
+              expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
+              ;;
+            *)
+              echo "No pinned cargo-dist archive for $DIST_TARGET" >&2
+              exit 1
+              ;;
+          esac
+          tool_root="$RUNNER_TEMP/cargo-dist"
+          archive="cargo-dist-$DIST_TARGET.tar.xz"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
+          printf '%s  %s\n' "$expected_hash" "$tool_root/$archive" | shasum -a 256 --check
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-dist-$DIST_TARGET" >> "$GITHUB_PATH"
+      - name: Install verified cargo-dist
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          DIST_TARGET: ${{ join(matrix.targets, '') }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:DIST_TARGET -ne 'x86_64-pc-windows-msvc') {
+            throw "No pinned cargo-dist archive for $env:DIST_TARGET"
+          }
+          $expectedHash = 'a14e17557b269b101405e0cc6b647581d56313c954a51c7fddd423bba21e17b2'
+          $toolRoot = Join-Path $env:RUNNER_TEMP 'cargo-dist'
+          $archive = "cargo-dist-$env:DIST_TARGET.zip"
+          $archivePath = Join-Path $toolRoot $archive
+          New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive" -OutFile $archivePath
+          $actualHash = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "cargo-dist archive checksum mismatch: expected $expectedHash, got $actualHash"
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
+          $toolRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      # END AWSWIT VERIFIED DIST INSTALL (BUILD)
       # Get the dist-manifest
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -144,6 +247,40 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      # BEGIN AWSWIT NATIVE ARTIFACT SMOKE
+      - name: Smoke native packaged executable
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          DIST_TARGET: ${{ join(matrix.targets, '') }}
+        run: |
+          set -euo pipefail
+          archive="target/distrib/awswit-$DIST_TARGET.tar.xz"
+          smoke_root="$RUNNER_TEMP/awswit-native-smoke"
+          test -s "$archive"
+          mkdir -p "$smoke_root"
+          tar -xJf "$archive" -C "$smoke_root"
+          binary="$smoke_root/awswit-$DIST_TARGET/awswit"
+          test -x "$binary"
+          "$binary" --version | grep -Fq 'awswit '
+          "$binary" --help >/dev/null
+      - name: Smoke native packaged executable
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          DIST_TARGET: ${{ join(matrix.targets, '') }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "target/distrib/awswit-$env:DIST_TARGET.zip"
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'awswit-native-smoke'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "missing archive $archive" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot
+          $binary = Join-Path $smokeRoot "awswit-$env:DIST_TARGET/awswit.exe"
+          & $binary --version | Select-String -SimpleMatch 'awswit ' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'version smoke failed' }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'help smoke failed' }
+      # END AWSWIT NATIVE ARTIFACT SMOKE
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -152,13 +289,17 @@ jobs:
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          # BEGIN AWSWIT GENERATED SHELL LINT (LOCAL OUTPUT)
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # END AWSWIT GENERATED SHELL LINT (LOCAL OUTPUT)
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -175,19 +316,30 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install cached dist
-        uses: actions/download-artifact@v7
-        with:
-          name: cargo-dist-cache
-          path: ~/.cargo/bin/
-      - run: chmod +x ~/.cargo/bin/dist
+      # BEGIN AWSWIT VERIFIED DIST INSTALL (GLOBAL)
+      - name: Install verified cargo-dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-dist"
+          target="x86_64-unknown-linux-gnu"
+          archive="cargo-dist-$target.tar.xz"
+          expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
+          printf '%s  %s\n' "$expected_hash" "$tool_root/$archive" | sha256sum --check --strict
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-dist-$target" >> "$GITHUB_PATH"
+      # END AWSWIT VERIFIED DIST INSTALL (GLOBAL)
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -199,45 +351,86 @@ jobs:
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          # BEGIN AWSWIT GENERATED SHELL LINT (GLOBAL OUTPUT)
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # END AWSWIT GENERATED SHELL LINT (GLOBAL OUTPUT)
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: artifacts-build-global
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  custom-release-gate:
+    needs:
+      - plan
+      - build-local-artifacts
+      # BEGIN AWSWIT RELEASE GATE GLOBAL DEPENDENCY
+      - build-global-artifacts
+      # END AWSWIT RELEASE GATE GLOBAL DEPENDENCY
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    # BEGIN AWSWIT NO INHERITED RELEASE SECRETS
+    # The local artifact gate has no secret contract. Do not expose repository
+    # or organization secrets to a workflow selected from the dispatched ref.
+    # END AWSWIT NO INHERITED RELEASE SECRETS
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+      - custom-release-gate
+    # Publishing is fail-closed: every build and verification gate must succeed.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-global-artifacts.result == 'success' && needs.custom-release-gate.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
+    permissions:
+      "attestations": "write"
+      "contents": "write"
+      "id-token": "write"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install cached dist
-        uses: actions/download-artifact@v7
-        with:
-          name: cargo-dist-cache
-          path: ~/.cargo/bin/
-      - run: chmod +x ~/.cargo/bin/dist
+      # BEGIN AWSWIT RELEASE REPOSITORY POLICY (HOST)
+      - name: Reverify immutable releases and protected release tags
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: bash .github/scripts/check-release-repository-policy.sh "$RELEASE_TAG"
+      # END AWSWIT RELEASE REPOSITORY POLICY (HOST)
+      # BEGIN AWSWIT VERIFIED DIST INSTALL (HOST)
+      - name: Install verified cargo-dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-dist"
+          target="x86_64-unknown-linux-gnu"
+          archive="cargo-dist-$target.tar.xz"
+          expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
+          printf '%s  %s\n' "$expected_hash" "$tool_root/$archive" | sha256sum --check --strict
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-dist-$target" >> "$GITHUB_PATH"
+      # END AWSWIT VERIFIED DIST INSTALL (HOST)
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -250,14 +443,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: artifacts-*
           path: artifacts
@@ -266,17 +459,142 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      # BEGIN AWSWIT FINAL ASSET VALIDATION
+      - name: Verify exact final release asset set
+        run: python3 .github/scripts/validate-release-assets.py --phase final artifacts
+      # END AWSWIT FINAL ASSET VALIDATION
+      - name: Attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: |
+            artifacts/*.cdx.xml
+            artifacts/*.json
+            artifacts/*.ps1
+            artifacts/*.sha256
+            artifacts/*.sh
+            artifacts/*.sum
+            artifacts/*.tar.gz
+            artifacts/*.tar.xz
+            artifacts/*.zip
+      # BEGIN AWSWIT TRANSACTIONAL RELEASE STEP
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
         run: |
+          set -euo pipefail
+          bash .github/scripts/check-release-repository-policy.sh "$RELEASE_TAG"
           # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+
+          is_prerelease=false
+          if [[ "$PRERELEASE_FLAG" == "--prerelease" ]]; then
+            is_prerelease=true
+          elif [[ -n "$PRERELEASE_FLAG" ]]; then
+            echo "Unexpected prerelease flag" >&2
+            exit 1
+          fi
+
+          tag_ref="refs/tags/$RELEASE_TAG"
+          owned_tag=false
+          owned_release_id=""
+
+          remote_tag_sha() {
+            local refs
+            refs=$(git ls-remote --exit-code --refs origin "$tag_ref") || return 1
+            test "$(printf '%s\n' "$refs" | wc -l)" -eq 1 || return 1
+            printf '%s\n' "$refs" | awk '{ print $1 }'
+          }
+
+          cleanup_release() {
+            result=${1:?cleanup status is required}
+            if [[ "$result" -eq 0 ]]; then
+              result=1
+            fi
+            trap - ERR INT TERM
+            release_removed=false
+            if [[ -n "$owned_release_id" ]]; then
+              release_state=$(gh api \
+                "repos/$GITHUB_REPOSITORY/releases/$owned_release_id" 2>/dev/null || true)
+              if jq -e \
+                --argjson id "$owned_release_id" \
+                --arg tag "$RELEASE_TAG" \
+                '.id == $id and .tag_name == $tag and .draft == true' \
+                <<<"$release_state" >/dev/null; then
+                if ! gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/releases/$owned_release_id"; then
+                  echo "Could not clean up owned draft release $RELEASE_TAG" >&2
+                else
+                  release_removed=true
+                fi
+              else
+                echo "Refusing to delete a release that is no longer the owned draft" >&2
+              fi
+            fi
+
+            # If release creation failed before returning an owned ID, leave the
+            # tag in place: a concurrent release may already refer to it.
+            if [[ "$owned_tag" == true && "$release_removed" == true ]]; then
+              current_tag_sha=$(remote_tag_sha 2>/dev/null || true)
+              if [[ "$current_tag_sha" == "$RELEASE_COMMIT" ]]; then
+                # The required no-bypass deletion rule normally rejects this
+                # best-effort cleanup. In that case the correct-SHA tag remains
+                # for explicit owner recovery; never weaken protection here.
+                if ! gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG"; then
+                  echo "Could not clean up owned tag $RELEASE_TAG" >&2
+                fi
+              elif [[ -n "$current_tag_sha" ]]; then
+                echo "Refusing to delete changed tag $RELEASE_TAG" >&2
+              fi
+            fi
+            exit "$result"
+          }
+          trap 'cleanup_release "$?"' ERR
+          trap 'cleanup_release 130' INT
+          trap 'cleanup_release 143' TERM
+
+          # Creating the ref is the atomic ownership boundary. A pre-existing or
+          # concurrently-created tag makes the API fail without granting cleanup rights.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="$tag_ref" \
+            -f sha="$RELEASE_COMMIT" >/dev/null
+          owned_tag=true
+          test "$(remote_tag_sha)" = "$RELEASE_COMMIT"
+
+          release_payload=$(jq -n \
+            --arg tag "$RELEASE_TAG" \
+            --arg title "$ANNOUNCEMENT_TITLE" \
+            --rawfile body "$RUNNER_TEMP/notes.txt" \
+            --argjson prerelease "$is_prerelease" \
+            '{tag_name: $tag, name: $title, body: $body, draft: true, prerelease: $prerelease}')
+          release_response=$(gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/releases" --input - <<<"$release_payload")
+          owned_release_id=$(jq -er '.id | select(type == "number")' <<<"$release_response")
+          gh release upload "$RELEASE_TAG" artifacts/*
+
+          local_assets=$(find artifacts -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          remote_assets=$(gh release view "$RELEASE_TAG" --json assets \
+            --jq '.assets[].name' | LC_ALL=C sort)
+          test "$remote_assets" = "$local_assets"
+          test "$(remote_tag_sha)" = "$RELEASE_COMMIT"
+
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$owned_release_id" \
+            -F draft=false >/dev/null
+          owned_release_id=""
+          owned_tag=false
+          trap - ERR INT TERM
+      # END AWSWIT TRANSACTIONAL RELEASE STEP
 
   announce:
     needs:
@@ -290,7 +608,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
           submodules: recursive

@@ -1,429 +1,50 @@
-name: CI
+name: Release artifact gate
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-  # release-plz uses this event because GitHub suppresses push/pull_request
-  # workflows caused by the repository GITHUB_TOKEN.
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      plan:
+        description: cargo-dist release plan
+        required: true
+        type: string
 
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  repository-contract:
-    name: Workflow and documentation contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Validate GitHub Actions workflows
-        run: >-
-          docker run --rm
-          -v "$PWD:/repo:ro"
-          -w /repo
-          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
-
-      - name: Validate repository-local Markdown links
-        run: python3 .github/scripts/check-local-markdown-links.py
-
-      - name: Exercise release tag ruleset fixtures
-        run: python3 .github/scripts/test-release-ruleset-contract.py
-
-      - name: Exercise release repository policy fixtures
-        run: bash .github/scripts/test-release-repository-policy.sh
-
-      - name: Exercise release transaction ownership fixtures
-        run: bash .github/scripts/test-release-transaction.sh
-
-  fmt:
-    name: Formatting
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta]
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: ${{ matrix.rust }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run tests
-        run: cargo test --locked --all-features --verbose
-
-  msrv:
-    name: MSRV (1.94)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94
-        with:
-          toolchain: 1.94
-
-      - name: Cache cargo registry
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-msrv-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Check compilation on MSRV
-        run: cargo check --locked --all-targets
-
-      - name: Run tests on MSRV
-        run: cargo test --locked --all-features
-
-  performance:
-    name: 1,000-profile p95 contract
+  validate-request:
+    name: Validate release request
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94
-        with:
-          toolchain: 1.94
-
-      - name: Cache cargo registry
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-performance-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Enforce catalog and fuzzy-filter p95 budgets
-        run: >-
-          cargo test --locked --release --lib performance_contract
-          -- --ignored --nocapture
-
-  security:
-    name: Dependency policy and advisories
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Check advisories, licenses, bans, and sources
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check
-          arguments: --all-features
-
-  release-contract:
-    name: Release workflow contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install cargo-dist 0.31.0
+      - name: Validate publishing branch
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         shell: bash
         run: |
-          # Literal payloads intentionally exercise non-expansion.
-          # shellcheck disable=SC2016
           set -euo pipefail
-          tool_root="$RUNNER_TEMP/cargo-dist"
-          archive="cargo-dist-x86_64-unknown-linux-gnu.tar.xz"
-          mkdir -p "$tool_root"
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            --output "$tool_root/$archive" \
-            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
-          expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
-          actual_hash=$(sha256sum "$tool_root/$archive" | awk '{ print $1 }')
-          test "$actual_hash" = "$expected_hash"
-          tar -xJf "$tool_root/$archive" -C "$tool_root"
-          echo "$tool_root/cargo-dist-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+          if [[ "$RELEASE_TAG" != "dry-run" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Releases must be dispatched from main" >&2
+            exit 1
+          fi
 
-      - name: Verify generated workflow and release plan
-        shell: bash
-        run: |
-          # The generated-workflow comparison contains deliberate literal shell data.
-          # shellcheck disable=SC2016
-          set -euo pipefail
-          test "$(dist --version)" = "cargo-dist 0.31.0"
-          hardened_release="$RUNNER_TEMP/hardened-release.yml"
-          original_cargo="$RUNNER_TEMP/Cargo.toml"
-          cp .github/workflows/release.yml "$hardened_release"
-          cp Cargo.toml "$original_cargo"
-          trap 'cp "$original_cargo" Cargo.toml' EXIT
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("Cargo.toml")
-          text = path.read_text()
-          allow_dirty = 'allow-dirty = ["ci"]\n'
-          if text.count(allow_dirty) != 1:
-              raise SystemExit("cargo-dist allow-dirty contract is missing or duplicated")
-          path.write_text(text.replace(allow_dirty, ""))
-          PY
-          dist generate --mode=ci
-          cp "$original_cargo" Cargo.toml
-          trap - EXIT
-          HARDENED_RELEASE="$hardened_release" GENERATED_RELEASE=".github/workflows/release.yml" python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          hardened = Path(os.environ["HARDENED_RELEASE"]).read_text()
-          generated = Path(os.environ["GENERATED_RELEASE"]).read_text()
-          permissions_begin = "# BEGIN AWSWIT LEAST-PRIVILEGE DEFAULT\n"
-          permissions_end = "# END AWSWIT LEAST-PRIVILEGE DEFAULT\n"
-          if hardened.count(permissions_begin) != 1 or hardened.count(permissions_end) != 1:
-              raise SystemExit("release permission markers are invalid")
-          before, guarded = hardened.split(permissions_begin, 1)
-          _, after = guarded.split(permissions_end, 1)
-          normalized = before + 'permissions:\n  "contents": "write"\n' + after
-
-          concurrency_begin = "# BEGIN AWSWIT RELEASE CONCURRENCY\n"
-          concurrency_end = "# END AWSWIT RELEASE CONCURRENCY\n\n"
-          if normalized.count(concurrency_begin) != 1 or normalized.count(concurrency_end) != 1:
-              raise SystemExit("release concurrency markers are invalid")
-          before, guarded = normalized.split(concurrency_begin, 1)
-          _, after = guarded.split(concurrency_end, 1)
-          normalized = before + after
-
-          input_begin = "      # BEGIN AWSWIT RELEASE INPUT GUARD\n"
-          input_end = "      # END AWSWIT RELEASE INPUT GUARD\n"
-          if normalized.count(input_begin) != 1 or normalized.count(input_end) != 1:
-              raise SystemExit("release input guard markers are invalid")
-          before, guarded = normalized.split(input_begin, 1)
-          _, after = guarded.split(input_end, 1)
-          normalized = before + after
-
-          for phase in ("PLAN", "HOST"):
-              policy_begin = f"      # BEGIN AWSWIT RELEASE REPOSITORY POLICY ({phase})\n"
-              policy_end = f"      # END AWSWIT RELEASE REPOSITORY POLICY ({phase})\n"
-              if normalized.count(policy_begin) != 1 or normalized.count(policy_end) != 1:
-                  raise SystemExit(f"release repository policy {phase.lower()} markers are invalid")
-              before, guarded = normalized.split(policy_begin, 1)
-              _, after = guarded.split(policy_end, 1)
-              normalized = before + after
-
-          gha = lambda expression: "$" + "{{ " + expression + " }}"
-          gha_literal = lambda expression: "$" + "{" + "{ " + expression + " }" + "}"
-          verified_blocks = {
-              "PLAN": "\n".join([
-                  "      - name: Install dist",
-                  "        # we specify bash to get pipefail; it guards against the `curl` command",
-                  "        # failing. otherwise `sh` won't catch that `curl` returned non-0",
-                  "        shell: bash",
-                  "        run: \"curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh\"",
-                  "      - name: Cache dist",
-                  "        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
-                  "        with:",
-                  "          name: cargo-dist-cache",
-                  "          path: ~/.cargo/bin/dist",
-                  "",
-              ]),
-              "BUILD": "\n".join([
-                  "      - name: Install dist",
-                  "        run: " + gha("matrix.install_dist.run"),
-                  "",
-              ]),
-              "GLOBAL": "\n".join([
-                  "      - name: Install cached dist",
-                  "        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
-                  "        with:",
-                  "          name: cargo-dist-cache",
-                  "          path: ~/.cargo/bin/",
-                  "      - run: chmod +x ~/.cargo/bin/dist",
-                  "",
-              ]),
-              "HOST": "\n".join([
-                  "      - name: Install cached dist",
-                  "        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
-                  "        with:",
-                  "          name: cargo-dist-cache",
-                  "          path: ~/.cargo/bin/",
-                  "      - run: chmod +x ~/.cargo/bin/dist",
-                  "",
-              ]),
-          }
-          for name, generated_install in verified_blocks.items():
-              begin = f"      # BEGIN AWSWIT VERIFIED DIST INSTALL ({name})\n"
-              end = f"      # END AWSWIT VERIFIED DIST INSTALL ({name})\n"
-              if normalized.count(begin) != 1 or normalized.count(end) != 1:
-                  raise SystemExit(f"verified cargo-dist {name.lower()} markers are invalid")
-              before, guarded = normalized.split(begin, 1)
-              _, after = guarded.split(end, 1)
-              normalized = before + generated_install + after
-
-          smoke_begin = "      # BEGIN AWSWIT NATIVE ARTIFACT SMOKE\n"
-          smoke_end = "      # END AWSWIT NATIVE ARTIFACT SMOKE\n"
-          if normalized.count(smoke_begin) != 1 or normalized.count(smoke_end) != 1:
-              raise SystemExit("native artifact smoke markers are invalid")
-          before, guarded = normalized.split(smoke_begin, 1)
-          _, after = guarded.split(smoke_end, 1)
-          normalized = before + after
-
-          gate_dependency_begin = "      # BEGIN AWSWIT RELEASE GATE GLOBAL DEPENDENCY\n"
-          gate_dependency_end = "      # END AWSWIT RELEASE GATE GLOBAL DEPENDENCY\n"
-          if normalized.count(gate_dependency_begin) != 1 or normalized.count(gate_dependency_end) != 1:
-              raise SystemExit("release gate global dependency markers are invalid")
-          before, guarded = normalized.split(gate_dependency_begin, 1)
-          _, after = guarded.split(gate_dependency_end, 1)
-          normalized = before + after
-
-          final_assets_begin = "      # BEGIN AWSWIT FINAL ASSET VALIDATION\n"
-          final_assets_end = "      # END AWSWIT FINAL ASSET VALIDATION\n"
-          if normalized.count(final_assets_begin) != 1 or normalized.count(final_assets_end) != 1:
-              raise SystemExit("final asset validation markers are invalid")
-          before, guarded = normalized.split(final_assets_begin, 1)
-          _, after = guarded.split(final_assets_end, 1)
-          normalized = before + after
-
-          secrets_begin = "    # BEGIN AWSWIT NO INHERITED RELEASE SECRETS\n"
-          secrets_end = "    # END AWSWIT NO INHERITED RELEASE SECRETS\n"
-          if normalized.count(secrets_begin) != 1 or normalized.count(secrets_end) != 1:
-              raise SystemExit("release secret-isolation markers are invalid")
-          before, guarded = normalized.split(secrets_begin, 1)
-          _, after = guarded.split(secrets_end, 1)
-          normalized = before + "    secrets: inherit\n" + after
-
-          hardened_host = "\n".join([
-              "    # Publishing is fail-closed: every build and verification gate must succeed.",
-              "    if: " + gha_literal("always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-global-artifacts.result == 'success' && needs.custom-release-gate.result == 'success' && needs.build-local-artifacts.result == 'success'"),
-              "",
-          ])
-          generated_host = "\n".join([
-              '    # Only run if we\'re "publishing", and only if plan, local and global didn\'t fail (skipped is fine)',
-              "    if: " + gha_literal("always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-release-gate.result == 'skipped' || needs.custom-release-gate.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success')"),
-              "",
-          ])
-          if normalized.count(hardened_host) != 1:
-              raise SystemExit("fail-closed host condition is missing or duplicated")
-          normalized = normalized.replace(hardened_host, generated_host)
-
-          publish_begin = "      # BEGIN AWSWIT TRANSACTIONAL RELEASE STEP\n"
-          publish_end = "      # END AWSWIT TRANSACTIONAL RELEASE STEP\n"
-          if normalized.count(publish_begin) != 1 or normalized.count(publish_end) != 1:
-              raise SystemExit("transactional release markers are invalid")
-          before, guarded = normalized.split(publish_begin, 1)
-          _, after = guarded.split(publish_end, 1)
-          generated_publish = "\n".join([
-              "      - name: Create GitHub Release",
-              "        env:",
-              "          PRERELEASE_FLAG: \"" + gha("fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || ''") + "\"",
-              "          ANNOUNCEMENT_TITLE: \"" + gha("fromJson(steps.host.outputs.manifest).announcement_title") + "\"",
-              "          ANNOUNCEMENT_BODY: \"" + gha("fromJson(steps.host.outputs.manifest).announcement_github_body") + "\"",
-              "          RELEASE_COMMIT: \"" + gha("github.sha") + "\"",
-              "        run: |",
-              "          # Write and read notes from a file to avoid quoting breaking things",
-              "          echo \"$ANNOUNCEMENT_BODY\" > $RUNNER_TEMP/notes.txt",
-              "",
-              "          gh release create \"" + gha("needs.plan.outputs.tag") + "\" --target \"$RELEASE_COMMIT\" $PRERELEASE_FLAG --title \"$ANNOUNCEMENT_TITLE\" --notes-file \"$RUNNER_TEMP/notes.txt\" artifacts/*",
-              "",
-          ])
-          normalized = before + generated_publish + after
-          if normalized != generated:
-              raise SystemExit("release.yml drifted from cargo-dist output")
-          PY
-          cp "$hardened_release" .github/workflows/release.yml
-          python3 .github/scripts/check-release-contract.py
-          plan_file=$(mktemp)
-          dist plan --output-format=json > "$plan_file"
-          jq -e '
-            [.ci.github.artifacts_matrix.include[].targets[]] | sort == [
-              "aarch64-apple-darwin",
-              "aarch64-unknown-linux-gnu",
-              "x86_64-apple-darwin",
-              "x86_64-pc-windows-msvc",
-              "x86_64-unknown-linux-gnu"
-            ]
-          ' "$plan_file" >/dev/null
-
-  shell-syntax:
-    name: Shell integration syntax
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  rust-and-shell-quality:
+    name: Rust 1.94 and four-shell quality
+    needs: validate-request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+
+      - name: Verify release commit checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Install shell parsers
         run: |
@@ -434,6 +55,29 @@ jobs:
         uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94
         with:
           toolchain: 1.94
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-release-gate-1.94-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run unit and integration tests
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Enforce catalog and fuzzy-filter p95 budgets
+        run: >-
+          cargo test --locked --release --lib performance_contract
+          -- --ignored --nocapture
 
       - name: Build shell-contract executable
         run: cargo build --locked --bin awswit
@@ -898,22 +542,188 @@ jobs:
       # END AWSWIT POWERSHELL CONFORMANCE
       # END AWSWIT FOUR SHELL CONFORMANCE
 
-  pty:
-    name: Interactive PTY contract
-    runs-on: ubuntu-latest
+  repository-contract:
+    name: Workflow, documentation, and release contract
+    needs: validate-request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Verify release commit checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Validate GitHub Actions workflows
+        run: >-
+          docker run --rm
+          -v "$PWD:/repo:ro"
+          -w /repo
+          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+      - name: Validate repository-local Markdown links
+        run: python3 .github/scripts/check-local-markdown-links.py
+
+      - name: Exercise release asset contract fixtures
+        run: python3 .github/scripts/test-release-asset-contract.py
+
+      - name: Exercise release tag ruleset fixtures
+        run: python3 .github/scripts/test-release-ruleset-contract.py
+
+      - name: Exercise release repository policy fixtures
+        run: bash .github/scripts/test-release-repository-policy.sh
+
+      - name: Exercise release transaction ownership fixtures
+        run: bash .github/scripts/test-release-transaction.sh
+
+      - name: Install cargo-dist 0.31.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-dist"
+          archive="cargo-dist-x86_64-unknown-linux-gnu.tar.xz"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
+          expected_hash="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8"
+          actual_hash=$(sha256sum "$tool_root/$archive" | awk '{ print $1 }')
+          test "$actual_hash" = "$expected_hash"
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-dist-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+
+      - name: Verify generated workflow and release plan
+        run: python3 .github/scripts/check-release-contract.py
+
+  dependency-policy:
+    name: Dependency policy and advisories
+    needs: validate-request
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
+      - name: Verify release commit checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Run PTY integration test
-        run: >-
-          cargo test --locked --test cli_contract
-          hook_opens_the_picker_while_stdout_is_captured_and_escape_restores_termios
-          -- --exact --nocapture
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+  artifact-validation:
+    name: Smoke artifacts and generate SBOM
+    needs:
+      - validate-request
+      - rust-and-shell-quality
+      - repository-contract
+      - dependency-policy
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Verify release commit checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: artifacts-build-local-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download global artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: artifacts-build-global
+          path: artifacts
+
+      - name: Verify exact cargo-dist assets, archives, and checksums
+        run: python3 .github/scripts/validate-release-assets.py --phase build artifacts
+
+      - name: Parse shell installer
+        run: bash -n artifacts/awswit-installer.sh
+
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "artifacts/awswit-installer.ps1"),
+            [ref] $tokens,
+            [ref] $parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+
+      - name: Smoke Linux executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/awswit-release-smoke"
+          mkdir -p "$smoke_root"
+          tar -xJf artifacts/awswit-x86_64-unknown-linux-gnu.tar.xz -C "$smoke_root"
+          binary="$smoke_root/awswit-x86_64-unknown-linux-gnu/awswit"
+          test -x "$binary"
+          "$binary" --version | grep -Fq 'awswit '
+          "$binary" --help >/dev/null
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94
+        with:
+          toolchain: 1.94
+
+      - name: Install cargo-cyclonedx
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-cyclonedx"
+          archive="cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+          release="cargo-cyclonedx-0.5.9"
+          mkdir -p "$tool_root"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            --output "$tool_root/$archive" \
+            "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/$release/$archive"
+          expected_hash="fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8"
+          actual_hash=$(sha256sum "$tool_root/$archive" | awk '{ print $1 }')
+          test "$actual_hash" = "$expected_hash"
+          tar -xJf "$tool_root/$archive" -C "$tool_root"
+          echo "$tool_root/cargo-cyclonedx-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+
+      - name: Generate and validate CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo cyclonedx -v
+          test -s awswit.cdx.xml
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("awswit.cdx.xml").getroot()
+          namespace = {"c": root.tag.partition("}")[0].removeprefix("{")}
+          if not root.findall(".//c:component", namespace):
+              raise SystemExit("SBOM contains no components")
+          PY
+          mkdir release-gate
+          mv awswit.cdx.xml release-gate/
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: artifacts-build-release-gate
+          path: release-gate/*.cdx.xml
+          if-no-files-found: error
+          retention-days: 1
