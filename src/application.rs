@@ -244,10 +244,12 @@ fn emit_init(shell: Shell) -> Result<Completion, AppError> {
     match shell {
         Shell::Bash | Shell::Fish => bytes.extend(completion_artifact(shell)),
         Shell::Zsh => {
+            bytes.extend(b"if [[ -o interactive ]]; then\n");
             bytes.extend(b"autoload -Uz compinit\n");
             bytes.extend(b"if (( ! $+functions[compdef] )); then compinit; fi\n");
             bytes.extend(b"if (( $+functions[compdef] )); then\n");
             bytes.extend(completion_artifact(shell));
+            bytes.extend(b"fi\n");
             bytes.extend(b"fi\n");
         }
         // The PowerShell hook owns one combined completer because PowerShell

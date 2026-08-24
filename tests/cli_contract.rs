@@ -91,6 +91,28 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+#[cfg(unix)]
+fn external_shell_available(shell: &str) -> bool {
+    match Command::new(shell).arg("--version").output() {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "{shell} exists but its version check failed: {}",
+                text(&output.stderr)
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("AWSWIT_REQUIRE_EXTERNAL_SHELLS").is_none(),
+                "{shell} is required for the external shell contract"
+            );
+            false
+        }
+        Err(error) => panic!("failed to probe {shell}: {error}"),
+    }
+}
+
 #[test]
 fn help_and_version_are_static_and_successful() {
     let help = clean_command().arg("--help").output().expect("run help");
@@ -138,6 +160,32 @@ fn every_init_artifact_combines_static_options_with_dynamic_profiles() {
             "{shell} lost dynamic profile completion"
         );
     }
+}
+
+#[test]
+fn zsh_init_only_bootstraps_completion_in_interactive_shells() {
+    let output = clean_command()
+        .args(["init", "zsh"])
+        .output()
+        .expect("generate Zsh init artifact");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let artifact = text(&output.stdout);
+
+    let interactive_guard = artifact
+        .find("if [[ -o interactive ]]; then")
+        .expect("Zsh completion has an interactive-shell guard");
+    let compinit = artifact
+        .find("autoload -Uz compinit")
+        .expect("Zsh completion initializes compinit");
+    let hook = artifact
+        .find("# awswit shell integration for Zsh.")
+        .expect("Zsh activation hook is emitted");
+    assert!(interactive_guard < compinit);
+    assert!(compinit < hook);
+    assert!(
+        artifact[compinit..hook].ends_with("fi\nfi\n"),
+        "Zsh completion escaped its interactive-shell guard"
+    );
 }
 
 #[test]
@@ -1815,6 +1863,9 @@ fn bash_rejects_special_variable_attributes_without_partial_changes() {
 #[cfg(unix)]
 #[test]
 fn zsh_rejects_special_variable_attributes_without_partial_changes() {
+    if !external_shell_available("zsh") {
+        return;
+    }
     let fixture = Fixture::new();
     let hook = write_hook(&fixture, "zsh");
     let script = r#"source "$HOOK"; export AWS_PROFILE=before; typeset -a AWS_DEFAULT_PROFILE; frame=$'AWSWIT-PATCH 1 ACTIVATE\nSET AWS_PROFILE=after\nSET AWS_DEFAULT_PROFILE=after\nSET AWSWIT_PROFILE=after\nUNSET AWS_REGION\nUNSET AWS_DEFAULT_REGION\nAWSWIT-COMMIT'; if _awswit_apply_patch "$frame" >/dev/null 2>/dev/null; then exit 9; fi; [[ "$AWS_PROFILE" = before ]]"#;
@@ -1829,12 +1880,16 @@ fn zsh_rejects_special_variable_attributes_without_partial_changes() {
 #[cfg(unix)]
 #[test]
 fn zsh_dynamic_completion_survives_static_completer_state_changes() {
+    if !external_shell_available("zsh") {
+        return;
+    }
     let fixture = Fixture::new();
     fs::write(&fixture.config, include_str!("completion_profiles.ini"))
         .expect("write Zsh completion fixture");
     fs::write(&fixture.credentials, "").expect("clear credentials fixture");
     let hook = write_hook(&fixture, "zsh");
-    let script = r#"source "$HOOK"
+    let script = r#"function compdef { :; }
+source "$HOOK"
 function _awswit { (( CURRENT += 1 )); }
 typeset -ga captured
 function compadd { captured+=("${@:2}"); }
@@ -1876,22 +1931,26 @@ fn shell_scripts_pass_syntax_checks() {
     let fixture = Fixture::new();
     let bash = write_hook(&fixture, "bash");
     let zsh = write_hook(&fixture, "zsh");
-    assert!(
-        Command::new("bash")
-            .args(["-n"])
-            .arg(bash)
-            .status()
-            .expect("bash -n")
-            .success()
-    );
-    assert!(
-        Command::new("zsh")
-            .args(["-n"])
-            .arg(zsh)
-            .status()
-            .expect("zsh -n")
-            .success()
-    );
+    if external_shell_available("bash") {
+        assert!(
+            Command::new("bash")
+                .args(["-n"])
+                .arg(bash)
+                .status()
+                .expect("bash -n")
+                .success()
+        );
+    }
+    if external_shell_available("zsh") {
+        assert!(
+            Command::new("zsh")
+                .args(["-n"])
+                .arg(zsh)
+                .status()
+                .expect("zsh -n")
+                .success()
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
