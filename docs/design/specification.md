@@ -1,7 +1,7 @@
 # awswit 詳細仕様
 
-状態: 現行 `0.0.x` 実装契約
-更新日: 2026-08-24
+状態: 現行 pre-1.0 実装契約
+更新日: 2026-08-25
 
 ## 1. Scope
 
@@ -113,7 +113,7 @@ hook/executable version equality.
 
 `list --format names` is the narrowest scripting Interface: one exact profile name per line, sorted by Unicode/Rust string
 order. Human formats are for people and MAY evolve. JSON is versioned machine data, but its field compatibility is not a
-stable 1.0 promise while the package remains `0.0.x`.
+stable 1.0 promise while the package remains pre-1.0.
 
 Because warnings use stderr, a command may return success with a non-empty stderr—for example when best-effort history is
 unavailable. Automation determines success from exit status and consumes stdout only as the selected machine format.

@@ -1,7 +1,7 @@
 # awswit architecture
 
-状態: `0.1` redesign の accepted architecture
-更新日: 2026-08-24
+状態: 次期 pre-1.0 release の accepted architecture
+更新日: 2026-08-25
 
 ## Decision
 
@@ -256,7 +256,7 @@ seam should be introduced only when a second real adapter exists and the Interfa
 - SIGKILL/abort cannot run terminal cleanup.
 - Windows has no Unix signal-equivalence contract and no portable directory fsync.
 - a long-lived AWS SDK process may retain credentials acquired before environment switching;
-- shell hooks and executable should be version-matched during the `0.0.x` protocol period;
+- shell hooks and executable should be version-matched during the pre-1.0 protocol period;
 - JSON schema and dynamic completion are not declared stable pre-1.0;
 - local inspection cannot prove remote AWS identity, access, or credential freshness.
 

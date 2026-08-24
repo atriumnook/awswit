@@ -35,7 +35,7 @@
    「未検証」「保留」と明記した項目は実装済みの主張ではない。
 4. [アーキテクチャ](design/architecture.md) は内部設計を説明し、CLI 互換性を追加で約束しない。
 
-`0.0.x` は pre-1.0 である。`list --format json` と `doctor --format json` の machine schema、
+`0.x` は pre-1.0 である。`list --format json` と `doctor --format json` の machine schema、
 activation protocol、history schema は version を持つが、文書に安定と明記されるまでは将来の
 minor release で変更され得る。shell hook は executable と同時に更新する。
 

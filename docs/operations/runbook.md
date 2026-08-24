@@ -1,7 +1,7 @@
 # awswit operations runbook
 
-対象: awswit `0.0.x` / `0.1` transition
-更新日: 2026-08-24
+対象: awswit pre-1.0
+更新日: 2026-08-25
 
 ## 1. Operating model
 
@@ -22,7 +22,7 @@ AWS CLI / SDK側の運用に従う。
 
 ### 2.1 Published prebuilt release（利用可能な場合は推奨）
 
-2026-08-24 の外部状態確認では、latest public `v0.0.2` は本baselineより前の実装であり、
+2026-08-25 の外部状態確認では、latest public `v0.0.2` は本baselineより前の実装であり、
 `v0.0.1` の古いdraftも残っている。権限を持つmaintainerがこのdraftを確認・整理し、後続releaseで
 本章と8章のgateを実証するまでは、2.2の監査済みsource buildを使う。
 
@@ -206,7 +206,7 @@ cargo install --locked --force --path .
 
 ### 3.3 Reload the hook
 
-`0.0.x` では executable と hook を version-matched artifact として扱う。startup file が毎回
+pre-1.0 では executable と hook を version-matched artifact として扱う。startup file が毎回
 `awswit init SHELL` を評価する構成なら、新しい shell を開く。hook を generated file として固定している場合は、
 新 executable から再生成して source/reload する。
 
@@ -322,7 +322,7 @@ awswit exec test-profile '--' -option-shaped-command
 | `COMMAND_FAILED` | OSがcommand startに失敗 | sanitized OS error、resource limit、runtime policyを確認 |
 | `INTERNAL` | executable invariantが成立しない予期しないfailure | version、OS、再現手順、sanitized stderrを添えてissue報告。別profileへ暗黙fallbackしない |
 
-実際の code name は対象 executable の stderr と `--help` を優先する。`0.0.x` では追加され得る。
+実際の code name は対象 executable の stderr と `--help` を優先する。pre-1.0 では追加され得る。
 profile名が`-`で始まる場合、Bash/Zsh/Fishでは`awswit -- PROFILE`または`awswit activate -- PROFILE`を使う。
 PowerShellでは`awswit activate --profile=NAME`を優先し、separator formなら`awswit activate '--' PROFILE`のように
 literalをquoteする。特に`-h` / `--help` / `-V` / `--version`はexplicit separatorより前だとdisplay requestになる。
@@ -663,7 +663,7 @@ Publishing is permitted only when both repository controls are already active:
    an empty `bypass_actors` list. Protection may be split across rulesets, but every contributing ruleset must be active,
    apply to the exact release tag, and provide no bypass actor.
 
-As of 2026-08-24, `atriumnook/awswit` reports Immutable Releases `enabled=false` and no tag rulesets. Therefore a real release
+As of 2026-08-25, `atriumnook/awswit` reports Immutable Releases `enabled=false` and no tag rulesets. Therefore a real release
 is intentionally fail-closed until a repository owner installs these controls. This runbook does not authorize awswit or its
 workflow to mutate repository settings.
 

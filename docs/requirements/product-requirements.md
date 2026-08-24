@@ -1,7 +1,7 @@
 # awswit 製品要件
 
-状態: `0.1` release baseline
-更新日: 2026-08-24
+状態: 次期 pre-1.0 release baseline
+更新日: 2026-08-25
 
 ## 1. 製品目的
 
@@ -240,7 +240,7 @@ awswit は、AWS 共有設定にある profile を発見し、利用者が意図
 
 ## 7. Verification status
 
-この表は 2026-08-24 時点の repository evidence を分類する。要件本文はリリース目標であり、この表だけが
+この表は 2026-08-25 時点の repository evidence を分類する。要件本文はリリース目標であり、この表だけが
 「実装済み」の主張を行う。
 
 | Area | Status | Evidence / gap |
