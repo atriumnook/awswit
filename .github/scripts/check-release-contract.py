@@ -152,6 +152,15 @@ def verify_custom_release_hardening(hardened: str) -> None:
 def verify_release_gate_contract() -> None:
     gate = RELEASE_GATE.read_text(encoding="utf-8")
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    release_contract_command = (
+        "          python3 .github/scripts/check-release-contract.py\n"
+    )
+    if ci.count(release_contract_command) != 1:
+        fail("ordinary CI must invoke the release contract checker exactly once")
+    if "release.yml drifted from cargo-dist output" in ci:
+        fail(
+            "ordinary CI must not duplicate release workflow normalization inline"
+        )
     required_fragments = [
         "  workflow_call:\n",
         "    name: Rust 1.94 and four-shell quality\n",
