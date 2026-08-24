@@ -1,38 +1,55 @@
 # awswit
 
-awswit is an interactive AWS profile switcher with fuzzy search, frecency
-sorting, and first-class scripting support — built so picking the right
-profile out of dozens never gets in the way.
+awswit is a fast, fail-closed AWS profile selector: a Rust executable with a built-in TUI and small generated shell hooks.
+It switches standard AWS profile variables; it does not store credentials, call STS, perform SSO/AWS Login, or replace the
+AWS CLI/SDK credential provider chain.
 
-[![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
-[![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/atriumnook/awswit/actions/workflows/ci.yml/badge.svg)](https://github.com/atriumnook/awswit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[日本語](README_ja.md)
+[日本語](README_ja.md) · [Documentation](docs/README.md) · [Operations runbook](docs/operations/runbook.md)
 
-## Quick Start
+> awswit is currently pre-1.0. Keep the executable and generated shell hook on the same version.
 
-### Install
+## Why awswit
 
-Pre-built binaries are attached to each [release](https://github.com/atriumnook/awswit/releases).
+- Built-in fuzzy TUI; fuzzy matching only filters visible candidates.
+- Exact, case-sensitive profile names in non-interactive activation and `exec`; typos never select a nearby profile.
+- Detects conflicting ambient AWS credential-provider variables and fails closed without printing their values.
+- Transactional, allow-listed shell protocol: profile-derived text is assigned as data, never evaluated as shell code.
+- Reads config-only, credentials-only, role, modern/legacy SSO, AWS Login (`login_session`), `credential_process`,
+  web-identity, and static-key profile metadata without retaining access/secret/session-token values, login-session identity,
+  or process command text.
+- Favorites and recent-use ordering with concurrent, bounded, best-effort history.
+- A loaded hook composes static CLI grammar with dynamic exact names for currently activatable profiles;
+  `completions SHELL` emits the static grammar alone.
+- No Python, Node, AWS CLI, fzf, Nerd Font, daemon, or language runtime required by the prebuilt selector executable.
+
+Configured account IDs, roles, and provider labels are hints from local files—not verified AWS identity.
+
+## Install
+
+Download a matching archive from [GitHub Releases](https://github.com/atriumnook/awswit/releases) when one is published and
+verify its SHA-256 and provenance. The current release policy is binary-only and does not publish this package to
+crates.io. The public `v0.0.2` release predates this quality baseline; until a later release proves the documented gates,
+build an audited checkout with Rust 1.94 or newer:
 
 ```bash
-# Linux / macOS
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/atriumnook/awswit/releases/latest/download/awswit-installer.sh | sh
-
-# Windows (PowerShell)
-irm https://github.com/atriumnook/awswit/releases/latest/download/awswit-installer.ps1 | iex
-
-# From source
-cargo install awswit
+cargo install --locked --path .
 ```
 
-### Shell setup
+Do not treat package metadata in a checkout as evidence that any registry or release artifact was published.
 
-Add the snippet for your shell to your rc file. It defines an `awswit`
-shell function that wraps the binary so a selection actually updates the
-current shell's `AWS_PROFILE`.
+See the [install and verification runbook](docs/operations/runbook.md#2-install) for release targets, checksums, SBOM, and
+provenance checks. Release archives do not edit startup files. The optional cargo-dist installers may add their executable
+directory to `PATH`; the runbook documents the no-PATH-mutation and unmanaged-install controls. Neither route inserts an
+`awswit init` or completion line.
+
+## Install the shell hook
+
+A child executable cannot change its parent shell. Load the generated hook from your shell startup file.
+
+### Bash / Zsh
 
 ```bash
 # ~/.bashrc
@@ -40,210 +57,177 @@ eval "$(awswit init bash)"
 
 # ~/.zshrc
 eval "$(awswit init zsh)"
+```
 
+### Fish
+
+```fish
 # ~/.config/fish/config.fish
 awswit init fish | source
-
-# $PROFILE (PowerShell)
-awswit init powershell | Invoke-Expression
 ```
 
-### Usage at a glance
+### PowerShell
 
-```text
-awswit                       # interactive picker — sets AWS_PROFILE in the shell
-awswit prod                  # switch directly
-awswit pick                  # interactive picker — prints selection to stdout
-awswit which                 # what's active right now?
-awswit doctor                # audit ~/.aws/config and SSO tokens
-awswit exec prod -- aws s3 ls   # one-off command, no shell mutation
-awswit -l                    # list profiles (TSV if piped, table on TTY)
-awswit -l --json             # list profiles as JSON
-awswit prompt                # current profile, for shell-prompt embedding
-awswit -u                    # unset AWS_PROFILE and AWS_REGION
+```powershell
+# $PROFILE
+Invoke-Expression ((awswit init powershell) -join [Environment]::NewLine)
 ```
 
-In the TUI: type to fuzzy-filter, `↑/↓` (or `Ctrl-k`/`Ctrl-j`) to
-navigate, `Enter` to select, `*` or `Ctrl-F` to toggle favorite,
-`Ctrl-P` to toggle the preview panel, `Ctrl-A`/`Ctrl-E` to jump to
-start/end of the query, `Ctrl-W` to delete the previous word, `Esc` to
-cancel.
+These commands load static hook code generated by the installed executable. Activation responses are validated data frames;
+do not evaluate `awswit activate` output yourself. Restart or reload the shell after upgrading awswit.
 
-## What awswit does, exactly
-
-When you pick a profile, awswit emits a small block of `export` and
-`unset` statements that the shell function evaluates. For `awswit prod`
-against a profile with region `ap-northeast-1`:
-
-```sh
-export AWS_PROFILE='prod'
-unset AWS_DEFAULT_PROFILE
-export AWS_REGION='ap-northeast-1'
-unset AWS_DEFAULT_REGION
-```
-
-We **set** the modern `AWS_PROFILE` / `AWS_REGION` variables, and
-explicitly **clear** the legacy `AWS_DEFAULT_*` fallbacks so a stale
-value left over from a CI image, a corporate dotfile, or a previous
-`aws configure` run can't silently re-route credentials to the wrong
-account. If the profile has no region, `AWS_REGION` is also unset and
-the SDK falls back to its own resolution.
-
-The AWS SDK resolves credentials from there — IAM keys, SSO, role
-assumption, `credential_process`, anything you've already configured.
-**awswit never reads or stores credential material.**
-
-## Comparison
-
-| | **awswit** | **aws-vault** | **awsume** | `export AWS_PROFILE` + `fzf` |
-|---|---|---|---|---|
-| Pick a profile interactively | ✅ TUI + fzf | — (`list` is read-only) | ✅ TUI | ✅ |
-| Fuzzy matching | ✅ (built-in) | — | ✅ (built-in) | ✅ |
-| Frecency sorting + favorites | ✅ | — | — | — |
-| Auto-suggest on typo | ✅ "did you mean…?" | — | — | — |
-| TUI preview (region / account / role ARN / MFA / last-used) | ✅ | — | — | — |
-| One-off `exec` without mutating shell | ✅ `awswit exec` | ✅ `aws-vault exec` | ✅ | — |
-| `which` (current profile + SSO token status) | ✅ | partial | partial | — |
-| `doctor` (broken source chains, expired SSO tokens, missing MFA) | ✅ | — | — | — |
-| Machine-readable list output (TSV / JSON / names-only) | ✅ | partial | — | n/a |
-| Shell prompt integration helper | ✅ `awswit prompt` | — | — | — |
-| Manages credentials / STS / MFA | — by design | ✅ | ✅ | — |
-| Token caching, auto-refresh | — | ✅ | ✅ | — |
-| Single static binary | ✅ Rust | ✅ Go | — Python | n/a |
-
-awswit is the **profile switcher**: best-in-class at picking, inspecting,
-and scripting profiles. It doesn't do STS / MFA / token caching — that's
-the AWS SDK's job, or aws-vault's, or aws-sso-login's. Use them together:
+## Use it
 
 ```bash
-# Auth (once per day): aws-vault or aws sso login owns STS.
-aws sso login --profile main
-
-# Switch (dozens of times per day): awswit owns the picker.
-awswit prod
-aws s3 ls
-
-# One-off under a different profile, without mutating the shell:
-awswit exec staging -- aws s3 ls s3://bucket
+awswit                                  # interactive picker in the current shell
+awswit production                       # exact profile; hook convenience form
+awswit activate production              # same activation, explicit subcommand
+awswit exec production -- aws sts get-caller-identity
+awswit exec --profile=-h -- aws sts get-caller-identity  # leading-hyphen profile
+awswit list --format names
+awswit doctor                            # offline local diagnostics
+awswit unset                             # clear awswit profile + region variables through the hook
 ```
 
-## CLI reference
+The binary itself accepts `awswit activate PROFILE`; the short `awswit PROFILE` form is provided by the hook. Automation
+should prefer `exec` or an explicit subcommand. If a profile is named like a subcommand (for example `list`), use
+`awswit activate list`. On Bash, Zsh, and Fish, a profile whose name begins with `-`—including a help/version flag—uses a
+separator, for example `awswit -- -h` or `awswit activate -- -h`. PowerShell treats an unquoted `--` as its own
+end-of-parameters token, so use `awswit activate --profile=-h` or quote the literal separator:
+`awswit activate '--' -h`.
+For `exec`, use the unambiguous named profile form: `awswit exec --profile=-h -- COMMAND...`. The PowerShell hook safely
+reconstructs the usual unquoted separator when the command boundary is unique. If the child executable itself begins with
+`-`, quote the separator—`awswit exec PROFILE '--' -command`—or the hook rejects the ambiguous invocation without running it.
 
-### Subcommands
+### Credential override protection
 
-```text
-awswit [PROFILE]                 pick a profile (TUI if no PROFILE and stdout is a tty)
-awswit pick                      open the picker, print selection to stdout (no shell mutation)
-awswit exec PROFILE -- CMD ...   run CMD with AWS_PROFILE set, without touching the shell
-awswit which                     show current profile + SSO expiry / aws-vault status
-awswit doctor                    audit ~/.aws/config + SSO cache; exits non-zero on errors
-awswit prompt [--format F]       print current profile for shell-prompt embedding
-awswit init <shell>              print the shell integration snippet
-awswit completions <shell>       print a tab-completion script
-```
-
-### Top-level flags
-
-| Flag                     | Description                                                                |
-| ------------------------ | -------------------------------------------------------------------------- |
-| `-v`, `--version`        | print version                                                              |
-| `-s`, `--shell-export`   | emit only `set`/`unset` lines (for `eval`) — used by the shell wrapper     |
-| `-u`, `--unset`          | unset every awswit-managed variable                                        |
-| `-l`, `--list`           | list profiles (TSV if piped, table if tty)                                 |
-| `--json`                 | with `-l`, emit JSON                                                       |
-| `--names-only`           | with `-l`, emit one profile name per line — fast path for completion       |
-| `-n`, `--no-interactive` | skip the picker; resolve PROFILE by name or `$AWS_PROFILE`                 |
-| `--fzf`                  | use external `fzf` instead of the built-in TUI                             |
-| `--region <REGION>`      | override the region                                                        |
-| `--config-file <PATH>`   | path to the AWS config file                                                |
-| `--verbose`              | INFO logging                                                               |
-| `--debug`                | DEBUG logging                                                              |
-
-## Environment variables
-
-| Variable                      | Effect                                                                  |
-| ----------------------------- | ----------------------------------------------------------------------- |
-| `AWS_CONFIG_FILE`             | overrides `~/.aws/config`                                               |
-| `AWS_SHARED_CREDENTIALS_FILE` | overrides `~/.aws/credentials`                                          |
-| `AWS_PROFILE`                 | default for `-n` when no PROFILE argument is given                      |
-| `AWS_VAULT`                   | if set, awswit warns that you're inside an aws-vault session            |
-| `NO_COLOR`                    | disables color (de-facto standard)                                      |
-| `AWSWIT_NO_FUZZY`             | disable fuzzy matching — require an exact profile-name match            |
-| `AWSWIT_USE_FZF`              | use external `fzf` (same as `--fzf`)                                    |
-| `AWSWIT_FZF_OPTS`             | extra options for `fzf` (dangerous options are stripped)                |
-| `AWSWIT_SHELL`                | force a shell flavor (`bash` / `zsh` / `fish` / `powershell`)           |
-| `AWSWIT_SSO_CACHE_DIR`        | override the AWS SSO token cache dir (default `~/.aws/sso/cache`)       |
-| `XDG_DATA_HOME`               | overrides where history lives (default `~/.local/share/awswit/`)        |
-
-awswit deliberately does **not** read a config file of its own — every
-runtime knob is a CLI flag or environment variable.
-
-## Shell prompt integration
-
-`awswit prompt` is designed for embedding in a shell prompt — exit 0,
-no trailing newline, format string under your control.
+AWS credential environment variables can take precedence over a selected profile. awswit stops and names the conflicting
+variables, but never prints their values. After reviewing the scope, removal must be explicit:
 
 ```bash
-# bash — example PS1 with the profile in cyan brackets
-PS1='\[\033[36m\]$(awswit prompt --format "[%s] " --default "")\[\033[0m\]\u@\h:\w\$ '
+awswit production --clear-credential-overrides
 
-# zsh — drop it in a precmd or right-side prompt
-RPROMPT='%F{cyan}$(awswit prompt --format "(%s)" --default "")%f'
-
-# starship.toml — custom command segment
-[custom.awswit]
-command = "awswit prompt --format '☁ {}'"
-when = '[ -n "$AWS_PROFILE" ]'
+# Safer when only one command needs the change:
+awswit exec production --clear-credential-overrides -- aws sts get-caller-identity
 ```
 
-(`%s` and `{}` are interchangeable in `--format`.)
+The first command removes detected conflicts from the current shell; the second removes them only from the command process.
+`awswit unset` does not clear credentials or `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`.
+An IMDS endpoint override is accepted only for a complete chain that explicitly uses
+`credential_source = Ec2InstanceMetadata`; an alternate `AWS_LOGIN_CACHE_DIRECTORY` is accepted only for an explicit AWS
+Login chain. `AWS_BEARER_TOKEN_BEDROCK` always conflicts because it can replace the selected profile's identity for Bedrock
+requests.
+Legacy direct-key aliases used by some AWS SDKs (`AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, and the `AMAZON_*` key/token names)
+receive the same protection as the standard names. Every present direct-key variable conflicts, including for
+`credential_source = Environment`: AWS CLI/SDK environment-provider precedence can otherwise use those credentials directly
+and bypass the selected role. `--clear-credential-overrides` can remove every detected name in the chosen scope; awswit never
+reads a value or silently decides which alias wins. Because clearing also removes the required source, a role configured with
+`credential_source = Environment` is intentionally not activatable through awswit's generic `AWS_PROFILE` contract. Use a
+file/process/SSO/workload source that the consumer resolves through the selected profile instead. A standalone
+`credential_source` without `role_arn` is also diagnostic-only because current SDKs either reject or ignore it and may fall
+through to another identity.
+The Java SDK v1-only `AWS_CREDENTIAL_PROFILES_FILE` path override always conflicts. Clearing it restores that SDK's default
+path, but Java v1 does not honor the standard non-default credentials-path variable; configure that EOL consumer explicitly
+when using a non-default file.
+AWS SDK for Go v1 default sessions require `AWS_SDK_LOAD_CONFIG=1` (or `SharedConfigEnable`) to load role/SSO/region settings
+from the shared config file. awswit does not overwrite or own that application behavior flag; migrate this EOL SDK to v2, or
+configure and verify the legacy consumer explicitly.
 
-## Health checks: `awswit doctor`
+AWS Tools for PowerShell session credentials in a visible non-null `$StoredAWSCredentials` outrank `AWS_PROFILE`. The
+PowerShell hook refuses current-shell activation in that state; run `Clear-AWSCredential` after reviewing the session, then
+retry. A .NET SDK Store profile can also win over a same-named shared-file profile on Windows. For .NET consumers, set
+`AWSConfigs.AWSProfilesLocation` to the intended shared credentials file (or disable the legacy persistence store at
+application startup) and verify the principal with `GetCallerIdentity`. See the
+[Windows consumer runbook](docs/operations/runbook.md#54-windows-powershell-and-net-consumer-precedence).
 
-`awswit doctor` inspects `~/.aws/config` and the AWS CLI's SSO token
-cache and reports the issues that bite people in practice:
+## TUI keys
+
+| Key | Action |
+|---|---|
+| Type | Fuzzy-filter existing profile names |
+| `Enter` | Select the focused exact profile |
+| `↑` / `↓`, `Ctrl+K` / `Ctrl+J` | Move |
+| `PageUp` / `PageDown`, `Home` / `End` | Jump |
+| `*` or `Ctrl+F` | Toggle favorite |
+| `Ctrl+P` | Toggle configured-metadata preview |
+| `Ctrl+U` | Clear query |
+| `Esc` / `Ctrl+C` | Cancel / interrupt |
+
+With no current profile, no row is initially armed, so bare Enter cannot select the first profile accidentally. Zero matches
+cannot be confirmed. The UI supports `NO_COLOR`, small terminals, Unicode names, and ordinary fonts.
+
+## CLI
 
 ```text
-ERROR [foo-role] source_profile = 'gone' references a profile that does not exist
-ERROR [sso-prod] SSO token expired at 2026-05-12 03:14 UTC — run `aws sso login --profile sso-prod`
-warn  [no-mfa] role profile has neither source_profile nor credential_source
-warn  [legacy] mfa_serial = 'foo' does not look like an IAM MFA ARN
-
-awswit doctor: 2 error(s), 2 warning(s)
+awswit
+awswit activate [PROFILE] [OPTIONS]
+awswit exec PROFILE [OPTIONS] -- COMMAND [ARG...]
+awswit list [--format human|names|json] [SOURCE OPTIONS]
+awswit doctor [--format human|json] [SOURCE OPTIONS]
+awswit unset
+awswit init bash|zsh|fish|powershell
+awswit completions bash|zsh|fish|powershell
 ```
 
-Exit status: 0 if clean, 1 if any errors.
+Common options:
 
-## Files
+| Option | Meaning |
+|---|---|
+| `--region REGION` | Override the selected profile's configured region |
+| `--clear-credential-overrides` | Explicitly remove detected conflicts in activation/command scope |
+| `--config-file PATH` | Override `AWS_CONFIG_FILE` for this selection |
+| `--credentials-file PATH` | Override `AWS_SHARED_CREDENTIALS_FILE` for this selection |
 
-- `$XDG_DATA_HOME/awswit/history.json` — usage history and favorites.
-  Migrated automatically from the legacy `~/.awswit/history.json` on
-  first run after upgrading from `< 0.1.0`. Not a secret; written with
-  your umask.
+Source precedence is CLI option, AWS path environment variable, then `~/.aws/config` or `~/.aws/credentials`. A missing
+default file is empty; a missing explicit path is an error. Relative non-default paths are pinned to lexical absolute paths
+at invocation time, so a later directory change cannot silently select a different file. Run `awswit COMMAND --help` for
+command-specific details.
 
-## Scripting examples
+The loaded `init SHELL` artifact composes full command/option completion with a safe runtime feed of currently activatable
+profile names. Names containing zero-cell Unicode scalars are omitted from shell menus that cannot separate display and
+insertion values; they remain available through the visibly escaped TUI, exact activation, and raw `list --format names`.
+The standalone `completions SHELL` artifact provides the same static grammar without runtime profile discovery.
 
-```bash
-# Print every profile name, one per line:
-awswit -l | cut -f1
+## What awswit sets
 
-# Switch to the first profile whose name contains "staging":
-awswit -n "$(awswit -l | awk -F'\t' '/staging/ {print $1; exit}')"
+A successful activation keeps these values coherent:
 
-# Inspect profile metadata as JSON:
-awswit -l --json | jq '.[] | select(.type == "Role")'
-
-# Run a shell with a temporary profile (good for ad-hoc tasks):
-awswit exec prod -- bash
-
-# Compose pick with other tools — no shell mutation.
-# `pick` exits 130 on cancel, so guard with || to avoid running with "":
-P=$(awswit pick) || exit 130
-aws --profile "$P" sts get-caller-identity
-
-# Wire into CI: fail the job if any profile has an expired SSO token.
-awswit doctor
+```text
+AWS_PROFILE=production
+AWS_DEFAULT_PROFILE=production
+AWSWIT_PROFILE=production
+AWS_REGION=ap-northeast-1
+AWS_DEFAULT_REGION=ap-northeast-1
 ```
+
+The region pair is removed when neither `--region` nor the profile provides one, preventing a prior awswit region from
+leaking forward. Command-line source paths and relative environment-selected source paths are propagated as lexical absolute
+paths through the corresponding standard AWS path variables.
+The hook scopes `AWSWIT_HOOK=1` and `AWSWIT_SHELL` to captured activation/unset and doctor subprocesses. It does not export
+those integration markers into unrelated child shells.
+
+## Security and responsibility boundary
+
+awswit does not:
+
+- store, display, refresh, or rotate access keys or tokens;
+- call STS, prompt for MFA, log in to IAM Identity Center or AWS Login, or manage `~/.aws/sso/cache` /
+  `~/.aws/login/cache`;
+- execute `credential_process` during discovery or `doctor`;
+- verify the active AWS principal, permissions, login state, token expiry, or network;
+- insert its hook/completion lines into shell startup files, run a daemon, or send telemetry.
+
+Use `aws sso login`, `aws login --profile PROFILE`, your normal SDK/CLI flow, or aws-vault for credential lifecycle. Use
+`awswit doctor` for actionable offline issues (or `--format json` for automation), then follow the owning provider's runbook
+for authentication failures.
+
+## Documentation
+
+- [Product requirements](docs/requirements/product-requirements.md)
+- [Competitive and AWS standards research](docs/requirements/competitive-research.md)
+- [Architecture](docs/design/architecture.md)
+- [Detailed specification](docs/design/specification.md)
+- [Install, upgrade, troubleshooting, rollback, and incident runbook](docs/operations/runbook.md)
 
 ## License
 

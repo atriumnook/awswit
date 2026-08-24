@@ -1,230 +1,274 @@
-use clap::{Parser, Subcommand};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
-/// Interactive AWS profile switcher with fuzzy search and frecency sorting.
-#[derive(Parser, Clone, Default, Debug)]
-#[command(name = "awswit", version, about)]
-#[command(disable_version_flag = true)]
-#[command(args_conflicts_with_subcommands = true)]
-pub struct Args {
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+
+/// A safe, fast AWS profile selector.
+#[derive(Parser, Debug)]
+#[command(name = "awswit", author, version)]
+#[command(
+    about = "Select an AWS profile without owning its credentials",
+    long_about = None,
+    after_help = "Current-shell activation requires the generated hook because a child process cannot modify its parent shell.\n  Bash:       eval \"$(awswit init bash)\"\n  Zsh:        eval \"$(awswit init zsh)\"\n  Fish:       awswit init fish | source\n  PowerShell: Invoke-Expression ((awswit init powershell) -join [Environment]::NewLine)\n\nUse `awswit exec PROFILE -- COMMAND` to change only the child command environment."
+)]
+pub(crate) struct Cli {
     #[command(subcommand)]
-    pub command: Option<Command>,
-
-    /// Profile to switch to. Omit for the interactive picker.
-    #[arg(value_name = "PROFILE")]
-    pub profile_name: Option<String>,
-
-    /// Print the awswit version and exit.
-    #[arg(short = 'v', long = "version")]
-    pub version: bool,
-
-    /// Emit shell `export` / `unset` lines on stdout for `eval`.
-    ///
-    /// This is what the shell wrapper (`awswit init <shell>`) uses internally.
-    /// You can also call it directly: `eval "$(awswit --shell-export prod)"`.
-    #[arg(long = "shell-export", short = 's')]
-    pub shell_export: bool,
-
-    /// Unset every AWS_* variable awswit manages.
-    #[arg(short = 'u', long = "unset")]
-    pub unset: bool,
-
-    /// List profiles. Default: human-readable when stdout is a terminal, TSV otherwise.
-    #[arg(short = 'l', long = "list")]
-    pub list: bool,
-
-    /// With --list, emit JSON instead of TSV / pretty output.
-    #[arg(long = "json")]
-    pub json: bool,
-
-    /// With --list, emit only profile names, one per line — a fast path for
-    /// shell tab-completion. Skips history and SSO-cache I/O.
-    #[arg(long = "names-only")]
-    pub names_only: bool,
-
-    /// AWS config file path (defaults to $AWS_CONFIG_FILE or ~/.aws/config).
-    #[arg(long = "config-file", value_name = "PATH")]
-    pub config_file: Option<String>,
-
-    /// Override the region exported with the selected profile.
-    #[arg(long = "region", value_name = "REGION")]
-    pub region: Option<String>,
-
-    /// Skip the interactive picker; resolve the profile by name or $AWS_PROFILE.
-    #[arg(long = "no-interactive", short = 'n')]
-    pub no_interactive: bool,
-
-    /// Use external `fzf` for selection instead of the built-in TUI.
-    #[arg(long = "fzf")]
-    pub use_fzf: bool,
-
-    /// Verbose logging (INFO).
-    #[arg(long = "verbose")]
-    pub verbose: bool,
-
-    /// Debug logging.
-    #[arg(long = "debug")]
-    pub debug: bool,
+    pub(crate) command: Option<Command>,
 }
 
-#[derive(Subcommand, Debug, Clone)]
-pub enum Command {
-    /// Print the shell integration snippet — pipe into your rc file.
-    ///
-    /// Examples:{n}
-    ///   eval "$(awswit init bash)"{n}
-    ///   eval "$(awswit init zsh)"{n}
-    ///   awswit init fish | source{n}
-    ///   awswit init powershell | Invoke-Expression
+#[derive(Subcommand, Debug)]
+pub(crate) enum Command {
+    /// Select a profile for the current shell
+    Activate(ActivateArgs),
+
+    /// Run one command with an exact profile, without changing the parent shell
+    Exec(ExecArgs),
+
+    /// List selectable profiles
+    List(ListArgs),
+
+    /// Diagnose local configuration without contacting AWS
+    Doctor(DoctorArgs),
+
+    /// Clear managed profile and region variables through the loaded shell hook
+    Unset,
+
+    /// Print a shell integration script
     Init {
-        /// Shell type: bash | zsh | fish | powershell
-        shell: String,
+        #[arg(value_enum)]
+        shell: Shell,
     },
 
-    /// Generate static shell completion scripts.
+    /// Print a static completion script
     Completions {
-        /// Shell type
-        shell: clap_complete::Shell,
+        #[arg(value_enum)]
+        shell: Shell,
     },
+}
 
-    /// Run a command with a specific profile, without modifying the parent shell.
-    ///
-    /// Examples:{n}
-    ///   awswit exec prod -- aws s3 ls{n}
-    ///   awswit exec prod aws s3 ls
-    ///
-    /// `--` is optional when CMD has no leading flags. Use it (and please
-    /// do) when CMD itself starts with `-`, or when you want to be
-    /// explicit. exec sets `AWS_PROFILE` and (if defined) the profile's
-    /// region for the child only — the parent shell is untouched.
-    Exec {
-        /// Profile to run the command under.
-        profile: String,
+#[derive(ClapArgs, Debug, Default)]
+pub(crate) struct SourceArgs {
+    /// AWS shared config path (takes precedence over AWS_CONFIG_FILE)
+    #[arg(long, value_name = "PATH")]
+    pub(crate) config_file: Option<PathBuf>,
 
-        /// Override the region for this invocation only.
-        #[arg(long = "region", value_name = "REGION")]
-        region: Option<String>,
+    /// AWS shared credentials path (takes precedence over AWS_SHARED_CREDENTIALS_FILE)
+    #[arg(long, value_name = "PATH")]
+    pub(crate) credentials_file: Option<PathBuf>,
+}
 
-        /// Command and arguments to execute.
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            required = true,
-            value_name = "CMD"
-        )]
-        cmd: Vec<String>,
-    },
+#[derive(ClapArgs, Debug, Default)]
+pub(crate) struct ActivateArgs {
+    /// Exact profile name; omit to use the interactive picker
+    #[arg(value_name = "PROFILE", conflicts_with = "named_profile")]
+    pub(crate) profile: Option<String>,
 
-    /// Open the picker and print only the selected profile name to stdout.
-    ///
-    /// Designed for pipeline composition — no shell mutation, no status
-    /// chatter on stdout. Exits 130 if the user cancelled.
-    ///
-    /// Examples:{n}
-    ///   awswit exec "$(awswit pick)" -- aws sts get-caller-identity{n}
-    ///   aws --profile "$(awswit pick)" s3 ls{n}
-    ///   aws sso login --profile "$(awswit pick)"
-    Pick,
+    /// Exact profile name escape hatch for names beginning with `-`
+    #[arg(long = "profile", value_name = "PROFILE", allow_hyphen_values = true)]
+    pub(crate) named_profile: Option<String>,
 
-    /// Show the currently active AWS profile and its details.
-    Which,
+    /// Override the selected profile's configured region
+    #[arg(long, value_name = "REGION")]
+    pub(crate) region: Option<String>,
 
-    /// Audit ~/.aws/config and SSO token cache for common breakage.
-    ///
-    /// Exits non-zero when at least one error-level issue is found.
-    Doctor {
-        /// Emit findings as a JSON array on stdout (for CI integration).
-        #[arg(long = "json")]
-        json: bool,
-    },
+    /// Explicitly remove detected credential overrides from the activated shell
+    #[arg(long)]
+    pub(crate) clear_credential_overrides: bool,
 
-    /// Print just the current profile name (for shell prompt integration).
-    ///
-    /// Both `{}` and `%s` work as the placeholder in --format.
-    ///
-    /// `prompt` writes its output with no trailing newline — your shell's
-    /// PS1 / RPROMPT is expected to render it inline. To inspect the value
-    /// interactively, run `awswit prompt; echo`.
-    ///
-    /// Example bash PS1:
-    ///   PS1='[\u@\h $(awswit prompt --format "{} " --default "")] \w \$ '
-    Prompt {
-        /// Format string. `{}` and `%s` are both interpolated with the
-        /// current profile name.
-        #[arg(long = "format", default_value = "{}")]
-        format: String,
+    #[command(flatten)]
+    pub(crate) sources: SourceArgs,
+}
 
-        /// Output when no profile is set.
-        #[arg(long = "default", default_value = "")]
-        default: String,
-    },
+#[derive(ClapArgs, Debug)]
+pub(crate) struct ExecArgs {
+    /// Exact profile name
+    #[arg(value_name = "PROFILE", required_unless_present = "named_profile")]
+    pub(crate) profile: Option<String>,
+
+    /// Exact profile name escape hatch for names beginning with `-`
+    #[arg(
+        long = "profile",
+        value_name = "PROFILE",
+        allow_hyphen_values = true,
+        conflicts_with = "profile"
+    )]
+    pub(crate) named_profile: Option<String>,
+
+    /// Override the selected profile's configured region
+    #[arg(long, value_name = "REGION")]
+    pub(crate) region: Option<String>,
+
+    /// Explicitly remove detected credential overrides from the child process
+    #[arg(long)]
+    pub(crate) clear_credential_overrides: bool,
+
+    #[command(flatten)]
+    pub(crate) sources: SourceArgs,
+
+    /// Executable and arguments (use `--` before the executable)
+    #[arg(
+        required = true,
+        num_args = 1..,
+        last = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub(crate) command: Vec<OsString>,
+}
+
+#[derive(ClapArgs, Debug)]
+pub(crate) struct ListArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = ListFormat::Human)]
+    pub(crate) format: ListFormat,
+
+    #[command(flatten)]
+    pub(crate) sources: SourceArgs,
+}
+
+#[derive(ClapArgs, Debug)]
+pub(crate) struct DoctorArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = DoctorFormat::Human)]
+    pub(crate) format: DoctorFormat,
+
+    #[command(flatten)]
+    pub(crate) sources: SourceArgs,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ListFormat {
+    Human,
+    Names,
+    Json,
+    /// Internal shell-completion feed. It omits names whose insertion cannot
+    /// be distinguished visually by completion APIs without display labels.
+    #[value(hide = true)]
+    Completion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum DoctorFormat {
+    Human,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(alias = "pwsh")]
+    Powershell,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
-    fn parses_defaults() {
-        let args = Args::try_parse_from(["awswit"]).unwrap();
-        assert!(!args.version);
-        assert!(!args.unset);
-        assert!(args.profile_name.is_none());
+    fn bare_invocation_means_interactive_activation() {
+        let cli = Cli::try_parse_from(["awswit"]).unwrap();
+        assert!(cli.command.is_none());
     }
 
     #[test]
-    fn parses_profile_name_positional() {
-        let args = Args::try_parse_from(["awswit", "prod"]).unwrap();
-        assert_eq!(args.profile_name.as_deref(), Some("prod"));
+    fn exact_activation_is_explicit() {
+        let cli = Cli::try_parse_from(["awswit", "activate", "prod"]).unwrap();
+        let Some(Command::Activate(args)) = cli.command else {
+            panic!("expected activation");
+        };
+        assert_eq!(args.profile.as_deref(), Some("prod"));
     }
 
     #[test]
-    fn parses_shell_export_short() {
-        let args = Args::try_parse_from(["awswit", "-s", "prod"]).unwrap();
-        assert!(args.shell_export);
+    fn legacy_positional_is_not_accepted_by_the_binary() {
+        let error = Cli::try_parse_from(["awswit", "prod"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]
-    fn parses_list_json() {
-        let args = Args::try_parse_from(["awswit", "-l", "--json"]).unwrap();
-        assert!(args.list);
-        assert!(args.json);
+    fn exec_keeps_arguments_as_an_argv() {
+        let cli = Cli::try_parse_from([
+            "awswit",
+            "exec",
+            "prod",
+            "--",
+            "printf",
+            "%s",
+            "$HOME; rm -rf nope",
+        ])
+        .unwrap();
+        let Some(Command::Exec(args)) = cli.command else {
+            panic!("expected exec");
+        };
+        assert_eq!(args.profile.as_deref(), Some("prod"));
+        assert_eq!(args.command[0], "printf");
+        assert_eq!(args.command[2], "$HOME; rm -rf nope");
     }
 
     #[test]
-    fn parses_exec_subcommand() {
-        let args =
-            Args::try_parse_from(["awswit", "exec", "prod", "--", "aws", "s3", "ls"]).unwrap();
-        match args.command {
-            Some(Command::Exec { profile, cmd, .. }) => {
-                assert_eq!(profile, "prod");
-                assert_eq!(cmd, vec!["aws".to_string(), "s3".into(), "ls".into()]);
-            }
-            _ => panic!("expected Exec"),
+    fn exec_requires_the_command_separator() {
+        let error = Cli::try_parse_from(["awswit", "exec", "prod", "printf"])
+            .expect_err("command without -- must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn exec_can_address_a_leading_hyphen_profile() {
+        let cli = Cli::try_parse_from(["awswit", "exec", "--profile=-h", "--", "true"])
+            .expect("hyphenated profile must be representable");
+        let Some(Command::Exec(args)) = cli.command else {
+            panic!("expected exec");
+        };
+        assert_eq!(args.profile, None);
+        assert_eq!(args.named_profile.as_deref(), Some("-h"));
+        assert_eq!(args.command, [OsString::from("true")]);
+    }
+
+    #[test]
+    fn activate_can_address_a_leading_hyphen_profile() {
+        let cli = Cli::try_parse_from(["awswit", "activate", "--profile=-h"])
+            .expect("hyphenated profile must be representable");
+        let Some(Command::Activate(args)) = cli.command else {
+            panic!("expected activate");
+        };
+        assert_eq!(args.profile, None);
+        assert_eq!(args.named_profile.as_deref(), Some("-h"));
+    }
+
+    #[test]
+    fn source_options_are_command_local() {
+        let cli = Cli::try_parse_from([
+            "awswit",
+            "list",
+            "--format",
+            "names",
+            "--config-file",
+            "/tmp/aws config",
+        ])
+        .unwrap();
+        let Some(Command::List(args)) = cli.command else {
+            panic!("expected list");
+        };
+        assert_eq!(args.format, ListFormat::Names);
+        assert_eq!(
+            args.sources.config_file,
+            Some(PathBuf::from("/tmp/aws config"))
+        );
+    }
+
+    #[test]
+    fn root_help_explains_the_process_boundary_and_all_supported_hooks() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("a child process cannot modify its parent shell"));
+        for shell in ["Bash", "Zsh", "Fish", "PowerShell"] {
+            assert!(help.contains(shell), "missing {shell} setup from help");
         }
-    }
-
-    #[test]
-    fn exec_requires_command() {
-        let res = Args::try_parse_from(["awswit", "exec", "prod"]);
-        assert!(res.is_err(), "exec without CMD should fail");
-    }
-
-    #[test]
-    fn parses_which_and_doctor() {
-        assert!(matches!(
-            Args::try_parse_from(["awswit", "which"]).unwrap().command,
-            Some(Command::Which)
-        ));
-        assert!(matches!(
-            Args::try_parse_from(["awswit", "doctor"]).unwrap().command,
-            Some(Command::Doctor { json: false })
-        ));
-        assert!(matches!(
-            Args::try_parse_from(["awswit", "doctor", "--json"])
-                .unwrap()
-                .command,
-            Some(Command::Doctor { json: true })
-        ));
+        assert!(help.contains("-join [Environment]::NewLine"));
+        assert!(help.contains("exec PROFILE -- COMMAND"));
     }
 }

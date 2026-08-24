@@ -1,0 +1,15 @@
+awswit-aarch64-apple-darwin.tar.xz
+awswit-aarch64-apple-darwin.tar.xz.sha256
+awswit-aarch64-unknown-linux-gnu.tar.xz
+awswit-aarch64-unknown-linux-gnu.tar.xz.sha256
+awswit-installer.ps1
+awswit-installer.sh
+awswit-x86_64-apple-darwin.tar.xz
+awswit-x86_64-apple-darwin.tar.xz.sha256
+awswit-x86_64-pc-windows-msvc.zip
+awswit-x86_64-pc-windows-msvc.zip.sha256
+awswit-x86_64-unknown-linux-gnu.tar.xz
+awswit-x86_64-unknown-linux-gnu.tar.xz.sha256
+sha256.sum
+source.tar.gz
+source.tar.gz.sha256

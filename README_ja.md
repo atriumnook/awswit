@@ -1,160 +1,229 @@
 # awswit
 
-AWS プロファイルをインタラクティブに切り替えるツール。あいまい検索と frecency で、使いたいプロファイルにすぐたどり着ける。
+awswit は fail-closed な高速 AWS profile selector である。Rust の単一 executable、built-in TUI、小さな生成 shell
+hook で構成される。標準 AWS profile variables を切り替えるが、credential の保管、STS 呼び出し、SSO / AWS Login、
+AWS CLI/SDK credential provider chain の代替は行わない。
 
-[![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
-[![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/atriumnook/awswit/actions/workflows/ci.yml/badge.svg)](https://github.com/atriumnook/awswit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.md)
+[English](README.md) · [ドキュメント](docs/README.md) · [運用ランブック](docs/operations/runbook.md)
 
-<!-- TODO: docs/demo.gif TUI の録画を追加 -->
+> awswit は現在 pre-1.0 である。executable と生成 shell hook は同じ version に揃えること。
 
-## クイックスタート
+## awswit を選ぶ理由
 
-### インストール
+- built-in fuzzy TUI。fuzzy matching は visible candidates の filter にだけ使う。
+- 非対話 activation と `exec` は case-sensitive exact match。typo から近い別 profile を選ばない。
+- conflicting ambient AWS credential-provider variables を検出し、その値を表示せず fail-closed する。
+- transactional allow-list shell protocol。profile 由来の text は data として代入し、shell code として評価しない。
+- config-only、credentials-only、role、modern/legacy SSO、AWS Login（`login_session`）、`credential_process`、
+  web identity、static-key profile の metadata を読み、access/secret/session-token values、login-session identity、
+  process command text は保持しない。
+- favorite と最近の利用による並び替え。履歴は concurrent-safe、bounded、best-effort。
+- loaded hookはstatic CLI grammarとcurrently activatable profileのdynamic exact-name completionを合成する。
+  `completions SHELL`はstatic grammarだけを生成する。
+- prebuilt selector executable は Python、Node、AWS CLI、fzf、Nerd Font、daemon、language runtime を要求しない。
+
+表示する account ID、role、provider label は local file 上の configured hint であり、検証済み AWS identity ではない。
+
+## インストール
+
+[GitHub Releases](https://github.com/atriumnook/awswit/releases) に公開済みの OS/architecture に合う archive があれば
+SHA-256 と provenance を検証する。current release policy は binary-only で、このpackageをcrates.ioへ公開しない。
+公開済みの `v0.0.2` はこの品質baselineより前の実装である。文書化したgateを証明する後続releaseまでは、
+Rust 1.94以上で監査済みcheckoutからbuildする。
 
 ```bash
-cargo install awswit
+cargo install --locked --path .
 ```
 
-### シェル設定
+checkout内のpackage metadataをregistryやrelease artifactの公開証拠として扱わない。
 
-<details open>
-<summary>Bash / Zsh</summary>
+release target、checksum、SBOM、provenance の手順は
+[install・検証ランブック](docs/operations/runbook.md#2-install) を参照する。release archiveはstartup fileを編集しない。
+任意のcargo-dist installerはexecutable directoryを`PATH`へ追加し得るため、ランブックにPATH非変更/unmanaged installの
+controlを記載する。どちらの経路も`awswit init`やcompletion lineを挿入しない。
+
+## Shell hook を導入する
+
+child executable は parent shell を変更できない。使用する shell の startup file から生成 hook を読み込む。
+
+### Bash / Zsh
 
 ```bash
-# ~/.bashrc or ~/.zshrc
-eval "$(awswit init bash)"   # or zsh
+# ~/.bashrc
+eval "$(awswit init bash)"
+
+# ~/.zshrc
+eval "$(awswit init zsh)"
 ```
 
-</details>
-
-<details>
-<summary>Fish</summary>
+### Fish
 
 ```fish
 # ~/.config/fish/config.fish
 awswit init fish | source
 ```
 
-</details>
-
-<details>
-<summary>PowerShell</summary>
+### PowerShell
 
 ```powershell
 # $PROFILE
-awswit init powershell | Invoke-Expression
+Invoke-Expression ((awswit init powershell) -join [Environment]::NewLine)
 ```
 
-</details>
+ここで読むのは installed executable が生成する static hook code である。activation response は検証対象の data frame
+なので、`awswit activate` の出力を自分で eval してはならない。upgrade 後は shell を再起動または reload する。
 
-### 使い方
+## 使い方
 
 ```bash
-awswit                  # インタラクティブに選択
-awswit prod             # 直接切り替え
-awswit -l               # プロファイル一覧
-awswit -u               # 環境変数を解除
+awswit                                  # current shell で TUI 選択
+awswit production                       # exact profile; hook の短縮形
+awswit activate production              # explicit subcommand で同じ activation
+awswit exec production -- aws sts get-caller-identity
+awswit exec --profile=-h -- aws sts get-caller-identity  # 先頭が-のprofile
+awswit list --format names
+awswit doctor                            # offline local diagnostics
+awswit unset                             # hook経由でawswitのprofile + region variablesを解除
 ```
 
-プロファイルを選んで Enter を押すと、`AWS_PROFILE` が現在のシェルに設定される。
+binary 自身が受理するのは `awswit activate PROFILE` で、`awswit PROFILE` は hook の Interface である。automation では
+`exec` または explicit subcommand を使う。profile 名が subcommand と同じ場合（例: `list`）は
+`awswit activate list` と指定する。Bash/Zsh/Fishでprofile名が`-`から始まる場合（help/version flagそのものを含む）は、
+例えば`awswit -- -h`または`awswit activate -- -h`と指定する。PowerShellはunquoted `--`を自身の
+end-of-parameters tokenとして消費するため、`awswit activate --profile=-h`を使うか、literal separatorを
+`awswit activate '--' -h`のようにquoteする。
+`exec`では`awswit exec --profile=-h -- COMMAND...`という曖昧さのないnamed profile formを使う。PowerShell hookは
+通常のunquoted separatorをcommand境界が一意なときだけ復元する。child executable自体が`-`から始まる場合は
+`awswit exec PROFILE '--' -command`とquoteし、曖昧なままならhookは何も実行せず拒否する。
 
-## 特徴
+### Credential override protection
 
-- **あいまい検索** — 入力に応じてプロファイルを絞り込む
-- **Frecency ソート** — 使用頻度と新しさに基づいて順位付け
-- **お気に入り** — `*` でプロファイルを先頭に固定
-- **プレビューパネル** — `Ctrl+P` でリージョン、アカウント ID、ロール ARN などを確認
-- **fzf 連携** — `--fzf` または `AWSWIT_USE_FZF=1` で外部 fzf を使用
-- **認証には関与しない** — awswit は `AWS_PROFILE` の設定だけを行い、認証は AWS SDK・SSO・aws-vault に委ねる
-- **シングルバイナリ** — Rust 製、ランタイム依存なし
+AWS credential environment variables は選択 profile より優先され得る。awswit は停止して conflict variable names を
+示すが、値は表示しない。scope を確認したうえで明示的に解除する。
 
-## 仕組み
+```bash
+awswit production --clear-credential-overrides
 
-`~/.aws/config` を読み、選択されたプロファイルを環境変数に設定する:
-
-```
-AWS_PROFILE=prod
-AWS_DEFAULT_PROFILE=prod
-AWS_REGION=ap-northeast-1       # プロファイルにリージョン定義があれば
-AWS_DEFAULT_REGION=ap-northeast-1
-AWSWIT_PROFILE=prod
+# この command だけ変更するなら、こちらが安全:
+awswit exec production --clear-credential-overrides -- aws sts get-caller-identity
 ```
 
-認証の解決は AWS SDK が行う。IAM キー、SSO、ロール引き受け、`credential_process` など、方式を問わない。awswit は認証に関与しない。
+前者は current shell、後者は command process だけから検出済み conflict を除く。`awswit unset` は credential や
+`AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE` を解除しない。
+IMDS endpoint overrideを許可するのはcomplete chainが`credential_source = Ec2InstanceMetadata`を明示する場合だけである。
+alternate `AWS_LOGIN_CACHE_DIRECTORY`はexplicit AWS Login chainだけで許可する。`AWS_BEARER_TOKEN_BEDROCK`はBedrock
+requestで選択profileのidentityを置換し得るため常にconflictとする。
+一部AWS SDKが読むlegacy direct-key aliases（`AWS_ACCESS_KEY`、`AWS_SECRET_KEY`、`AMAZON_*` key/token names）も
+standard namesと同じ保護対象である。`credential_source = Environment`を含め、presentなdirect-key variableはすべて
+conflictにする。AWS CLI/SDKのenvironment-provider precedenceがそのcredentialを直接使い、選択roleを迂回し得るためである。
+`--clear-credential-overrides`は選んだscopeから検出済みnameをすべて除けるが、awswitはvalueを読まず、aliasの優先順位も
+暗黙決定しない。clearすれば必要なsourceも消えるため、`credential_source = Environment`を使うroleはawswitのgeneric
+`AWS_PROFILE` contractでは意図的にactivatableとしない。consumerがselected profile経由で解決できるfile/process/SSO/
+workload sourceを使う。`role_arn`のないstandalone `credential_source`も、現行SDKがrejectまたはignoreして別identityへ
+fall throughし得るためdiagnostic-onlyとする。
+Java SDK v1固有の`AWS_CREDENTIAL_PROFILES_FILE` path overrideは常にconflictとする。clearすれば同SDKのdefault pathへ戻るが、
+Java v1はstandardなnon-default credentials-path variableを尊重しないため、non-default file利用時はEOL consumer側を
+明示設定する。
+AWS SDK for Go v1のdefault sessionはshared config内のrole/SSO/regionを読むために`AWS_SDK_LOAD_CONFIG=1`（または
+`SharedConfigEnable`）を必要とする。awswitはこのapplication behavior flagをoverwrite/所有しない。EOL SDKをv2へ移行するか、
+legacy consumerを明示設定してidentityを検証する。
 
-## キーバインド
+AWS Tools for PowerShellのvisibleかつnon-nullな`$StoredAWSCredentials` session credentialは`AWS_PROFILE`より優先する。
+PowerShell hookはこの状態でcurrent-shell activationを拒否するため、sessionを確認して`Clear-AWSCredential`を実行後に
+再試行する。Windowsでは.NET SDK Storeの同名profileもshared-file profileより優先し得る。.NET consumerは
+`AWSConfigs.AWSProfilesLocation`を意図したshared credentials fileへ設定する（またはapplication startupでlegacy
+persistence storeを無効化する）うえ、`GetCallerIdentity`でprincipalを検証する。詳細は
+[Windows consumer runbook](docs/operations/runbook.md#54-windows-powershell-and-net-consumer-precedence)を参照する。
+
+## TUI キー
 
 | キー | 動作 |
-|------|------|
-| 文字入力 | あいまい検索 |
-| `Enter` | 選択 |
-| `↑`/`↓` or `Ctrl+k`/`Ctrl+j` | 移動 |
-| `*` or `Ctrl+F` | お気に入り切り替え |
-| `Ctrl+P` | プレビュー切り替え |
-| `Esc` / `Ctrl+C` | キャンセル |
+|---|---|
+| 文字入力 | existing profile names を fuzzy filter |
+| `Enter` | focused exact profile を選択 |
+| `↑` / `↓`, `Ctrl+K` / `Ctrl+J` | 移動 |
+| `PageUp` / `PageDown`, `Home` / `End` | 大きく移動 |
+| `*` または `Ctrl+F` | favorite 切替 |
+| `Ctrl+P` | configured-metadata preview 切替 |
+| `Ctrl+U` | query clear |
+| `Esc` / `Ctrl+C` | cancel / interrupt |
 
-## CLI リファレンス
+current profile がない場合、起動直後は row が armed されず bare Enter で先頭を誤選択しない。0 match は確定できない。
+`NO_COLOR`、狭い terminal、Unicode name、通常 font に対応する。
 
-```
-awswit [PROFILE]           プロファイル切り替え（名前省略で TUI 起動）
-awswit init <shell>        シェル連携スクリプトを出力
-awswit completions <shell> タブ補完スクリプトを生成
-```
+## CLI
 
-| フラグ | 説明 |
-|--------|------|
-| `-v, --version` | バージョン表示 |
-| `-s, --show-commands` | export コマンドを表示（実行はしない） |
-| `-u, --unset` | AWS 環境変数をすべて解除 |
-| `-l, --list-profiles` | プロファイル一覧 |
-| `-n, --no-interactive` | TUI を使わず、名前または `$AWS_PROFILE` から解決 |
-| `--fzf` | 外部 fzf を使用 |
-| `--region <region>` | リージョンを上書き |
-| `--config-file <path>` | AWS 設定ファイルのパス |
-| `--info` | INFO レベルのログを表示 |
-| `--debug` | DEBUG レベルのログを表示 |
-
-## 設定
-
-`~/.awswit/config.toml`（すべてオプション）:
-
-```toml
-fuzzy-match = true           # あいまいマッチ（デフォルト: true）
-colors = true                # カラー出力（デフォルト: Linux/macOS で true）
-region = "ap-northeast-1"    # デフォルトリージョンの上書き
+```text
+awswit
+awswit activate [PROFILE] [OPTIONS]
+awswit exec PROFILE [OPTIONS] -- COMMAND [ARG...]
+awswit list [--format human|names|json] [SOURCE OPTIONS]
+awswit doctor [--format human|json] [SOURCE OPTIONS]
+awswit unset
+awswit init bash|zsh|fish|powershell
+awswit completions bash|zsh|fish|powershell
 ```
 
-不明なキーはロード時にエラーとなるため、typo が黙って無視されることはない。
+主な option:
 
-<details>
-<summary>シェル補完</summary>
+| Option | 意味 |
+|---|---|
+| `--region REGION` | profile の configured region を override |
+| `--clear-credential-overrides` | activation/command scope で detected conflicts を明示解除 |
+| `--config-file PATH` | この selection の `AWS_CONFIG_FILE` を override |
+| `--credentials-file PATH` | この selection の `AWS_SHARED_CREDENTIALS_FILE` を override |
 
-```bash
-awswit completions bash > /etc/bash_completion.d/awswit
-awswit completions zsh > ~/.zfunc/_awswit
-awswit completions fish > ~/.config/fish/completions/awswit.fish
+source precedence は CLI option、AWS path environment variable、`~/.aws/config` / `~/.aws/credentials` の順。missing
+default file は empty、missing explicit path は error。relativeなnon-default pathはinvocation時のlexical absolute pathへ
+固定するため、後続のdirectory変更で別fileを暗黙選択しない。command 別詳細は `awswit COMMAND --help` で確認する。
+
+loaded `init SHELL` artifactはfull command/option completionとcurrently activatable profileの安全なruntime feedを合成する。
+display/insertion valueを分離できないshell menuではzero-cell Unicode scalarを含むnameを候補から除くが、visible escape付き
+TUI、exact activation、raw `list --format names`からは利用できる。standalone `completions SHELL` artifactはruntime profile
+discoveryを持たない同じstatic grammarである。
+
+## 設定される値
+
+activation 成功時は次を coherent に保つ。
+
+```text
+AWS_PROFILE=production
+AWS_DEFAULT_PROFILE=production
+AWSWIT_PROFILE=production
+AWS_REGION=ap-northeast-1
+AWS_DEFAULT_REGION=ap-northeast-1
 ```
 
-</details>
+`--region` も profile region もなければ region pair を解除し、以前の awswit region の持越しを防ぐ。command-line
+source pathとrelativeなenvironment-selected source pathはlexical absolute pathとして対応する標準AWS path variablesで
+伝播する。
+hookはcapture対象のactivation/unsetとdoctor subprocessだけに`AWSWIT_HOOK=1`と`AWSWIT_SHELL`をscopeする。
+unrelated child shellへintegration markerをexportしない。
 
-## FAQ
+## Security / responsibility boundary
 
-**`export AWS_PROFILE=foo` でよくない？**
+awswit は次を行わない。
 
-もちろん可能である。awswit はプロファイルが 10 個以上あり、正確な名前を入力するのが手間になった場合に役立つ。あいまい検索・お気に入り・frecency により、通常 1〜2 打鍵で目当てのプロファイルに到達できる。
+- access key/token の保管、表示、refresh、rotation;
+- STS 呼び出し、MFA prompt、IAM Identity Center / AWS Login、`~/.aws/sso/cache` / `~/.aws/login/cache` 管理;
+- discovery/`doctor` での `credential_process` 実行;
+- current AWS principal、permission、login、token expiry、network の検証;
+- shell startup file へのhook/completion lineの自動挿入、daemon、telemetry。
 
-**awsume / aws-vault と何が違う？**
+credential lifecycle は `aws sso login`、`aws login --profile PROFILE`、通常の SDK/CLI flow、aws-vault などに委譲する。
+offline catalog issue は `awswit doctor`（automationでは`--format json`）で確認し、authentication failure は provider
+所有者の runbookへ引き継ぐ。
 
-awsume や aws-vault は認証を管理する。STS 呼び出し、トークンのキャッシュ、MFA の処理などを行う。awswit はそれらを一切行わない。`AWS_PROFILE` を設定し、認証は SDK に委ねる。そのため:
+## ドキュメント
 
-- バックグラウンドプロセスなし
-- トークンファイルのトラブルシュートなし
-- 認証方式を問わない。awswit の開発後に登場した方式でも動作する
-
-`aws sso login` や aws-vault を既に使っているなら、awswit はプロファイルを素早く選択するためのツールである。
+- [製品要件](docs/requirements/product-requirements.md)
+- [競合・AWS標準調査](docs/requirements/competitive-research.md)
+- [アーキテクチャ](docs/design/architecture.md)
+- [詳細仕様](docs/design/specification.md)
+- [install、upgrade、障害対応、rollback、incident runbook](docs/operations/runbook.md)
 
 ## ライセンス
 

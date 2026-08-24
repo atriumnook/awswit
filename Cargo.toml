@@ -2,28 +2,53 @@
 
 [workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
+allow-dirty = ["ci"]
 ci = ["github"]
+dispatch-releases = true
+github-attestations = true
+github-attestations-phase = "host"
+github-attestations-filters = [
+    "*.cdx.xml",
+    "*.json",
+    "*.ps1",
+    "*.sha256",
+    "*.sh",
+    "*.sum",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.zip",
+]
+global-artifacts-jobs = ["./release-gate"]
 installers = ["shell", "powershell"]
+pr-run-mode = "skip"
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
-    "aarch64-pc-windows-msvc",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
+
+[workspace.metadata.dist.github-action-commits]
+"actions/attest-build-provenance" = "977bb373ede98d70efdf65b84cb5f73e068dcc2a"
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/download-artifact" = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+"actions/upload-artifact" = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 
 [package]
 name = "awswit"
 version = "0.1.0"
+publish = false
 edition = "2024"
 rust-version = "1.94"
-description = "Interactive AWS profile switcher with fuzzy search"
+description = "Safe, interactive AWS profile selector"
 license = "MIT"
 repository = "https://github.com/atriumnook/awswit"
 keywords = ["aws", "profile", "switcher", "tui", "cli"]
 categories = ["command-line-utilities"]
+
+[package.metadata.dist]
+dist = true
 
 [lib]
 name = "awswit"
@@ -34,45 +59,23 @@ name = "awswit"
 path = "src/main.rs"
 
 [dependencies]
-# CLI
-clap = { version = "4.4", features = ["derive", "env", "string"] }
-clap_complete = "4.5"
-
-# Serialization
+clap = { version = "4.6.6", features = ["derive", "string"] }
+clap_complete = "4.6.9"
+crossterm = "0.29.0"
+dirs = "6.0.0"
+nucleo-matcher = "0.3.1"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+thiserror = "2.0.20"
+unicode-width = "0.2.2"
 
-# Date/Time
-chrono = { version = "0.4", features = ["serde"] }
-
-# Error handling
-thiserror = "1.0"
-
-# Directory paths
-dirs = "5.0"
-
-# Fuzzy matching
-strsim = "0.10"
-nucleo-matcher = "0.3"
-
-# Modern TUI
-ratatui = { version = "0.25", features = ["crossterm"] }
-crossterm = "0.27"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Shell path expansion
-shellexpand = "3.1"
-
-# Shell-like argument splitting
-shell-words = "1.1"
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30.1", default-features = false, features = ["process"] }
+signal-hook = "0.4.4"
 
 [dev-dependencies]
 tempfile = "3.9"
-strsim = "0.10"
 
 [profile.release]
 lto = true
