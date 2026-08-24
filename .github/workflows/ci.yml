@@ -250,6 +250,7 @@ jobs:
       - name: Run external shell contract tests
         run: |
           cargo test --locked --test cli_contract zsh_
+          cargo test --locked --test cli_contract bash_rejects_special_variable_attributes
           cargo test --locked --test cli_contract shell_scripts_pass_syntax_checks
         env:
           AWSWIT_REQUIRE_EXTERNAL_SHELLS: "1"
@@ -711,6 +712,7 @@ jobs:
           finally {
             [Console]::OutputEncoding = $originalOutputEncoding
           }
+          $global:LASTEXITCODE = 0
       # END AWSWIT POWERSHELL CONFORMANCE
       # END AWSWIT FOUR SHELL CONFORMANCE
 

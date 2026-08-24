@@ -1271,7 +1271,7 @@ fn exec_does_not_search_the_working_directory_when_path_is_unset() {
 
     let fixture = Fixture::new();
     let probe = fixture.root.path().join("untrusted-probe");
-    fs::copy("/bin/true", &probe).expect("copy probe executable");
+    fs::copy("/usr/bin/true", &probe).expect("copy probe executable");
     let mut permissions = fs::metadata(&probe).expect("stat probe").permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(&probe, permissions).expect("make probe executable");
@@ -1303,7 +1303,7 @@ fn exec_path_search_continues_after_an_inaccessible_candidate() {
     fs::create_dir_all(&usable_directory).expect("create usable bin directory");
 
     let denied = denied_directory.join("probe");
-    fs::copy("/bin/true", &denied).expect("copy inaccessible candidate");
+    fs::copy("/usr/bin/true", &denied).expect("copy inaccessible candidate");
     let mut denied_permissions = fs::metadata(&denied).unwrap().permissions();
     // An execute bit exists, but it is not in the owner class selected for this
     // process, so a mode-bit precheck alone cannot determine effective access.
@@ -1311,7 +1311,7 @@ fn exec_path_search_continues_after_an_inaccessible_candidate() {
     fs::set_permissions(&denied, denied_permissions).unwrap();
 
     let usable = usable_directory.join("probe");
-    fs::copy("/bin/true", &usable).expect("copy usable candidate");
+    fs::copy("/usr/bin/true", &usable).expect("copy usable candidate");
     let mut usable_permissions = fs::metadata(&usable).unwrap().permissions();
     usable_permissions.set_mode(0o700);
     fs::set_permissions(&usable, usable_permissions).unwrap();
@@ -1383,6 +1383,11 @@ fn activation_pins_relative_source_paths_to_the_catalog_snapshot() {
     .expect("write relative config");
     fs::write(sources.join("credentials"), "").expect("write relative credentials");
 
+    let canonical_config =
+        fs::canonicalize(sources.join("config")).expect("canonicalize relative config");
+    let canonical_credentials =
+        fs::canonicalize(sources.join("credentials")).expect("canonicalize relative credentials");
+
     for source_kind in ["command-line", "environment"] {
         let mut command = fixture.command();
         command
@@ -1408,14 +1413,14 @@ fn activation_pins_relative_source_paths_to_the_catalog_snapshot() {
         assert!(
             frame.contains(&format!(
                 "SET AWS_CONFIG_FILE={}\n",
-                sources.join("config").display()
+                canonical_config.display()
             )),
             "{source_kind} frame did not pin the config path: {frame:?}"
         );
         assert!(
             frame.contains(&format!(
                 "SET AWS_SHARED_CREDENTIALS_FILE={}\n",
-                sources.join("credentials").display()
+                canonical_credentials.display()
             )),
             "{source_kind} frame did not pin the credentials path: {frame:?}"
         );
@@ -1511,7 +1516,7 @@ fn special_configuration_and_history_files_never_block() {
     assert!(text(&history_output.stderr).contains("HISTORY_WRITE"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn exec_accepts_a_non_unicode_explicit_path() {
     use std::os::unix::ffi::OsStringExt;
@@ -1539,7 +1544,7 @@ fn exec_accepts_a_non_unicode_explicit_path() {
     assert!(output.status.success(), "{}", text(&output.stderr));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn activation_preserves_an_absolute_non_unicode_environment_source() {
     use std::os::unix::ffi::OsStringExt;
@@ -1846,7 +1851,7 @@ fn bash_rejects_a_truncated_frame_without_partial_changes() {
     assert!(status.success());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn bash_rejects_special_variable_attributes_without_partial_changes() {
     let fixture = Fixture::new();
