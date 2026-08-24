@@ -421,7 +421,7 @@ impl PreferenceStore {
                 Ok(()) => {
                     let private_result = open_regular_for_read(&backup_path).and_then(|backup| {
                         enforce_private_file_permissions(&backup)?;
-                        backup.sync_all()
+                        sync_preserved_file(&backup)
                     });
                     if let Err(source) = private_result {
                         let _ = fs::remove_file(&backup_path);
@@ -768,6 +768,18 @@ fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn sync_preserved_file(_file: &File) -> io::Result<()> {
+    // Windows rejects FlushFileBuffers for the read-only verification handle.
+    // The hard link references already-durable contents; no new bytes were written.
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_preserved_file(file: &File) -> io::Result<()> {
+    file.sync_all()
+}
+
 struct RemoveOnDrop {
     path: PathBuf,
     remove: bool,
@@ -1076,6 +1088,7 @@ mod tests {
         assert_eq!(fs::read(&history_target).unwrap(), contents);
 
         fs::remove_file(&history).unwrap();
+        fs::remove_file(sibling_path(&history, ".lock")).unwrap();
         let lock_target = temp.path().join("lock-target");
         fs::write(&lock_target, b"LOCK-TARGET").unwrap();
         symlink_file(&lock_target, sibling_path(&history, ".lock")).unwrap();
