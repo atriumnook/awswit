@@ -1410,20 +1410,38 @@ fn activation_pins_relative_source_paths_to_the_catalog_snapshot() {
         let output = command.output().expect("activate with relative sources");
         assert!(output.status.success(), "{}", text(&output.stderr));
         let frame = text(&output.stdout);
-        assert!(
-            frame.contains(&format!(
-                "SET AWS_CONFIG_FILE={}\n",
-                canonical_config.display()
-            )),
-            "{source_kind} frame did not pin the config path: {frame:?}"
-        );
-        assert!(
-            frame.contains(&format!(
-                "SET AWS_SHARED_CREDENTIALS_FILE={}\n",
-                canonical_credentials.display()
-            )),
-            "{source_kind} frame did not pin the credentials path: {frame:?}"
-        );
+        let propagated_path = |key: &str| {
+            let prefix = format!("SET {key}=");
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("{source_kind} frame omitted {key}: {frame:?}"))
+        };
+
+        for (kind, propagated, expected) in [
+            (
+                "config",
+                propagated_path("AWS_CONFIG_FILE"),
+                canonical_config.as_path(),
+            ),
+            (
+                "credentials",
+                propagated_path("AWS_SHARED_CREDENTIALS_FILE"),
+                canonical_credentials.as_path(),
+            ),
+        ] {
+            assert!(
+                propagated.is_absolute(),
+                "{source_kind} frame did not make the {kind} path absolute: {frame:?}"
+            );
+            let actual =
+                fs::canonicalize(&propagated).expect("canonicalize propagated source path");
+            assert_eq!(
+                actual, expected,
+                "{source_kind} frame pinned a different {kind} file: {frame:?}"
+            );
+        }
     }
 }
 
