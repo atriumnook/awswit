@@ -17,7 +17,8 @@ name: release-plz
 # 2. If that secret is unset, dispatch release.yml via workflow_dispatch
 #    (the documented exception to the GITHUB_TOKEN recursion guard).
 # Keep `workflow_dispatch:` on .github/workflows/release.yml if you
-# regenerate it with `dist generate`.
+# regenerate it with `dist generate` (Cargo.toml allow-dirty = ["ci"]
+# so `dist plan` accepts that intentional edit).
 
 permissions:
   pull-requests: write
