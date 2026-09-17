@@ -98,6 +98,10 @@ pub fn select_with_fzf(
 
     let fzf_args = build_fzf_args(std::env::var("AWSWIT_FZF_OPTS").ok().as_deref());
 
+    // stdin = profile list, stdout = selected name (awswit reads it),
+    // stderr inherited so the fzf TUI still reaches the terminal when the
+    // shell wrapper captures awswit's stdout via `$()`. fzf itself opens
+    // `/dev/tty` for keystrokes when its stdin is a pipe.
     let mut child = Command::new("fzf")
         .args(&fzf_args)
         .stdin(Stdio::piped())

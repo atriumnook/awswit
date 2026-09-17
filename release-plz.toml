@@ -1,9 +1,14 @@
 [workspace]
-# Don't publish to crates.io (this is a binary-only project).
+# Don't publish to crates.io (this is a binary-only project). The README
+# crates.io badge was a false signal — there is no crate to `cargo install`.
 publish = false
 # Let dist (cargo-dist) create the GitHub Release; release-plz only creates the tag.
+# A tag pushed with GITHUB_TOKEN will NOT start release.yml (GitHub recursion
+# guard). See .github/workflows/release-plz.yml for the PAT + workflow_dispatch
+# workaround. Do not set cargo-dist `dispatch-releases = true`: that replaces
+# tag-push triggers and would break a human `git push origin vX.Y.Z`.
 git_release_enable = false
-# Push the tag so dist's release workflow runs.
+# Push the tag so dist's release workflow runs (via PAT, or via explicit dispatch).
 git_tag_enable = true
 # Update CHANGELOG.md from conventional commits.
 changelog_update = true
