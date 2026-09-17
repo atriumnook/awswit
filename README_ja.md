@@ -3,7 +3,6 @@
 AWS プロファイルをインタラクティブに切り替えるツール。あいまい検索と frecency で、使いたいプロファイルにすぐたどり着ける。
 
 [![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
-[![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [English](README.md)
@@ -14,8 +13,15 @@ AWS プロファイルをインタラクティブに切り替えるツール。�
 
 ### インストール
 
+crates.io には未公開です。GitHub Release のバイナリか、リポジトリから入れてください。
+
 ```bash
-cargo install awswit
+# Linux / macOS（GitHub Release の latest）
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/atriumnook/awswit/releases/latest/download/awswit-installer.sh | sh
+
+# ソースから（crates.io ではない）
+cargo install --git https://github.com/atriumnook/awswit --locked
 ```
 
 ### シェル設定
@@ -76,14 +82,25 @@ awswit -u               # 環境変数を解除
 `~/.aws/config` を読み、選択されたプロファイルを環境変数に設定する:
 
 ```
-AWS_PROFILE=prod
-AWS_DEFAULT_PROFILE=prod
-AWS_REGION=ap-northeast-1       # プロファイルにリージョン定義があれば
-AWS_DEFAULT_REGION=ap-northeast-1
-AWSWIT_PROFILE=prod
+export AWS_PROFILE='prod'
+unset AWS_DEFAULT_PROFILE
+export AWS_REGION='ap-northeast-1'
+unset AWS_DEFAULT_REGION
+unset AWS_ACCESS_KEY_ID
+unset AWS_SECRET_ACCESS_KEY
+unset AWS_SESSION_TOKEN
+unset AWS_SECURITY_TOKEN
+unset AWS_CREDENTIAL_EXPIRATION
 ```
 
-認証の解決は AWS SDK が行う。IAM キー、SSO、ロール引き受け、`credential_process` など、方式を問わない。awswit は認証に関与しない。
+`AWS_PROFILE` / `AWS_REGION` をセットし、レガシーな `AWS_DEFAULT_*` と、
+SDK が `AWS_PROFILE` より優先する継承クレデンシャル
+(`AWS_ACCESS_KEY_ID` など) をクリアする。認証の解決は AWS SDK が行う。
+IAM キー、SSO、ロール引き受け、`credential_process` など、方式を問わない。
+awswit は認証情報を取得・保存しない。
+
+対話ピッカーは stdout ではなく stdin / stderr が TTY かどうかで起動する。
+シェルラッパーの `$()` キャプチャ下でも TUI は stderr に描画される。
 
 ## キーバインド
 

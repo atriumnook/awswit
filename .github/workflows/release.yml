@@ -12,6 +12,13 @@
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
+#
+# P0: keep `workflow_dispatch` if you regenerate this file (`dist generate`).
+# release-plz may tag with GITHUB_TOKEN, which does not trigger `on.push`.
+# The release-plz workflow then `gh workflow run Release --ref <tag>`; that
+# only works when this workflow lists workflow_dispatch. Do NOT set
+# cargo-dist `dispatch-releases = true` — that *replaces* tag-push triggers
+# and would break a human `git push origin vX.Y.Z`.
 
 name: Release
 permissions:
@@ -40,6 +47,7 @@ permissions:
 # will be marked as a prerelease.
 on:
   pull_request:
+  workflow_dispatch:
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'

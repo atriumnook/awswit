@@ -5,7 +5,6 @@ sorting, and first-class scripting support — built so picking the right
 profile out of dozens never gets in the way.
 
 [![CI](https://github.com/atriumnook/awswit/workflows/CI/badge.svg)](https://github.com/atriumnook/awswit/actions)
-[![Crates.io](https://img.shields.io/crates/v/awswit.svg)](https://crates.io/crates/awswit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [日本語](README_ja.md)
@@ -14,18 +13,24 @@ profile out of dozens never gets in the way.
 
 ### Install
 
-Pre-built binaries are attached to each [release](https://github.com/atriumnook/awswit/releases).
+Pre-built binaries are attached to each [GitHub Release](https://github.com/atriumnook/awswit/releases).
+awswit is **not** published on crates.io; `cargo install awswit` 404s.
+
+`releases/latest` tracks the newest *GitHub Release*, not a git tag. The
+`v0.1.0` tag exists as source only (release-plz pushed it with
+`GITHUB_TOKEN`, which does not trigger cargo-dist). Until the next
+intentional tagged release, `latest` may still point at v0.0.2.
 
 ```bash
-# Linux / macOS
+# Linux / macOS — GitHub Release installer (whatever `latest` currently is)
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/atriumnook/awswit/releases/latest/download/awswit-installer.sh | sh
 
 # Windows (PowerShell)
 irm https://github.com/atriumnook/awswit/releases/latest/download/awswit-installer.ps1 | iex
 
-# From source
-cargo install awswit
+# From source (this repository; not crates.io)
+cargo install --git https://github.com/atriumnook/awswit --locked
 ```
 
 ### Shell setup
@@ -60,7 +65,7 @@ awswit exec prod -- aws s3 ls   # one-off command, no shell mutation
 awswit -l                    # list profiles (TSV if piped, table on TTY)
 awswit -l --json             # list profiles as JSON
 awswit prompt                # current profile, for shell-prompt embedding
-awswit -u                    # unset AWS_PROFILE and AWS_REGION
+awswit -u                    # unset AWS_PROFILE, AWS_REGION, and inherited creds
 ```
 
 In the TUI: type to fuzzy-filter, `↑/↓` (or `Ctrl-k`/`Ctrl-j`) to
@@ -80,6 +85,11 @@ export AWS_PROFILE='prod'
 unset AWS_DEFAULT_PROFILE
 export AWS_REGION='ap-northeast-1'
 unset AWS_DEFAULT_REGION
+unset AWS_ACCESS_KEY_ID
+unset AWS_SECRET_ACCESS_KEY
+unset AWS_SESSION_TOKEN
+unset AWS_SECURITY_TOKEN
+unset AWS_CREDENTIAL_EXPIRATION
 ```
 
 We **set** the modern `AWS_PROFILE` / `AWS_REGION` variables, and
@@ -89,9 +99,26 @@ value left over from a CI image, a corporate dotfile, or a previous
 account. If the profile has no region, `AWS_REGION` is also unset and
 the SDK falls back to its own resolution.
 
+We also **clear inherited credential variables** (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and friends). These outrank
+`AWS_PROFILE` in the SDK resolution chain, so without clearing them a
+left-over key or session token from a previous `aws sso login`,
+aws-vault subshell, or awsume run would silently win — `awswit prod`
+would set the profile yet `aws s3 ls` would keep hitting the old
+account. Clearing them makes awswit a drop-in switcher: **after
+`awswit prod`, plain `aws ...` just works as the prod profile.** The
+same unsets run for `awswit -u` and inside `awswit exec`.
+
+The interactive picker is gated on **stdin and stderr** being a terminal,
+not stdout. The documented wrapper (`eval "$(awswit init bash)"`) captures
+stdout via `$()`, and `$(awswit pick)` does the same; the TUI draws on
+stderr so the captured payload stays clean. `--fzf` inherits stderr so
+fzf's UI still reaches the terminal under the wrapper.
+
 The AWS SDK resolves credentials from there — IAM keys, SSO, role
 assumption, `credential_process`, anything you've already configured.
-**awswit never reads or stores credential material.**
+**awswit never reads, fetches, or stores credential material itself** —
+it only removes conflicting variables and lets the SDK do the rest.
 
 ## Comparison
 
@@ -132,7 +159,7 @@ awswit exec staging -- aws s3 ls s3://bucket
 ### Subcommands
 
 ```text
-awswit [PROFILE]                 pick a profile (TUI if no PROFILE and stdout is a tty)
+awswit [PROFILE]                 pick a profile (TUI if no PROFILE and stdin+stderr are a tty)
 awswit pick                      open the picker, print selection to stdout (no shell mutation)
 awswit exec PROFILE -- CMD ...   run CMD with AWS_PROFILE set, without touching the shell
 awswit which                     show current profile + SSO expiry / aws-vault status
@@ -148,7 +175,7 @@ awswit completions <shell>       print a tab-completion script
 | ------------------------ | -------------------------------------------------------------------------- |
 | `-v`, `--version`        | print version                                                              |
 | `-s`, `--shell-export`   | emit only `set`/`unset` lines (for `eval`) — used by the shell wrapper     |
-| `-u`, `--unset`          | unset every awswit-managed variable                                        |
+| `-u`, `--unset`          | unset every awswit-managed variable, including inherited credential env vars |
 | `-l`, `--list`           | list profiles (TSV if piped, table if tty)                                 |
 | `--json`                 | with `-l`, emit JSON                                                       |
 | `--names-only`           | with `-l`, emit one profile name per line — fast path for completion       |
