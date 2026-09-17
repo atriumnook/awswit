@@ -60,6 +60,23 @@ def looks_like_tui(data: bytes) -> bool:
     return False
 
 
+def emit_result(
+    tui_seen: bool, alive: bool, exit_code: int, stdout: bytes, pty_buf: bytes
+) -> None:
+    sys.stdout.buffer.write(
+        (
+            f"tui={1 if tui_seen else 0}\n"
+            f"alive={1 if alive else 0}\n"
+            f"exit={exit_code}\n"
+        ).encode()
+    )
+    sys.stdout.buffer.write(b"---STDOUT---\n")
+    sys.stdout.buffer.write(stdout or b"")
+    sys.stdout.buffer.write(b"\n---PTY---\n")
+    sys.stdout.buffer.write(pty_buf)
+    sys.stdout.buffer.flush()
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print("usage: pty_picker.py MODE BIN [args...]", file=sys.stderr)
@@ -107,10 +124,6 @@ def main() -> int:
                 sent_key = True
         if proc.poll() is not None:
             break
-        if sent_key and mode != "wait":
-            # Give the process a moment to exit after the key.
-            if time.time() > deadline - 1.5:
-                pass
 
     if mode == "wait":
         still_running = proc.poll() is None
@@ -121,23 +134,20 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
         stdout = proc.stdout.read() if proc.stdout else b""
-        # Drain leftover PTY bytes.
         while read_available(master, pty_buf, 0.05):
             pass
         os.close(master)
-        print(f"tui={1 if tui_seen else 0}")
-        print(f"alive={1 if still_running else 0}")
-        print(f"exit={proc.returncode if proc.returncode is not None else -1}")
-        sys.stdout.buffer.write(b"---STDOUT---\n")
-        sys.stdout.buffer.write(stdout)
-        sys.stdout.buffer.write(b"\n---PTY---\n")
-        sys.stdout.buffer.write(bytes(pty_buf))
-        # Success: picker stayed up and drew on the PTY, stdout still empty.
+        emit_result(
+            tui_seen,
+            still_running,
+            proc.returncode if proc.returncode is not None else -1,
+            stdout,
+            bytes(pty_buf),
+        )
         if still_running and tui_seen and not stdout.strip():
             return 0
         return 1
 
-    # enter / esc / pick: wait for exit
     try:
         stdout, _ = proc.communicate(timeout=3)
     except subprocess.TimeoutExpired:
@@ -146,14 +156,13 @@ def main() -> int:
     while read_available(master, pty_buf, 0.05):
         pass
     os.close(master)
-
-    print(f"tui={1 if tui_seen else 0}")
-    print(f"alive=0")
-    print(f"exit={proc.returncode if proc.returncode is not None else -1}")
-    sys.stdout.buffer.write(b"---STDOUT---\n")
-    sys.stdout.buffer.write(stdout or b"")
-    sys.stdout.buffer.write(b"\n---PTY---\n")
-    sys.stdout.buffer.write(bytes(pty_buf))
+    emit_result(
+        tui_seen,
+        False,
+        proc.returncode if proc.returncode is not None else -1,
+        stdout or b"",
+        bytes(pty_buf),
+    )
     return 0 if tui_seen else 1
 
 

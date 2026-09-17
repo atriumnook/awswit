@@ -80,6 +80,7 @@ fn run_pty(mode: &str, extra: &[&str], home: &TempDir) -> PtyResult {
         )
         .env("AWSWIT_SHELL", "bash")
         .env("TERM", "xterm-256color")
+        .env("PYTHONUNBUFFERED", "1")
         .env_remove("AWS_PROFILE")
         .env_remove("AWS_DEFAULT_PROFILE")
         .env_remove("AWS_VAULT")
@@ -93,9 +94,10 @@ fn run_pty(mode: &str, extra: &[&str], home: &TempDir) -> PtyResult {
 }
 
 fn parse_pty_result(combined: &str, helper_status: i32) -> PtyResult {
-    let stdout_split = combined.split_once("---STDOUT---\n");
-    let (header, rest) = stdout_split.unwrap_or((combined, ""));
-    let (stdout, pty) = rest.split_once("\n---PTY---\n").unwrap_or((rest, ""));
+    let header = combined
+        .split_once("---STDOUT---\n")
+        .map(|(h, _)| h)
+        .unwrap_or(combined);
 
     let mut tui = false;
     let mut alive = false;
@@ -109,12 +111,28 @@ fn parse_pty_result(combined: &str, helper_status: i32) -> PtyResult {
             exit = v.trim().parse().unwrap_or(-1);
         }
     }
+
+    let stdout = combined
+        .split_once("---STDOUT---\n")
+        .and_then(|(_, rest)| rest.split_once("\n---PTY---\n").map(|(s, _)| s))
+        .unwrap_or("")
+        .to_string();
+    let pty = combined
+        .split_once("\n---PTY---\n")
+        .or_else(|| combined.split_once("---PTY---\n"))
+        .map(|(_, p)| p.to_string())
+        .unwrap_or_default();
+
+    // The TUI draws on the PTY; treat "awswit" / alt-screen as evidence even
+    // if the status header was delayed by stdio buffering.
+    let tui = tui || pty.contains("awswit") || pty.contains("\u{1b}[?1049h");
+
     PtyResult {
         tui,
         alive,
         exit,
-        stdout: stdout.to_string(),
-        pty: pty.to_string(),
+        stdout,
+        pty,
         helper_status,
     }
 }
