@@ -87,6 +87,7 @@ fn build_fzf_args(extra_opts: Option<&str>) -> Vec<String> {
 pub fn select_with_fzf(
     profiles: &HashMap<String, Profile>,
     history: &ProfileHistory,
+    query: Option<&str>,
 ) -> Result<String, AwswitError> {
     let now = chrono::Utc::now();
 
@@ -96,7 +97,10 @@ pub fn select_with_fzf(
 
     let input: String = names.iter().map(|n| format!("{}\n", n)).collect();
 
-    let fzf_args = build_fzf_args(std::env::var("AWSWIT_FZF_OPTS").ok().as_deref());
+    let mut fzf_args = build_fzf_args(std::env::var("AWSWIT_FZF_OPTS").ok().as_deref());
+    if let Some(q) = query {
+        fzf_args.push(format!("--query={}", q));
+    }
 
     // stdin = profile list, stdout = selected name (awswit reads it),
     // stderr inherited so the fzf TUI still reaches the terminal when the

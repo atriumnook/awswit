@@ -418,6 +418,31 @@ fn no_interactive_does_not_silently_fuzzy_match() {
     assert!(String::from_utf8_lossy(&output.stdout).is_empty());
 }
 
+/// Without a terminal to confirm on, an unknown name must fail instead of
+/// being replaced by a "closest" profile. `xyz` is within edit distance 3
+/// of `dev`, which the old auto-substitution silently switched to.
+#[test]
+fn unknown_profile_without_terminal_never_substitutes() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["--shell-export", "xyz"])
+        .env("AWSWIT_SHELL", "bash")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "no export may be emitted for an unknown profile: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Profile not found: xyz"),
+        "expected a not-found error, got: {}",
+        stderr
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn exec_works_without_dashdash_separator() {
