@@ -115,6 +115,11 @@ stdout via `$()`, and `$(awswit pick)` does the same; the TUI draws on
 stderr so the captured payload stays clean. `--fzf` inherits stderr so
 fzf's UI still reaches the terminal under the wrapper.
 
+awswit never replaces an unknown name with a "close" profile: profiles map
+to accounts, so a guess could switch you into the wrong one. With a
+terminal, it opens the picker filtered by what you typed and waits for
+`Enter`; without one, it fails with "did you mean…?" suggestions.
+
 The AWS SDK resolves credentials from there — IAM keys, SSO, role
 assumption, `credential_process`, anything you've already configured.
 **awswit never reads, fetches, or stores credential material itself** —
