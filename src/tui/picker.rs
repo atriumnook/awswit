@@ -108,8 +108,10 @@ impl<'a> ProfilePicker<'a> {
         // and `$(awswit pick)` does the same. The TUI must not write there or
         // it corrupts the export payload / selected name. stderr (and
         // crossterm's `/dev/tty` fallback for input) stays connected to the
-        // terminal under command substitution.
-        let mut stderr = io::stderr();
+        // terminal under command substitution. stderr is unbuffered, so wrap
+        // it: otherwise every cell update is its own write(2), thousands per
+        // frame, which is slow and tears over SSH. ratatui flushes per frame.
+        let mut stderr = io::BufWriter::new(io::stderr());
         execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
         let _screen = ScreenGuard;
         let backend = CrosstermBackend::new(stderr);
@@ -187,7 +189,7 @@ impl PickerApp {
 
     fn run(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+        terminal: &mut Terminal<CrosstermBackend<io::BufWriter<io::Stderr>>>,
     ) -> io::Result<PickerOutcome> {
         loop {
             terminal.draw(|f| self.render(f))?;
