@@ -55,7 +55,7 @@ impl<'a> ProfilePicker<'a> {
         Self {
             profiles,
             history: ProfileHistory::default(),
-            theme: Theme::default(),
+            theme: Theme::from_env(),
             query: String::new(),
         }
     }

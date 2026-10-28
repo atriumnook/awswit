@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+
 use ratatui::style::{Color, Modifier, Style};
 
 /// Theme configuration for the TUI
@@ -13,6 +15,8 @@ pub struct Theme {
     pub muted: Color,
     pub background: Color,
     pub surface: Color,
+    /// No colors at all; emphasis comes from modifiers only.
+    pub monochrome: bool,
 
     // Icons (Nerd Font compatible)
     pub icons: Icons,
@@ -52,6 +56,7 @@ impl Default for Theme {
             muted: Color::Rgb(86, 95, 137),       // Gray
             background: Color::Rgb(26, 27, 38),   // Dark
             surface: Color::Rgb(36, 40, 59),      // Slightly lighter
+            monochrome: false,
 
             icons: Icons::default(),
         }
@@ -83,6 +88,36 @@ impl Default for Icons {
 }
 
 impl Theme {
+    /// The default theme, or a colorless one when `NO_COLOR` is set to a
+    /// non-empty value (https://no-color.org).
+    pub fn from_env() -> Self {
+        Self::for_no_color(std::env::var_os("NO_COLOR").as_deref())
+    }
+
+    fn for_no_color(no_color: Option<&OsStr>) -> Self {
+        if no_color.is_some_and(|v| !v.is_empty()) {
+            Self::monochrome()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn monochrome() -> Self {
+        Self {
+            primary: Color::Reset,
+            secondary: Color::Reset,
+            accent: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            muted: Color::Reset,
+            background: Color::Reset,
+            surface: Color::Reset,
+            monochrome: true,
+            icons: Icons::default(),
+        }
+    }
+
     // Style helpers
     pub fn title_style(&self) -> Style {
         Style::default()
@@ -91,6 +126,10 @@ impl Theme {
     }
 
     pub fn selected_style(&self) -> Style {
+        // Without colors the selection would be invisible; reverse it instead.
+        if self.monochrome {
+            return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        }
         Style::default()
             .fg(self.background)
             .bg(self.primary)
@@ -156,5 +195,24 @@ impl ProfileType {
             ProfileType::User => "User",
             ProfileType::Sso => "SSO",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_color_set_and_non_empty_disables_color() {
+        let t = Theme::for_no_color(Some(OsStr::new("1")));
+        assert!(t.monochrome);
+        assert_eq!(t.primary, Color::Reset);
+        assert!(t.selected_style().add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn no_color_unset_or_empty_keeps_color() {
+        assert!(!Theme::for_no_color(None).monochrome);
+        assert!(!Theme::for_no_color(Some(OsStr::new(""))).monochrome);
     }
 }
