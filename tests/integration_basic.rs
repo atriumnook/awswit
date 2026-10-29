@@ -174,6 +174,37 @@ fn shell_export_emits_export_lines_to_stdout_only() {
 }
 
 #[test]
+fn shell_export_clears_inherited_credentials() {
+    // After switching, inherited env credentials must be cleared so the
+    // selected profile wins the SDK resolution chain and plain `aws ...`
+    // runs as that profile.
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["--shell-export", "--no-interactive", "default"])
+        .env("AWSWIT_SHELL", "bash")
+        .env("AWS_ACCESS_KEY_ID", "AKIA_STALE")
+        .env("AWS_SECRET_ACCESS_KEY", "stale_secret")
+        .env("AWS_SESSION_TOKEN", "stale_token")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for v in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CREDENTIAL_EXPIRATION",
+    ] {
+        assert!(
+            stdout.contains(&format!("unset {}", v)),
+            "missing unset for inherited credential {}",
+            v
+        );
+    }
+}
+
+#[test]
 fn unset_emits_unset_lines_for_every_managed_var() {
     let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
         .arg("--unset")
@@ -187,6 +218,11 @@ fn unset_emits_unset_lines_for_every_managed_var() {
         "AWS_DEFAULT_PROFILE",
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CREDENTIAL_EXPIRATION",
     ] {
         assert!(
             stdout.contains(&format!("unset {}", v)),
@@ -393,6 +429,36 @@ fn exec_works_without_dashdash_separator() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("AWS_PROFILE=dev"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_clears_stale_credential_env() {
+    let home = setup_aws_home();
+    let output = awswit_command(&home)
+        .args(["exec", "dev", "--", "/usr/bin/env"])
+        .env("AWS_ACCESS_KEY_ID", "AKIA_STALE")
+        .env("AWS_SECRET_ACCESS_KEY", "stale_secret")
+        .env("AWS_SESSION_TOKEN", "stale_token")
+        .env("AWS_SECURITY_TOKEN", "stale_security")
+        .env("AWS_CREDENTIAL_EXPIRATION", "2099-01-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exec exited {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AWS_PROFILE=dev"));
+    for stale in [
+        "AWS_ACCESS_KEY_ID=AKIA_STALE",
+        "AWS_SECRET_ACCESS_KEY=stale_secret",
+        "AWS_SESSION_TOKEN=stale_token",
+        "AWS_SECURITY_TOKEN=stale_security",
+        "AWS_CREDENTIAL_EXPIRATION=2099-01-01T00:00:00Z",
+    ] {
+        assert!(
+            !stdout.lines().any(|l| l == stale),
+            "stale credential leaked into exec child: {stale}\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -614,4 +680,87 @@ fn prompt_outputs_default_when_unset() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "(no aws)");
+}
+
+#[test]
+fn init_fish_collects_export_newlines() {
+    let output = Command::new(env!("CARGO_BIN_EXE_awswit"))
+        .args(["init", "fish"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("string collect"),
+        "fish wrapper must collect command substitution so export newlines survive:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("$pipestatus[1]"),
+        "fish wrapper must read awswit's status from pipestatus, not string collect:\n{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fish_named_switch_preserves_multiline_export() {
+    if Command::new("fish").arg("--version").output().is_err() {
+        eprintln!("skipping: fish not installed");
+        return;
+    }
+    let home = setup_aws_home();
+    let script = format!(
+        r#"
+set -gx AWS_CONFIG_FILE '{config}'
+set -gx AWS_SHARED_CREDENTIALS_FILE '{creds}'
+set -gx HOME '{home}'
+set -gx USERPROFILE '{home}'
+set -gx AWSWIT_SHELL fish
+set -e AWS_PROFILE
+set -gx AWS_ACCESS_KEY_ID AKIA_STALE
+command {bin} init fish | source
+awswit default
+echo "PROFILE=$AWS_PROFILE"
+echo "REGION=$AWS_REGION"
+echo "ACCESS=$AWS_ACCESS_KEY_ID"
+"#,
+        bin = env!("CARGO_BIN_EXE_awswit"),
+        config = home.path().join("config").display(),
+        creds = home.path().join("credentials").display(),
+        home = home.path().display(),
+    );
+    let output = Command::new("fish")
+        .args(["-c", &script])
+        .env("PATH", {
+            let mut path = std::env::var("PATH").unwrap_or_default();
+            if let Some(dir) = std::path::Path::new(env!("CARGO_BIN_EXE_awswit")).parent() {
+                path = format!("{}:{}", dir.display(), path);
+            }
+            path
+        })
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fish wrapper failed: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("PROFILE=default"),
+        "named switch did not set AWS_PROFILE:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("REGION=us-west-2"),
+        "named switch did not set AWS_REGION:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ACCESS="),
+        "expected ACCESS= line:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("ACCESS=AKIA_STALE"),
+        "stale access key survived fish named switch:\n{stdout}"
+    );
 }

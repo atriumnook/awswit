@@ -3,6 +3,13 @@
 [workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
 ci = ["github"]
+# release.yml keeps a hand-added `workflow_dispatch` so release-plz can kick
+# cargo-dist when it tags with GITHUB_TOKEN (tag-push events from that token
+# do not start other workflows). Do not set `dispatch-releases = true`: that
+# replaces tag-push triggers and would break a human `git push origin vX.Y.Z`.
+# `dist plan` otherwise fails with "out of date contents"; this is the
+# documented way to keep the intentional CI edit.
+allow-dirty = ["ci"]
 installers = ["shell", "powershell"]
 targets = [
     "aarch64-apple-darwin",

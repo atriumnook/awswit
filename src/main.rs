@@ -135,9 +135,12 @@ fn switch_profile(mut ctx: AppContext) -> Result<(), AwswitError> {
 /// saved on-toggle while main saved a stale snapshot afterwards, silently
 /// reverting favorite changes.
 fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), AwswitError> {
-    let want_picker = ctx.args.profile_name.is_none()
-        && !ctx.args.no_interactive
-        && std::io::stdout().is_terminal();
+    // The shell wrapper runs `awswit --shell-export` inside `$(...)`, so stdout
+    // is a pipe even in interactive use. Gate the picker on stdin/stderr being
+    // a terminal instead — the picker renders to stderr, leaving stdout for the
+    // `eval`-able export payload. See `tui::should_open_picker`.
+    let want_picker =
+        tui::should_open_picker(ctx.args.profile_name.is_some(), ctx.args.no_interactive);
 
     if want_picker {
         let outcome = pick_profile(ctx)?;
@@ -411,6 +414,13 @@ fn exec_command(
         child.env_remove("AWS_REGION");
     }
     child.env_remove("AWS_DEFAULT_REGION");
+    // Inherited env credentials outrank AWS_PROFILE in the SDK chain, so a
+    // stale AWS_ACCESS_KEY_ID from aws-vault / awsume / a previous SSO
+    // export would silently win inside the child. Clear them the same way
+    // the shell-export path does.
+    for var in awswit::shell::CREDENTIAL_VARS {
+        child.env_remove(*var);
+    }
 
     child.stdin(Stdio::inherit());
     child.stdout(Stdio::inherit());

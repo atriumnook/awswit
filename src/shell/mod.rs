@@ -1,3 +1,3 @@
 mod export;
 
-pub use export::{ShellExporter, ShellType};
+pub use export::{CREDENTIAL_VARS, MANAGED_VARS, ShellExporter, ShellType};

@@ -1,8 +1,29 @@
 name: release-plz
 
+# Split of ownership:
+#   release-plz  — version bump PR + git tag (no GitHub Release, no crates.io)
+#   cargo-dist   — GitHub Release + installer/binary artifacts (release.yml)
+#
+# Why v0.1.0 has a git tag but no GitHub Release:
+# GitHub will not start other workflows from a `push` event created with
+# `secrets.GITHUB_TOKEN` (recursion guard). release-plz tagged v0.1.0 with
+# GITHUB_TOKEN, so cargo-dist's tag-triggered Release workflow never ran,
+# `releases/latest` stayed on v0.0.2, and the installer URLs served old
+# binaries. crates.io is intentionally unpublished (`publish = false`).
+#
+# Fix (both, so the next tag works even before a PAT is added):
+# 1. Prefer secret RELEASE_PLZ_TOKEN (PAT / GitHub App) so the tag push
+#    itself triggers release.yml.
+# 2. If that secret is unset, dispatch release.yml via workflow_dispatch
+#    (the documented exception to the GITHUB_TOKEN recursion guard).
+# Keep `workflow_dispatch:` on .github/workflows/release.yml if you
+# regenerate it with `dist generate` (Cargo.toml allow-dirty = ["ci"]
+# so `dist plan` accepts that intentional edit).
+
 permissions:
   pull-requests: write
   contents: write
+  actions: write
 
 on:
   push:
@@ -26,11 +47,37 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT so the tag push triggers cargo-dist. Create a fine-grained
+          # token with Contents: write, Pull requests: write, Actions: write
+          # on this repo and store it as RELEASE_PLZ_TOKEN. Falls back to
+          # GITHUB_TOKEN (tag push will not trigger release.yml; the next
+          # step dispatches it).
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Dispatch cargo-dist when the tag push cannot trigger workflows
+        if: ${{ steps.release.outputs.releases != '' && steps.release.outputs.releases != '[]' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release.outputs.releases }}
+          RELEASE_PLZ_TOKEN_SET: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "${RELEASE_PLZ_TOKEN_SET}" = "true" ]; then
+            echo "RELEASE_PLZ_TOKEN is set; the tag push should trigger the cargo-dist Release workflow."
+            exit 0
+          fi
+          echo "GITHUB_TOKEN cannot trigger tag-push workflows; dispatching cargo-dist Release."
+          echo "${RELEASES}" | jq -r '.[].tag // empty' | while read -r tag; do
+            if [ -z "${tag}" ]; then
+              continue
+            fi
+            echo "gh workflow run Release --ref ${tag}"
+            gh workflow run Release --ref "${tag}"
+          done
 
   # Create / update the release PR with version bumps and changelog.
   release-plz-pr:
@@ -52,4 +99,4 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

@@ -21,10 +21,14 @@ function awswit
         command awswit $argv
         return
     end
-    set -l _out (command awswit --shell-export $argv)
-    set -l _rc $status
+    # Fish command substitution splits on newlines into a list; `echo $_out`
+    # then joins with spaces, collapsing `export`/`unset` lines into one
+    # broken `source` statement. `string collect` keeps the payload as a
+    # single argument with newlines intact.
+    set -l _out (command awswit --shell-export $argv | string collect)
+    set -l _rc $pipestatus[1]
     if test $_rc -eq 0; and test -n "$_out"
-        echo $_out | source
+        printf '%s\n' $_out | source
     end
     return $_rc
 end
