@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.1
+
+_Released on 2026-10-29_
+
+
+### Bug Fixes
+
+- *(tui)* Honor NO_COLOR in the picker
+- *(shell)* Quote fish values with fish escaping rules
+- *(cli)* Never substitute a guessed profile for an unknown name
+- Picker under shell wrapper, clear stale creds, preserve fish newlines
+
+
+### CI
+
+- *(release)* Take the latest version from git tags
+- Test the pinned toolchain once per OS and add a shell integration job
+- Allow-dirty cargo-dist CI so dist plan accepts workflow_dispatch
+- Make the next git tag produce a GitHub Release
+
+
+### Documentation
+
+- Bring README_ja in line with the English README
+
+
+### Performance
+
+- *(tui)* Buffer picker output written to stderr
+
+
+### Tests
+
+- Drive the shell integration end to end in bash, zsh and fish
+- Unbuffer PTY helper protocol so wrapper regressions parse cleanly
+
+
 ## v0.1.0
 
 _Released on 2026-05-13_
