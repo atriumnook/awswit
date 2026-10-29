@@ -8,6 +8,11 @@ publish = false
 # workaround. Do not set cargo-dist `dispatch-releases = true`: that replaces
 # tag-push triggers and would break a human `git push origin vX.Y.Z`.
 git_release_enable = false
+# Take the latest released version from git tags (`v{{ version }}`), not
+# crates.io. With `publish = false` the crate is never on the registry, so
+# release-plz would otherwise treat 0.1.0 as the first release, see the
+# existing v0.1.0 tag, and never propose a version bump.
+git_only = true
 # Push the tag so dist's release workflow runs (via PAT, or via explicit dispatch).
 git_tag_enable = true
 # Update CHANGELOG.md from conventional commits.
