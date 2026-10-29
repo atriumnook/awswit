@@ -47,6 +47,7 @@ pub struct ProfilePicker<'a> {
     profiles: &'a HashMap<String, Profile>,
     history: ProfileHistory,
     theme: Theme,
+    query: String,
 }
 
 impl<'a> ProfilePicker<'a> {
@@ -54,12 +55,19 @@ impl<'a> ProfilePicker<'a> {
         Self {
             profiles,
             history: ProfileHistory::default(),
-            theme: Theme::default(),
+            theme: Theme::from_env(),
+            query: String::new(),
         }
     }
 
     pub fn with_history(mut self, history: ProfileHistory) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Open with `query` already typed into the filter.
+    pub fn with_query(mut self, query: &str) -> Self {
+        self.query = query.to_string();
         self
     }
 
@@ -100,14 +108,17 @@ impl<'a> ProfilePicker<'a> {
         // and `$(awswit pick)` does the same. The TUI must not write there or
         // it corrupts the export payload / selected name. stderr (and
         // crossterm's `/dev/tty` fallback for input) stays connected to the
-        // terminal under command substitution.
-        let mut stderr = io::stderr();
+        // terminal under command substitution. stderr is unbuffered, so wrap
+        // it: otherwise every cell update is its own write(2), thousands per
+        // frame, which is slow and tears over SSH. ratatui flushes per frame.
+        let mut stderr = io::BufWriter::new(io::stderr());
         execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
         let _screen = ScreenGuard;
         let backend = CrosstermBackend::new(stderr);
         let mut terminal = Terminal::new(backend)?;
 
         let mut app = PickerApp::new(self.profiles, self.history, self.theme);
+        app.set_query(self.query);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run(&mut terminal)));
@@ -148,6 +159,12 @@ impl PickerApp {
         app
     }
 
+    fn set_query(&mut self, query: String) {
+        self.cursor_pos = query.len();
+        self.query = query;
+        self.update_filter();
+    }
+
     /// (Re)compute the entries vec and the initial sort.
     fn rebuild_entries(&mut self, profiles: &HashMap<String, Profile>) {
         self.entries = profiles
@@ -172,7 +189,7 @@ impl PickerApp {
 
     fn run(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+        terminal: &mut Terminal<CrosstermBackend<io::BufWriter<io::Stderr>>>,
     ) -> io::Result<PickerOutcome> {
         loop {
             terminal.draw(|f| self.render(f))?;

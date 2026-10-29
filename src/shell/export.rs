@@ -3,6 +3,12 @@ fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Fish-quote a value. Inside fish single quotes `\\` and `\'` are escapes,
+/// so POSIX quoting would turn a literal `\\` into `\`.
+fn fish_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
 /// PowerShell-quote a value by wrapping in single quotes and escaping embedded ones.
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -175,7 +181,7 @@ impl ShellExporter {
             ShellType::Bash | ShellType::Zsh => {
                 format!("export {}={}\n", name, posix_quote(value))
             }
-            ShellType::Fish => format!("set -gx {} {}\n", name, posix_quote(value)),
+            ShellType::Fish => format!("set -gx {} {}\n", name, fish_quote(value)),
             ShellType::PowerShell => format!("$env:{} = {}\n", name, ps_quote(value)),
         }
     }
@@ -249,6 +255,11 @@ mod tests {
                 assert!(out.contains(v), "{:?} export missing clear of {}", shell, v);
             }
         }
+    }
+
+    #[test]
+    fn fish_quote_escapes_backslash_and_quote() {
+        assert_eq!(fish_quote(r"a\\b'c"), r"'a\\\\b\'c'");
     }
 
     #[test]

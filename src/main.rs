@@ -139,18 +139,11 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), 
     // is a pipe even in interactive use. Gate the picker on stdin/stderr being
     // a terminal instead — the picker renders to stderr, leaving stdout for the
     // `eval`-able export payload. See `tui::should_open_picker`.
-    let want_picker =
-        tui::should_open_picker(ctx.args.profile_name.is_some(), ctx.args.no_interactive);
+    let can_pick = tui::should_open_picker(false, ctx.args.no_interactive);
 
-    if want_picker {
-        let outcome = pick_profile(ctx)?;
-        match outcome.selected {
-            Some(name) => return Ok((name, outcome.history)),
-            None => return Err(AwswitError::UserCancelled),
-        }
+    if ctx.args.profile_name.is_none() && can_pick {
+        return picked(pick_profile(ctx, None)?);
     }
-
-    let history = ctx.history.clone();
 
     // In scripted / `-n` mode we refuse to invent a target: a stray `awswit -n`
     // in a CI step or with `$AWS_PROFILE` accidentally unset would otherwise
@@ -173,26 +166,28 @@ fn resolve_target_profile(ctx: &AppContext) -> Result<(String, ProfileHistory), 
     };
 
     if ctx.profiles.contains_key(&candidate) {
-        return Ok((candidate, history));
+        return Ok((candidate, ctx.history.clone()));
     }
 
-    // Auto-fuzzy substitution is a convenience for interactive use. In
-    // scripted / `-n` mode it's a footgun — a CI typo would silently target
-    // a different AWS account — so we surface "did you mean…?" suggestions
-    // instead of substituting.
-    let interactive_mode = !ctx.args.no_interactive;
-    let allow_fuzzy = interactive_mode && std::env::var("AWSWIT_NO_FUZZY").is_err();
-    if allow_fuzzy
-        && let Some(matched) = utils::fuzzy::find_closest_profile(&candidate, &ctx.profiles)
-    {
-        eprintln!(
-            "awswit: fuzzy-matched '{}' to '{}'. Set AWSWIT_NO_FUZZY=1 to disable.",
-            candidate, matched
-        );
-        return Ok((matched, history));
+    // Never substitute a different profile for an unknown name: profiles
+    // map to accounts, and a "closest" guess (`xyz` is three edits from
+    // `dev`) switches the shell to an account the user did not name. With a
+    // terminal, let the user confirm in the picker, seeded with what they
+    // typed; otherwise fail with "did you mean…?" suggestions.
+    let seed_picker =
+        ctx.args.profile_name.is_some() && can_pick && std::env::var("AWSWIT_NO_FUZZY").is_err();
+    if seed_picker {
+        return picked(pick_profile(ctx, Some(&candidate))?);
     }
 
     Err(profile_not_found_with_hint(&candidate, &ctx.profiles))
+}
+
+fn picked(outcome: tui::picker::PickerOutcome) -> Result<(String, ProfileHistory), AwswitError> {
+    match outcome.selected {
+        Some(name) => Ok((name, outcome.history)),
+        None => Err(AwswitError::UserCancelled),
+    }
 }
 
 /// Build a ProfileNotFound error whose message includes up to three
@@ -224,21 +219,27 @@ fn profile_not_found_with_hint(name: &str, profiles: &HashMap<String, Profile>) 
     }
 }
 
-fn pick_profile(ctx: &AppContext) -> Result<tui::picker::PickerOutcome, AwswitError> {
+fn pick_profile(
+    ctx: &AppContext,
+    query: Option<&str>,
+) -> Result<tui::picker::PickerOutcome, AwswitError> {
     let use_fzf = ctx.args.use_fzf
         || std::env::var("AWSWIT_USE_FZF")
             .map(|v| tui::fzf::is_truthy(&v))
             .unwrap_or(false);
 
     if use_fzf {
-        let name = tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history)?;
+        let name = tui::fzf::select_with_fzf(&ctx.profiles, &ctx.history, query)?;
         return Ok(tui::picker::PickerOutcome {
             selected: Some(name),
             history: ctx.history.clone(),
         });
     }
 
-    let picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
+    let mut picker = tui::ProfilePicker::new(&ctx.profiles).with_history(ctx.history.clone());
+    if let Some(q) = query {
+        picker = picker.with_query(q);
+    }
     // `io::Error` already converts via `#[from]`; forwarding it preserves
     // the kind (`PermissionDenied`, `NotConnected`, etc.) so users can tell
     // "no /dev/tty" from "the picker crashed".
@@ -451,7 +452,7 @@ fn exec_command(
 /// only the profile name.
 fn pick(args: Args) -> Result<i32, AwswitError> {
     let ctx = AppContext::build(args)?;
-    let outcome = pick_profile(&ctx)?;
+    let outcome = pick_profile(&ctx, None)?;
     match outcome.selected {
         Some(name) => {
             let mut history = outcome.history;

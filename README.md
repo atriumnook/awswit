@@ -57,7 +57,7 @@ awswit init powershell | Invoke-Expression
 
 ```text
 awswit                       # interactive picker — sets AWS_PROFILE in the shell
-awswit prod                  # switch directly
+awswit prod                  # switch directly (unknown name → picker seeded with it)
 awswit pick                  # interactive picker — prints selection to stdout
 awswit which                 # what's active right now?
 awswit doctor                # audit ~/.aws/config and SSO tokens
@@ -114,6 +114,11 @@ not stdout. The documented wrapper (`eval "$(awswit init bash)"`) captures
 stdout via `$()`, and `$(awswit pick)` does the same; the TUI draws on
 stderr so the captured payload stays clean. `--fzf` inherits stderr so
 fzf's UI still reaches the terminal under the wrapper.
+
+awswit never replaces an unknown name with a "close" profile: profiles map
+to accounts, so a guess could switch you into the wrong one. With a
+terminal, it opens the picker filtered by what you typed and waits for
+`Enter`; without one, it fails with "did you mean…?" suggestions.
 
 The AWS SDK resolves credentials from there — IAM keys, SSO, role
 assumption, `credential_process`, anything you've already configured.
@@ -195,7 +200,7 @@ awswit completions <shell>       print a tab-completion script
 | `AWS_PROFILE`                 | default for `-n` when no PROFILE argument is given                      |
 | `AWS_VAULT`                   | if set, awswit warns that you're inside an aws-vault session            |
 | `NO_COLOR`                    | disables color (de-facto standard)                                      |
-| `AWSWIT_NO_FUZZY`             | disable fuzzy matching — require an exact profile-name match            |
+| `AWSWIT_NO_FUZZY`             | unknown PROFILE fails instead of opening the picker seeded with it      |
 | `AWSWIT_USE_FZF`              | use external `fzf` (same as `--fzf`)                                    |
 | `AWSWIT_FZF_OPTS`             | extra options for `fzf` (dangerous options are stripped)                |
 | `AWSWIT_SHELL`                | force a shell flavor (`bash` / `zsh` / `fish` / `powershell`)           |

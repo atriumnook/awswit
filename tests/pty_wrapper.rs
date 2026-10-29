@@ -270,3 +270,25 @@ fn picker_esc_cancels_without_export() {
         result.stdout
     );
 }
+
+/// An unknown name with a terminal available opens the picker seeded with
+/// what was typed, so the user confirms the target instead of awswit
+/// guessing it. The alternate-screen sequence proves the TUI ran; a stderr
+/// status line containing "awswit" would not.
+#[test]
+fn unknown_profile_opens_picker_seeded_with_query() {
+    let home = setup_aws_home();
+    let result = run_pty("enter", &["--shell-export", "dv"], &home);
+    assert!(
+        result.pty.contains("\u{1b}[?1049h"),
+        "expected the picker instead of a silent substitution; stdout={:?}\npty={:?}",
+        result.stdout,
+        result.pty
+    );
+    assert_eq!(result.exit, 0, "pty={:?}", result.pty);
+    assert!(
+        result.stdout.contains("export AWS_PROFILE='dev'"),
+        "the seeded query should leave only `dev` to select: {:?}",
+        result.stdout
+    );
+}
